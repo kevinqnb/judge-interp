@@ -1,0 +1,21 @@
+[SIGNOFF 06d04c2]: human comprehension and risk attestation
+
+Skeptical-tier signoff of 06d04c2, which vendors the third-party git-signoff skill (jerrylin96/git-signoff @ c6143d55) plus its attest.py/verify_signoff.py helpers, a domain-science interview profile, an inert GitHub ruleset template, a CI workflow running verify@verify-v1.4, and a README badge. No judge-interp research or scoring code is touched; the flagged science signals are spurious matches against the vendored profile's own prose, and the skeptical tier is set by executable blast radius (~2100 lines). Reviewer was initially unoriented, received a full walkthrough of the enforcement chain, attestation mechanics, and the two version pins, then re-answered scenarios on enforcement gaps, verifier drift, and the surrogate-vs-comprehension boundary. Reviewer accepts ownership of the badge claim including the pre-gating window, the vendored code in CI, and drift maintenance.
+
+Signoff-Spec-Version: 1.0
+Signoff-Status: VERIFIED_BY_HUMAN
+Signoff-Timestamp: 2026-09-10T15:17:37Z
+Signoff-Base-SHA: dcc24fd93928e7903c9fb548caae273cfe85ce70
+Signoff-Reviewed-Commit-SHA: 06d04c2e33a422e0e15c93cea29469781ff15897
+Signoff-Reviewed-Tree-SHA: 84325cdd68482bd654d5464d1307d6e71b901a5f
+Signoff-Harness-ID: claude-code
+Signoff-Conversation-ID: 8b23f5ef-9df8-4f7c-9f7b-2e9ff0371356
+Signoff-Transcript-Digest: sha256:a549018d6c7d92a5f71fb1d6dfaa5dc4d58ddeb0fb2f0aaee4b4ee4c43a7b25a
+Signoff-Transcript-Bytes: 560896
+Signoff-Tradeoff: Adopts ~2100 lines of third-party vendored code (jerrylin96/git-signoff @ c6143d55, ref init-v7) into CI and the signoff workflow, reviewed at README level only; accepted because the source is trusted and the audit-trail value justifies it.
+Signoff-Risk: ruleset.json is an inert template until manually imported into GitHub repo settings; until then the 'attested by humans' badge can show green while unattested PRs stay mergeable to main, which could mislead collaborators and future users.
+Signoff-Risk: Local verify_signoff.py is pinned to init-v7 while CI runs jerrylin96/git-signoff/verify@verify-v1.4, an independently-moving tag; a stricter upstream release can turn a previously-green attestation red in CI with no branch change. Mitigation: re-run /git-signoff to re-attest.
+Signoff-Risk: This first attestation is produced and self-checked by the same vendored code it attests (self-referential bootstrap).
+Signoff-Risk: attest.py needs Python 3.10+ but the cluster default python3 is 3.6; the working 'uv run --python 3.12' invocation is not yet recorded in CLAUDE.local.md, so a fresh session re-hits the failure.
+Signoff-Verified-By: quinnk@bu.edu
+Signoff-Agent: harness=claude-code/N/A model=claude-sonnet-5 reasoning=high interview=skeptical/domain-science/sha256:f8508fa3740f
