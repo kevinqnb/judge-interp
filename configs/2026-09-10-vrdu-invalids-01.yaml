@@ -1,0 +1,44 @@
+id: 2026-09-10-vrdu-invalids-01
+project: judge-interp
+description: >-
+  Populate the VRDU main/line datasets with deliberately-invalid extractions by
+  resampling k fields per valid base row.
+seed: 0
+params:
+  data_root: data/vrdu
+
+  main:
+    # For each k in this inclusive range, one invalid row is generated per valid
+    # base row. Value pools are compiled per split (train pool for train.json).
+    k_range: [1, 9]
+    pool_scope: per_split
+
+  line:
+    # Same idea, but value pools are compiled per document, and num_invalid_fields
+    # is written on every invalid row.
+    k_range: [1, 4]
+    pool_scope: per_document
+
+  # A field whose base value is null MAY be chosen for invalidation and given a
+  # non-null value; a non-null base value is NEVER replaced with null.
+  corrupt_from_null: true
+  corrupt_to_null: false
+
+  dates:
+    # Ordering enforced on every generated row: parsed(from) <= parsed(to)
+    # whenever both are non-null. Date-field pools hold only values that parse as
+    # m/d/y, so an OCR fragment (e.g. "02/21/") is never emitted as an invalid
+    # date.
+    main_fields: [flight_from, flight_to]
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+
+    # Main date pools also carry these two synthetic dates, chosen to parse before
+    # and after every real date in the corpus, so an ordered pair always exists.
+    main_sentinels: ["01/01/00", "12/31/49"]
+
+    # The line date fields share one pool: every parseable date on the page --
+    # both program-date columns plus these main-row fields for the same document.
+    # No sentinels: a line date is only ever corrupted to a date really present
+    # on that page, else left alone.
+    line_context_fields: [flight_from, flight_to]
