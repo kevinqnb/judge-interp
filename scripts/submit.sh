@@ -33,11 +33,17 @@ PY
 mkdir -p "$REPO_ROOT/scripts/out"
 JOB_NAME="x${ID}"
 
+# REPO_ROOT is passed through as JOB_REPO_ROOT rather than re-derived inside
+# _run_experiment_job.sh: SGE stages the submitted script into a per-host
+# spool dir (/var/spool/sge/<host>/...) and runs it from there, so a
+# BASH_SOURCE-based lookup on the compute node resolves to the spool copy's
+# location, not this repo (job 7520650, 2026-09-10, confirmed this).
+
 set -x
 qsub -N "$JOB_NAME" -P "$SGE_PROJECT" -j y \
      -o "$REPO_ROOT/scripts/out/${ID}.log" -m e \
      -l "h_rt=${WALLTIME}" -pe omp "$OMP" \
      -l gpus=1 -l "gpu_type=${GPU_TYPE}" \
      -l "gpu_memory=${GPU_MEMORY}" -l "gpu_c=${GPU_C}" \
-     -v "ID=${ID}" \
+     -v "ID=${ID},JOB_REPO_ROOT=${REPO_ROOT}" \
      "$REPO_ROOT/scripts/_run_experiment_job.sh" "$ID"
