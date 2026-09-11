@@ -1,0 +1,19 @@
+[SIGNOFF 311bb50]: human comprehension and risk attestation
+
+Skeptical-tier signoff on branch setup (73079f4..311bb50): judge-interp core (RepresentationLM, instruction prompts), VRDU dataset build + invalidation generator, representation-collection configs/scripts, and tests are attested as validated infrastructure. analysis/representations.py's current line/train PCA numbers are explicitly NOT attested as publication-ready pending a document-clustering correction to the statistical test and accounting for capped invalid rows; main/train's result (rho=0.88, monotonic, clean shuffled-label control) is not in question.
+
+Signoff-Spec-Version: 1.0
+Signoff-Status: VERIFIED_BY_HUMAN
+Signoff-Timestamp: 2026-09-11T13:28:37Z
+Signoff-Base-SHA: 73079f43fde2d4069ef1956c5cc0b2ee1bb1b15b
+Signoff-Reviewed-Commit-SHA: 311bb502cb9cba7545aa37b4a1a1f6f3098f8744
+Signoff-Reviewed-Tree-SHA: 00d094f7fd2653f0f2e0663fe85b747491a132a8
+Signoff-Harness-ID: claude-code
+Signoff-Conversation-ID: 249bd873-5034-401b-b803-f85b85f557cb
+Signoff-Transcript-Digest: sha256:4ee6d26aa2bfdf7e910bbf18cbcf74578a28866d269dd91c6d42ac9546a0b93f
+Signoff-Transcript-Bytes: 740892
+Signoff-Tradeoff: line/train PCA spectrum result (rho=0.12, non-monotonic centroids) is confounded by document pseudo-replication (509 docs -> 38612 rows) and ~13.5% capped invalid-row events blending k into lower num_invalid_fields groups; not yet corrected, not citable as-is
+Signoff-Tradeoff: verify_read_point determinism gate is a per-config boolean with no enforced convention preventing an unverified (model, device, dtype) combination from shipping with it off
+Signoff-Risk: both known gaps above are owned by Kevin with a committed fix but no tracked artifact (issue/note/TODO) exists yet beyond this conversation
+Signoff-Verified-By: quinnk@bu.edu
+Signoff-Agent: harness=claude-code/N/A model=claude-sonnet-5 reasoning=high interview=skeptical/domain-science/sha256:f8508fa3740f
