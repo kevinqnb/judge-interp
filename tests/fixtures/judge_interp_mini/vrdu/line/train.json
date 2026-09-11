@@ -1,0 +1,40 @@
+[
+  {
+    "document_id": "doc-beta",
+    "line_index": 0,
+    "valid": true,
+    "k": 0,
+    "num_invalid_fields": 0,
+    "invalid_fields": [],
+    "advertiser": "Bravo for Senate",
+    "agency": null,
+    "property": "WBBB",
+    "tv_address": null,
+    "product": null,
+    "contract_num": "67890",
+    "channel": "7",
+    "program_desc": "Evening News",
+    "program_start_date": "02/10/20",
+    "program_end_date": "02/17/20",
+    "sub_amount": null
+  },
+  {
+    "document_id": "doc-beta",
+    "line_index": 0,
+    "valid": false,
+    "k": 1,
+    "num_invalid_fields": 1,
+    "invalid_fields": ["program_end_date"],
+    "advertiser": "Bravo for Senate",
+    "agency": null,
+    "property": "WBBB",
+    "tv_address": null,
+    "product": null,
+    "contract_num": "67890",
+    "channel": "7",
+    "program_desc": "Evening News",
+    "program_start_date": "02/10/20",
+    "program_end_date": "02/10/20",
+    "sub_amount": null
+  }
+]
