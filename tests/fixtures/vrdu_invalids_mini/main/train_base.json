@@ -1,0 +1,44 @@
+[
+  {
+    "document_id": "m1", "valid": true,
+    "advertiser": "Alpha Inc", "agency": null, "property": "KAAA", "tv_address": "1 A St",
+    "product": "Prod1", "contract_num": "C001",
+    "flight_from": "01/10/20", "flight_to": "02/10/20", "gross_amount": "$100.00"
+  },
+  {
+    "document_id": "m2", "valid": true,
+    "advertiser": "Beta LLC", "agency": "Ag One", "property": "KBBB", "tv_address": "2 B St",
+    "product": "Prod2", "contract_num": "C002",
+    "flight_from": "03/05/20", "flight_to": "04/05/20", "gross_amount": "$200.00"
+  },
+  {
+    "document_id": "m3", "valid": true,
+    "advertiser": "Gamma Co", "agency": "Ag Two", "property": "KCCC", "tv_address": null,
+    "product": "Prod3", "contract_num": "C003",
+    "flight_from": "05/20/", "flight_to": "06/20/20", "gross_amount": "$300.00"
+  },
+  {
+    "document_id": "L1", "valid": true,
+    "advertiser": "Alpha Inc", "agency": null, "property": "KAAA", "tv_address": "1 A St",
+    "product": "Prod1", "contract_num": "C001",
+    "flight_from": "01/01/20", "flight_to": "01/31/20", "gross_amount": "$1,000.00"
+  },
+  {
+    "document_id": "L2", "valid": true,
+    "advertiser": "Beta LLC", "agency": "Ag One", "property": "KBBB", "tv_address": "2 B St",
+    "product": "Prod2", "contract_num": "C002",
+    "flight_from": null, "flight_to": null, "gross_amount": "$99.00"
+  },
+  {
+    "document_id": "L3", "valid": true,
+    "advertiser": "Gamma Co", "agency": "Ag Two", "property": "KCCC", "tv_address": "3 C St",
+    "product": "Prod3", "contract_num": "C003",
+    "flight_from": null, "flight_to": null, "gross_amount": "$5.00"
+  },
+  {
+    "document_id": "L5", "valid": true,
+    "advertiser": "Zeta Media", "agency": null, "property": "KZZZ", "tv_address": "5 Z St",
+    "product": "Prod5", "contract_num": "C005",
+    "flight_from": null, "flight_to": null, "gross_amount": "$50.00"
+  }
+]

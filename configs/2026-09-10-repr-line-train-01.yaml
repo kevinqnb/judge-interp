@@ -1,0 +1,37 @@
+id: 2026-09-10-repr-line-train-01
+project: judge-interp
+description: >-
+  Collect last-layer (post-final-norm) judge representations for every row of
+  data/vrdu/line/train.json (38612 rows: 7732 valid + invalid rows for k=1..4,
+  7720/group by k but num_invalid_fields counts differ (7732/8185/8999/9123/4573)
+  because the channel-resampling collision rule can change how many fields end
+  up actually invalidated -- see prompts/build_vrdu_invalids.py; color the PCA
+  by num_invalid_fields, not k) using Qwen2.5-7B-Instruct. Feeds
+  analysis/representations.ipynb's PCA-by-num_invalid_fields analysis.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: line
+  split: train
+  layers: ["last"]
+  dtype: bfloat16
+  device: cuda
+  include_cohesion: true
+  context_char_limit: 100000
+  row_subset: null
+  verify_read_point: true
+
+  # -- scripts/submit.sh resources --
+  gpu_type: L40S
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # See 2026-09-10-repr-main-train-01.yaml for the <=2.5s/row basis (unconfirmed
+  # pending 2026-09-10-repr-smoke-01). 38612 x 2.5s = 26.8h; walltime below is
+  # a ~1.8x margin over that, not a "definitely enough" figure -- this is by
+  # far the largest of the four jobs. If it still gets killed at the wall,
+  # resubmitting the same id is safe: RepresentationLM.collect() shards output
+  # per document_id under artifacts/cache/ and skips documents whose shard is
+  # already complete, so a re-run only redoes the unfinished documents.
+  walltime: "48:00:00"

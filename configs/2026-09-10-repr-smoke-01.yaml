@@ -1,0 +1,49 @@
+id: 2026-09-10-repr-smoke-01
+project: judge-interp
+description: >-
+  Rung-2/3 GPU smoke for the real Qwen2.5-7B-Instruct representation-collection
+  pipeline (2026-09-10-judge-representationlm-01's build-time smoke only ran the
+  0.5B model on CPU). 40 rows sampled from main/train (row_subset samples
+  across the whole 5130-row split, spanning many of its 513 documents, so this
+  gives a rough read across the corpus's ~7x context-length spread (median
+  2550 / max 17745 tokens) rather than one length only). Confirms on this
+  exact (model, device, dtype): the qsub job body resolves nnsight/nnterp/torch
+  under `uv run` with no --extra flag (checked interactively -- see devlog),
+  the commented-out `module load cuda/<ver>` TODO in _run_experiment_job.sh
+  either isn't needed or needs filling in, verify_read_point passes under
+  bfloat16 on the assigned GPU, and verdict_recognised_rate ~= 1.0. Even at 40
+  rows this is still a rough rate, not a stable one -- the real per-row
+  timing should come from watching the main/test job's collect() progress
+  lines (`[i/n] doc_id: judging N row(s)`, verbose=True) once it's running,
+  before deciding whether line/train's walltime needs adjusting.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: main
+  split: train
+  layers: ["last"]
+  dtype: bfloat16
+  device: cuda
+  include_cohesion: true
+  # Real OCR corpus max is 75844 chars / 17745 tokens (measured with the real
+  # Qwen2.5-7B-Instruct tokenizer, 2026-09-10); 100000 chars leaves headroom
+  # while still catching an anomalous document (max_position_embeddings=32768,
+  # so even the worst case plus the ~700-token instruction block is nowhere
+  # close to the ceiling).
+  context_char_limit: 100000
+  row_subset: {n: 40, seed: 0}
+  verify_read_point: true
+
+  # -- scripts/submit.sh resources --
+  # L40S/40G/gpu_c 7.0 is the one locally-confirmed-working combination for
+  # qwen-2.5-7b + nnsight/nnterp (scholarlm's judge_synthetic /
+  # judge_real_interp jobs). Model weights are already cached under HF_HOME
+  # (15G, models--Qwen--Qwen2.5-7B-Instruct) so no download is expected here.
+  gpu_type: L40S
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # 40 rows is still negligible; this walltime is really budget for model
+  # load + first-job CUDA/driver surprises.
+  walltime: "01:00:00"

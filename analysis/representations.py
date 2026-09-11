@@ -1,0 +1,253 @@
+"""Representations vs. `num_invalid_fields`
+
+PCA of last-layer judge representations (Qwen2.5-7B-Instruct), colored by
+`num_invalid_fields`, for the main and line **train** datasets separately.
+
+Hypothesis (verbatim, `/experiment` 2026-09-10): each `num_invalid_fields` group
+should form a cluster, or -- more likely -- a spectrum of meshed clusters moving
+in one direction from most-invalid to fully-valid. That would mean the judge's
+internal confidence tracks the *degree* of invalidity, not just a binary
+valid/invalid split.
+
+That's a claim about ordered group centroids along one direction, not about
+visually separated blobs, so the primary output below is the per-group centroid
+table and the Spearman rank correlation between PC1 and `num_invalid_fields` --
+the scatter plot is illustration only (and gets unreadable at line-train's 38k
+points in 5 colors, so it's subsampled).
+
+Runs this script reads (see `configs/`):
+- `2026-09-10-repr-main-train-01` -- main/train, 5130 rows, `num_invalid_fields`
+  balanced 0..9 (513/group)
+- `2026-09-10-repr-line-train-01` -- line/train, 38612 rows, `num_invalid_fields`
+  in 0..4 (unbalanced: 7732/8185/8999/9123/4573 -- see that config's description
+  for why `k` and `num_invalid_fields` diverge on line rows)
+
+Before trusting any of this, check `metrics.json` for the run:
+`verdict_recognised_rate` should be ~1.0 and `judge_accuracy` should be well
+above chance. `load_run` below hard-asserts on both rather than just printing
+them, since a judge that can't do the task at all has no reason to have an
+interpretable confidence spectrum.
+
+PCA is centering-only (no per-feature z-scoring) since the representations are
+post-final-norm rows that are already comparably scaled -- that's a knob, noted
+here so it doesn't get lost.
+
+Confound to watch for: each main/train document contributes 10 rows (one per
+`num_invalid_fields` group) that all share one OCR context. With 513 documents,
+document identity is a plausible competing source of PC1 variance -- if PC1
+turns out to track "which document is this" rather than validity, the Spearman
+correlation here will look weak or null even if a validity direction exists on a
+lower/less-variance component. `doc_ids` is loaded by `load_run` and unused
+below; if the hypothesis looks falsified, that's the first thing to check (e.g.
+per-document-centered PCA) before concluding there's no spectrum.
+
+Sanity control baked in: a shuffled-label control (permute `num_invalid_fields`,
+recompute the same statistics) runs alongside each real analysis. If the real
+Spearman correlation isn't clearly stronger than the shuffled one, the
+"spectrum" reading isn't supported. The PCA/centroid/correlation logic itself
+was checked against a synthetic fixture with a known injected signal before
+being used here (recovers `|rho| > 0.99` with signal, `|rho| < 0.03` on pure
+noise or shuffled labels) -- see the 2026-09-10 `/experiment` session notes.
+
+Figures are saved to `analysis/figures/` instead of being displayed inline.
+"""
+
+import json
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
+
+RUNS_ROOT = Path(os.environ["RUNS_ROOT"])
+FIGURES_DIR = Path(__file__).parent / "figures"
+
+# One id per (dataset, split) -- see configs/<id>.yaml for the collection params.
+RUN_IDS = {
+    "main": "2026-09-10-repr-main-train-01",
+    "line": "2026-09-10-repr-line-train-01",
+}
+
+# Analysis-only display knob (not an experiment param): scatter plots subsample
+# to this many points so line-train's 38k rows don't render as a solid blob.
+# Centroids and the Spearman correlation always use the full run, unsampled.
+MAX_SCATTER_POINTS = 4000
+SCATTER_SEED = 0
+
+
+def load_run(run_id: str, min_verdict_recognised_rate: float = 0.95) -> dict:
+    """Load one run_experiment.py output dir: the last-layer representation
+    matrix, num_invalid_fields/labels/k, and provenance (run.json + metrics.json).
+
+    Asserts the run actually collected only one layer ("last") -- this script
+    only looks at the final layer, per the experiment description.
+
+    Hard-gates on collection health rather than just printing metrics.json:
+    compute_metrics() in run_experiment.py returns None for judge_accuracy /
+    judge_acc_valid / judge_acc_invalid / mean_p_true_* whenever a mask is
+    empty or nothing was recognised, so a broken judge (e.g. every verdict a
+    space-prefixed " true" that verdict_recognised never matches) would
+    otherwise print "judge_accuracy=None" and let the PCA run anyway on
+    representations from a judge that never produced a usable verdict -- runs
+    cleanly, number quietly wrong, exactly what this repo's CLAUDE.md warns
+    about. Fail loud instead.
+    """
+    run_dir = RUNS_ROOT / run_id
+    manifest = json.loads((run_dir / "run.json").read_text())
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    assert manifest["status"] == "success", f"{run_id}: run.json status is {manifest['status']!r}, not 'success'"
+    assert metrics["judge_accuracy"] is not None, (
+        f"{run_id}: judge_accuracy is null in metrics.json -- no row had a recognised "
+        "verdict. Stop and diagnose the collection run; don't interpret its representations."
+    )
+    assert metrics["verdict_recognised_rate"] >= min_verdict_recognised_rate, (
+        f"{run_id}: verdict_recognised_rate={metrics['verdict_recognised_rate']:.4f} < "
+        f"{min_verdict_recognised_rate} -- too many rows produced an unrecognised verdict "
+        "token for the representations to be trusted as 'the judge's read on this row'."
+    )
+
+    with np.load(run_dir / "artifacts" / "representations.npz", allow_pickle=False) as z:
+        layers = z["layers"].tolist()
+        assert len(layers) == 1, f"{run_id}: expected exactly one collected layer, got {layers}"
+        layer = layers[0]
+        reps = z[f"rep_{layer}"]
+        num_invalid_fields = z["num_invalid_fields"]
+        labels = z["labels"]
+        k = z["k"]
+        doc_ids = z["doc_ids"]
+
+    n = reps.shape[0]
+    assert num_invalid_fields.shape == (n,)
+    assert labels.shape == (n,)
+
+    print(f"{run_id}: status={manifest['status']}, git_sha={manifest['git_sha']}, "
+          f"git_dirty={manifest['git_dirty']}, n_rows={n}, layer={layer}, hidden={reps.shape[1]}, "
+          f"n_documents={len(set(doc_ids.tolist()))}")
+    print(f"  metrics: verdict_recognised_rate={metrics['verdict_recognised_rate']:.4f}, "
+          f"judge_accuracy={metrics['judge_accuracy']}, "
+          f"judge_acc_valid={metrics['judge_acc_valid']}, "
+          f"judge_acc_invalid={metrics['judge_acc_invalid']}")
+
+    return {
+        "run_id": run_id,
+        "layer": layer,
+        "reps": reps,
+        "num_invalid_fields": num_invalid_fields,
+        "labels": labels,
+        "k": k,
+        "doc_ids": doc_ids,
+        "metrics": metrics,
+    }
+
+
+def pca_spectrum_analysis(reps: np.ndarray, num_invalid_fields: np.ndarray, title: str) -> dict:
+    """Fit 2-component PCA (centering only, no per-feature scaling) and test the
+    "spectrum" hypothesis: are PC1 scores monotonic in num_invalid_fields group
+    centroid, and correlated with num_invalid_fields at the row level?
+
+    Returns the fitted pca, the [n, 2] scores, the per-group PC1 centroid table,
+    and the Spearman rho/p between PC1 and num_invalid_fields.
+    """
+    pca = PCA(n_components=2)
+    scores = pca.fit_transform(reps)
+    pc1 = scores[:, 0]
+
+    groups = sorted(set(num_invalid_fields.tolist()))
+    centroids = pd.Series(
+        {g: pc1[num_invalid_fields == g].mean() for g in groups}, name="pc1_centroid"
+    )
+    centroid_vals = centroids.values
+    monotonic = bool(
+        np.all(np.diff(centroid_vals) >= 0) or np.all(np.diff(centroid_vals) <= 0)
+    )
+    rho, p = spearmanr(pc1, num_invalid_fields)
+
+    print(f"[{title}] explained_variance_ratio (PC1, PC2) = {pca.explained_variance_ratio_}")
+    print(f"[{title}] per-group PC1 centroids:\n{centroids}")
+    print(f"[{title}] centroids monotonic in num_invalid_fields: {monotonic}")
+    print(f"[{title}] Spearman(PC1, num_invalid_fields): rho={rho:.4f}, p={p:.3g}")
+
+    return {
+        "pca": pca,
+        "scores": scores,
+        "centroids": centroids,
+        "monotonic": monotonic,
+        "rho": rho,
+        "p": p,
+    }
+
+
+def plot_pc1_pc2(
+    scores: np.ndarray,
+    num_invalid_fields: np.ndarray,
+    title: str,
+    out_path: Path,
+    rng_seed: int = SCATTER_SEED,
+) -> None:
+    n = scores.shape[0]
+    if n > MAX_SCATTER_POINTS:
+        idx = np.random.default_rng(rng_seed).choice(n, size=MAX_SCATTER_POINTS, replace=False)
+    else:
+        idx = np.arange(n)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sc = ax.scatter(
+        scores[idx, 0], scores[idx, 1],
+        c=num_invalid_fields[idx], cmap="viridis", s=8, alpha=0.5, linewidths=0,
+    )
+    fig.colorbar(sc, ax=ax, label="num_invalid_fields")
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title(f"{title} (n={n}, showing {len(idx)})")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[{title}] saved figure to {out_path}")
+
+
+def shuffled_label_control(scores: np.ndarray, num_invalid_fields: np.ndarray, title: str, seed: int = 0) -> dict:
+    """Sanity control: representations don't depend on num_invalid_fields labels,
+    so permuting them against the SAME already-fitted PC1 scores should collapse
+    the Spearman correlation toward 0. If it doesn't, the "spectrum" reading
+    above isn't supported by anything beyond noise/leakage.
+
+    Takes the PCA `scores` already computed by pca_spectrum_analysis (not a
+    re-fit) -- only the label permutation changes, isolating exactly the thing
+    being controlled for.
+    """
+    shuffled = np.random.default_rng(seed).permutation(num_invalid_fields)
+    rho, p = spearmanr(scores[:, 0], shuffled)
+    print(f"[{title} | shuffled-label control] Spearman(PC1, shuffled num_invalid_fields): "
+          f"rho={rho:.4f}, p={p:.3g}")
+    return {"rho": rho, "p": p}
+
+
+def main() -> None:
+    # Main dataset (train): 10 balanced num_invalid_fields groups (0..9, 513 rows each).
+    main_run = load_run(RUN_IDS["main"])
+    main_result = pca_spectrum_analysis(main_run["reps"], main_run["num_invalid_fields"], "main/train")
+    plot_pc1_pc2(
+        main_result["scores"], main_run["num_invalid_fields"], "main/train",
+        FIGURES_DIR / "main_train_pc1_pc2.png",
+    )
+    shuffled_label_control(main_result["scores"], main_run["num_invalid_fields"], "main/train")
+
+    # Line dataset (train): 5 unbalanced num_invalid_fields groups
+    # (0..4: 7732/8185/8999/9123/4573 rows). Scatter is subsampled to
+    # MAX_SCATTER_POINTS; centroids and Spearman rho use every row.
+    line_run = load_run(RUN_IDS["line"])
+    line_result = pca_spectrum_analysis(line_run["reps"], line_run["num_invalid_fields"], "line/train")
+    plot_pc1_pc2(
+        line_result["scores"], line_run["num_invalid_fields"], "line/train",
+        FIGURES_DIR / "line_train_pc1_pc2.png",
+    )
+    shuffled_label_control(line_result["scores"], line_run["num_invalid_fields"], "line/train")
+
+
+if __name__ == "__main__":
+    main()

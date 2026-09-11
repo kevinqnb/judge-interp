@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Regenerable analysis output
+analysis/figures/
+
 # C extensions
 *.so
 
@@ -218,3 +221,7 @@ __marimo__/
 .streamlit/secrets.toml
 notes
 CLAUDE.local.md
+
+# VRDU dataset: structured files (directory.json, main/, line/) are committed;
+# the regenerable OCR text is not — rebuild with scripts/build_vrdu_dataset.py.
+/data/vrdu/ocr/

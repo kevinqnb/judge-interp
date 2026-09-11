@@ -1,0 +1,13 @@
+INVOICE
+Station WAAA
+Advertiser: Acme Committee
+Contract #: 12345
+Billing Address:
+63 Chestnut St.
+Boston, MA 02101
+Flight: 01/05/20 - 01/12/20
+Gross amount: $1,200.00
+
+Alternate remit:
+44 Milton St.
+Albany, NY 12207

@@ -1,0 +1,50 @@
+[
+  {
+    "document_id": "doc-alpha",
+    "valid": true,
+    "k": 0,
+    "num_invalid_fields": 0,
+    "invalid_fields": [],
+    "advertiser": "Acme Committee",
+    "agency": null,
+    "property": "WAAA",
+    "tv_address": "63 Chestnut St.\nBoston, MA 02101",
+    "product": null,
+    "contract_num": "12345",
+    "flight_from": "01/05/20",
+    "flight_to": "01/12/20",
+    "gross_amount": "$1,200.00"
+  },
+  {
+    "document_id": "doc-alpha",
+    "valid": false,
+    "k": 2,
+    "num_invalid_fields": 2,
+    "invalid_fields": ["property", "gross_amount"],
+    "advertiser": "Acme Committee",
+    "agency": null,
+    "property": "WBBB",
+    "tv_address": "63 Chestnut St.\nBoston, MA 02101",
+    "product": null,
+    "contract_num": "12345",
+    "flight_from": "01/05/20",
+    "flight_to": "01/12/20",
+    "gross_amount": "$9,999.00"
+  },
+  {
+    "document_id": "doc-beta",
+    "valid": true,
+    "k": 0,
+    "num_invalid_fields": 0,
+    "invalid_fields": [],
+    "advertiser": "Bravo for Senate",
+    "agency": null,
+    "property": "WBBB",
+    "tv_address": null,
+    "product": null,
+    "contract_num": "67890",
+    "flight_from": "02/10/20",
+    "flight_to": "02/17/20",
+    "gross_amount": null
+  }
+]

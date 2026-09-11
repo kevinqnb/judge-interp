@@ -1,0 +1,34 @@
+id: 2026-09-10-repr-line-test-01
+project: judge-interp
+description: >-
+  Collect last-layer (post-final-norm) judge representations for every row of
+  data/vrdu/line/test.json (7147 rows: 1431 valid + invalid rows for k=1..4,
+  1429/group by k, num_invalid_fields counts 1431/1513/1703/1600/900 -- see
+  2026-09-10-repr-line-train-01.yaml for why k and num_invalid_fields diverge)
+  using Qwen2.5-7B-Instruct. Held-out counterpart to
+  2026-09-10-repr-line-train-01; not used by the initial train-only PCA but
+  collected now so it's available for later held-out checks.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: line
+  split: test
+  layers: ["last"]
+  dtype: bfloat16
+  device: cuda
+  include_cohesion: true
+  context_char_limit: 100000
+  row_subset: null
+  verify_read_point: true
+
+  # -- scripts/submit.sh resources --
+  gpu_type: L40S
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # See 2026-09-10-repr-main-train-01.yaml for the <=2.5s/row basis (unconfirmed
+  # pending 2026-09-10-repr-smoke-01). 7147 x 2.5s = 5.0h; walltime below is a
+  # ~2.4x margin over that. Resumable via the per-document shard cache if
+  # killed early (see 2026-09-10-repr-line-train-01.yaml).
+  walltime: "12:00:00"

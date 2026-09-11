@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "ask": [
+      "Edit(src/judge_interp/instruction_prompts.py)",
+      "Edit(src/judge_interp/representationlm.py)",
+      "Edit(scripts/run_experiment.py)"
+    ]
+  }
+}
