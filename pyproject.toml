@@ -19,6 +19,15 @@ gpu = [
     "transformers>=4.51.0",
 ]
 
+# Notebook analysis of collected representations (analysis/*.ipynb). Never
+# needed on a GPU job node -- kept separate from `gpu`.
+analysis = [
+    "ipykernel>=6.29.0",
+    "matplotlib>=3.9.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.5.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

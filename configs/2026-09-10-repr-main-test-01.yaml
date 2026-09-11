@@ -1,0 +1,31 @@
+id: 2026-09-10-repr-main-test-01
+project: judge-interp
+description: >-
+  Collect last-layer (post-final-norm) judge representations for every row of
+  data/vrdu/main/test.json (1280 rows: 128 valid + 128 x k=1..9 invalid,
+  num_invalid_fields balanced 128/group) using Qwen2.5-7B-Instruct. Held-out
+  counterpart to 2026-09-10-repr-main-train-01; not used by the initial
+  train-only PCA but collected now so it's available for later held-out checks.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: main
+  split: test
+  layers: ["last"]
+  dtype: bfloat16
+  device: cuda
+  include_cohesion: true
+  context_char_limit: 100000
+  row_subset: null
+  verify_read_point: true
+
+  # -- scripts/submit.sh resources --
+  gpu_type: L40S
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # See 2026-09-10-repr-main-train-01.yaml for the <=2.5s/row basis (unconfirmed
+  # pending 2026-09-10-repr-smoke-01). 1280 x 2.5s = 0.9h; padded generously
+  # since fixed model-load time is a larger fraction of a job this small.
+  walltime: "03:00:00"

@@ -1,0 +1,41 @@
+id: 2026-09-10-repr-main-train-01
+project: judge-interp
+description: >-
+  Collect last-layer (post-final-norm) judge representations for every row of
+  data/vrdu/main/train.json (5130 rows: 513 valid + 513 x k=1..9 invalid,
+  num_invalid_fields balanced 513/group) using Qwen2.5-7B-Instruct. Feeds
+  analysis/representations.ipynb's PCA-by-num_invalid_fields analysis.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: main
+  split: train
+  layers: ["last"]
+  dtype: bfloat16
+  device: cuda
+  include_cohesion: true
+  # See 2026-09-10-repr-smoke-01.yaml: measured max 75844 chars / 17745 tokens
+  # across the real OCR corpus; 100000 leaves headroom under the 32768-token
+  # max_position_embeddings ceiling.
+  context_char_limit: 100000
+  row_subset: null
+  # Left on: verify_read_point's bf16-on-GPU determinism check has not yet
+  # passed for this (model, device, dtype) outside 2026-09-10-repr-smoke-01 --
+  # keep it on until the smoke job (or this run itself) confirms it, and it's
+  # cheap regardless (one extra prefill against 5130 rows).
+  verify_read_point: true
+
+  # -- scripts/submit.sh resources --
+  gpu_type: L40S
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Unconfirmed estimate, not a measurement: budgeted at <=2.5s/row (roughly
+  # 2x scholarlm's ~3s/row for qwen-2.5-7b+nnsight on L40S, which judged much
+  # longer full-paper contexts (10-47k tok) with attention-probs + multi-layer
+  # capture -- this run's contexts average 3072 tok / max 17745 tok, single
+  # layer, no attention capture, so should be faster per row). 5130 x 2.5s =
+  # 3.6h; walltime below is a ~2.2x safety margin over that.
+  # Update once 2026-09-10-repr-smoke-01's log.txt gives real seconds/row.
+  walltime: "08:00:00"
