@@ -55,6 +55,42 @@ cluster job): line/train now 7 732 valid + 38 660 inter-document + 22 313
 intra-document rows, line/test 1 431 + 7 155 + 4 157; this invalidates every prior
 number computed from the old line dataset (`2026-09-10-vrdu-invalids-01`).
 
+Main dataset generation (unchanged):
+
+```
+for split in [train, test]:
+    pool[field] = every non-null value of field across the split's base rows
+    for each base_row, for k in 1..9:
+        j = largest achievable field count <= k   # self-caps
+        choose j fields, resample each from pool (must differ from original)
+        emit invalid row: k=k, num_invalid_fields=j
+```
+
+Line dataset generation (new):
+
+```
+for split in [train, test]:
+    # inter-document: independent per row
+    for each document d:
+        pool[field] = non-null values of field from every OTHER document
+    for each row r:
+        for k in achievable num_invalid_fields values (1..5, no capping):
+            choose k fields, resample each from d's pool
+            emit invalid row: error_type=inter_document, k=num_invalid_fields=k
+
+    # intra-document: a chain per row, one donor consumed per field
+    for each row r in document d:
+        donors = every OTHER row in d; used = {}; corrupted = []
+        while len(corrupted) < 5:
+            feasible = fields not yet corrupted with >=1 unused, eligible donor
+                       (differs from r's original, keeps date order, and would
+                        not reproduce another valid row verbatim)
+            if none feasible: stop
+            pick a field uniformly, then a donor uniformly among its eligible ones
+            apply it; mark field corrupted, donor used
+            emit invalid row: error_type=intra_document, k=num_invalid_fields=len(corrupted)
+```
+
 ### Commits
 
 - `1b66374` fix: drop line carried fields, correct k/num_invalid_fields, split line invalids into inter/intra-document errors
