@@ -1,0 +1,22 @@
+id: repr_tiny_e2e_line
+project: judge-interp
+description: >-
+  Tiny end-to-end fixture for scripts/run_experiment.py, line dataset:
+  Qwen2.5-0.5B-Instruct on CPU over the 3-row hand-built mini corpus
+  (tests/fixtures/judge_interp_mini/vrdu/line/train.json), which includes the
+  2026-09-15 inter/intra-document collision case at (doc-beta, line_index=0,
+  k=1). Exercises the error_type-carrying fix end to end, not judge quality
+  (a 0.5B model is not a reliable judge).
+seed: 0
+params:
+  data_root: tests/fixtures/judge_interp_mini
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  dataset: line
+  split: train
+  layers: [0, 12, "last"]
+  dtype: float32
+  device: cpu
+  include_cohesion: true
+  context_token_limit: null
+  row_subset: null
+  verify_read_point: true

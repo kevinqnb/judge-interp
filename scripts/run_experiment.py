@@ -114,6 +114,7 @@ def build_items(params: dict) -> list[dict]:
         items.append({
             "document_id": r["document_id"],
             "line_index": r["line_index"] if dataset == "line" else None,
+            "error_type": r["error_type"] if dataset == "line" else None,
             "label": bool(r["valid"]),
             "k": r["k"],
             "num_invalid_fields": r["num_invalid_fields"],
@@ -170,8 +171,8 @@ def compute_metrics(result: dict) -> dict:
 
 def write_rows_jsonl(result: dict, path: Path) -> None:
     scalar_keys = [
-        "doc_ids", "line_indices", "k", "num_invalid_fields", "labels", "p_true",
-        "p_false", "logit_p_true", "logit_p_false", "verdict_true",
+        "doc_ids", "line_indices", "error_type", "k", "num_invalid_fields", "labels",
+        "p_true", "p_false", "logit_p_true", "logit_p_false", "verdict_true",
         "verdict_recognised", "prompt_n_tokens",
     ]
     cols = {k: result[k].tolist() for k in scalar_keys}

@@ -26,5 +26,19 @@
     "program_start_date": "02/10/20",
     "program_end_date": "02/10/20",
     "sub_amount": null
+  },
+  {
+    "document_id": "doc-beta",
+    "line_index": 0,
+    "valid": false,
+    "error_type": "inter_document",
+    "k": 1,
+    "num_invalid_fields": 1,
+    "invalid_fields": ["program_desc"],
+    "channel": "7",
+    "program_desc": "Morning Weather",
+    "program_start_date": "02/10/20",
+    "program_end_date": "02/17/20",
+    "sub_amount": null
   }
 ]

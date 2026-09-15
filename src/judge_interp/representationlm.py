@@ -394,9 +394,13 @@ class RepresentationLM:
 
         Args:
             items: One dict per data point, each with ``document_id``,
-                ``line_index`` (``None`` for main), ``label`` (bool = the row's
-                ``valid``), ``k``, ``num_invalid_fields``, ``invalid_fields``,
-                ``context`` and ``query``.
+                ``line_index`` (``None`` for main), ``error_type`` (``None`` for
+                main and for valid line rows; ``"inter_document"`` /
+                ``"intra_document"`` for invalid line rows -- since 2026-09-15
+                the same ``(document_id, line_index, k)`` can carry both
+                variants, so ``error_type`` is part of row identity), ``label``
+                (bool = the row's ``valid``), ``k``, ``num_invalid_fields``,
+                ``invalid_fields``, ``context`` and ``query``.
             instructions: The judge instruction block (fixed for the run).
             dataset: ``"main"`` or ``"line"`` — selects the row-key shape.
             cache_dir: Directory for per-document ``.npz`` shards. A document
@@ -416,6 +420,8 @@ class RepresentationLM:
               - ``layers``: ``int64 [len(self.layers)]``
               - ``doc_ids``: ``str [n]``
               - ``line_indices``: ``int64 [n]`` (``-1`` for main)
+              - ``error_type``: ``str [n]`` (``""`` for main and for valid line
+                rows -- npz string arrays can't hold ``None``)
               - ``k`` / ``num_invalid_fields``: ``int64 [n]``
               - ``labels``: ``bool [n]`` — the row's ``valid``
               - ``p_true`` / ``p_false`` / ``logit_p_true`` / ``logit_p_false``:
@@ -441,7 +447,12 @@ class RepresentationLM:
             doc_items.sort(key=lambda it: (it["line_index"] if it["line_index"] is not None else -1, it["k"]))
             keys = [
                 row_key(
-                    {"document_id": it["document_id"], "line_index": it["line_index"], "k": it["k"]},
+                    {
+                        "document_id": it["document_id"],
+                        "line_index": it["line_index"],
+                        "error_type": it["error_type"],
+                        "k": it["k"],
+                    },
                     dataset,
                 )
                 for it in doc_items
@@ -453,7 +464,12 @@ class RepresentationLM:
             expected = [
                 json.dumps(
                     row_key(
-                        {"document_id": it["document_id"], "line_index": it["line_index"], "k": it["k"]},
+                        {
+                            "document_id": it["document_id"],
+                            "line_index": it["line_index"],
+                            "error_type": it["error_type"],
+                            "k": it["k"],
+                        },
                         dataset,
                     )
                 )
@@ -481,8 +497,8 @@ class RepresentationLM:
         scalars: dict[str, list] = {
             k: []
             for k in (
-                "line_indices", "k", "num_invalid_fields", "labels", "p_true", "p_false",
-                "logit_p_true", "logit_p_false", "verdict_true", "verdict_recognised",
+                "line_indices", "error_type", "k", "num_invalid_fields", "labels", "p_true",
+                "p_false", "logit_p_true", "logit_p_false", "verdict_true", "verdict_recognised",
                 "prompt_n_tokens",
             )
         }
@@ -491,6 +507,7 @@ class RepresentationLM:
             for L in self.layers:
                 per_layer[L].append(res["representations"][L])
             scalars["line_indices"].append(it["line_index"] if it["line_index"] is not None else -1)
+            scalars["error_type"].append(it["error_type"] if it["error_type"] is not None else "")
             scalars["k"].append(it["k"])
             scalars["num_invalid_fields"].append(it["num_invalid_fields"])
             scalars["labels"].append(bool(it["label"]))
@@ -507,6 +524,7 @@ class RepresentationLM:
             "doc_ids": np.asarray([it["document_id"] for it in doc_items], dtype=object).astype("U"),
             "layers": np.asarray(self.layers, dtype=np.int64),
             "line_indices": np.asarray(scalars["line_indices"], dtype=np.int64),
+            "error_type": np.asarray(scalars["error_type"], dtype=object).astype("U"),
             "k": np.asarray(scalars["k"], dtype=np.int64),
             "num_invalid_fields": np.asarray(scalars["num_invalid_fields"], dtype=np.int64),
             "labels": np.asarray(scalars["labels"], dtype=bool),
@@ -534,8 +552,8 @@ class RepresentationLM:
         cols: dict[str, list[np.ndarray]] = {
             k: []
             for k in (
-                "doc_ids", "line_indices", "k", "num_invalid_fields", "labels", "p_true",
-                "p_false", "logit_p_true", "logit_p_false", "verdict_true",
+                "doc_ids", "line_indices", "error_type", "k", "num_invalid_fields", "labels",
+                "p_true", "p_false", "logit_p_true", "logit_p_false", "verdict_true",
                 "verdict_recognised", "prompt_n_tokens",
             )
         }
@@ -564,6 +582,18 @@ class RepresentationLM:
             if k in ("representations", "layers"):
                 continue
             assert len(v) == n, f"{k}: len {len(v)} != n {n}"
-        keys = list(zip(out["doc_ids"].tolist(), out["line_indices"].tolist(), out["k"].tolist()))
-        assert len(set(keys)) == n, f"{n - len(set(keys))} duplicate (doc_id, line_index, k) rows"
+        # error_type is part of row identity for line rows: since 2026-09-15 the same
+        # (doc_id, line_index, k) can carry both an inter- and an intra-document
+        # invalid variant, so it must be in the key or those two rows collide here.
+        keys = list(
+            zip(
+                out["doc_ids"].tolist(),
+                out["line_indices"].tolist(),
+                out["error_type"].tolist(),
+                out["k"].tolist(),
+            )
+        )
+        assert len(set(keys)) == n, (
+            f"{n - len(set(keys))} duplicate (doc_id, line_index, error_type, k) rows"
+        )
         return out

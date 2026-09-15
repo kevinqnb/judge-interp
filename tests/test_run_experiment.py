@@ -72,3 +72,33 @@ def test_compute_metrics_empty_class_mask():
     assert m["judge_acc_invalid"] is None
     assert m["mean_p_true_invalid"] is None
     assert m["judge_acc_valid"] == 1.0
+
+
+# tests/fixtures/judge_interp_mini/vrdu/{main,line}/train.json: hand-built mini
+# corpus for build_items (3 rows over 2 docs for main; 3 rows over 1 doc for line).
+_MINI_PARAMS = {
+    "data_root": "tests/fixtures/judge_interp_mini",
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "dataset": "main",
+    "split": "train",
+    "row_subset": None,
+}
+
+
+# tests/fixtures/judge_interp_mini/vrdu/line/train.json: 3 rows, one doc
+# (doc-beta), covering the 2026-09-15 collision case: line_index=0, k=1 has
+# both an inter_document and an intra_document invalid variant, disambiguated
+# only by error_type (see prompts.row_key and RepresentationLM._aggregate).
+def test_build_items_line_dataset_carries_error_type():
+    params = {**_MINI_PARAMS, "dataset": "line", "context_char_limit": None}
+    items = run.build_items(params)
+    assert len(items) == 3
+    keys = {(it["line_index"], it["error_type"], it["k"]) for it in items}
+    assert keys == {(0, None, 0), (0, "intra_document", 1), (0, "inter_document", 1)}
+
+
+def test_build_items_main_dataset_error_type_is_always_none():
+    params = {**_MINI_PARAMS, "context_char_limit": None}
+    items = run.build_items(params)
+    assert len(items) == 3
+    assert all(it["error_type"] is None for it in items)
