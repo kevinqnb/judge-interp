@@ -55,14 +55,8 @@ LINE_FIELDS = [
 ]
 
 # Document-level fields copied onto every line-item datapoint for context.
-LINE_CARRIED_FIELDS = [
-    "advertiser",
-    "agency",
-    "property",
-    "tv_address",
-    "product",
-    "contract_num",
-]
+# Empty as of 2026-09-15: line rows no longer carry document-level context.
+LINE_CARRIED_FIELDS = []
 
 # Known-answer checks (rung 3): fixed properties of the upstream corpus. If the
 # upstream file ever changes, these fire and the run stops rather than writing a

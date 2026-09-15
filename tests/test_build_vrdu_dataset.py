@@ -165,11 +165,10 @@ def test_end_to_end(tmp_path):
         (out / "line" / "test_base.json").read_text(encoding="utf-8")
     )
     assert len(line_rows) == 3
-    assert all(set(r) == {"document_id", "line_index", "valid", *b.LINE_CARRIED_FIELDS, *b.LINE_FIELDS} for r in line_rows)
+    assert b.LINE_CARRIED_FIELDS == []
+    assert all(set(r) == {"document_id", "line_index", "valid", *b.LINE_FIELDS} for r in line_rows)
     ccc_line = next(r for r in line_rows if r["document_id"] == "ccc")
     assert ccc_line["line_index"] == 0
-    assert ccc_line["advertiser"] == "Cee LLC"  # carried document-level context
-    assert ccc_line["property"] is None
     assert ccc_line["program_desc"] == "Late Show"
     assert ccc_line["channel"] is None
 

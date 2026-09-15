@@ -1,15 +1,11 @@
 [
   {
     "document_id": "L4", "line_index": 0, "valid": true,
-    "advertiser": "Theta Group", "agency": "Ag Four", "property": "KDDD",
-    "tv_address": "4 D St", "product": "Prod4", "contract_num": "C004",
     "channel": "2", "program_desc": "Test A",
     "program_start_date": "06/01/20", "program_end_date": "06/10/20", "sub_amount": "$60.00"
   },
   {
     "document_id": "L4", "line_index": 1, "valid": true,
-    "advertiser": "Theta Group", "agency": "Ag Four", "property": "KDDD",
-    "tv_address": "4 D St", "product": "Prod4", "contract_num": "C004",
     "channel": "4", "program_desc": "Test B",
     "program_start_date": "06/15/20", "program_end_date": "06/20/20", "sub_amount": "$70.00"
   }

@@ -1,20 +1,36 @@
 """Unit + tiny end-to-end tests for scripts/build_vrdu_invalids.py.
 
-The fixture in tests/fixtures/vrdu_invalids_mini/ is a hand-built mini corpus
-whose pools can be enumerated by inspection. Line documents also have a main row
-(the builder joins them for the ``flight_from`` / ``flight_to`` page dates):
+The fixture in tests/fixtures/vrdu_invalids_mini/ is a hand-built mini corpus.
+Line documents also have a main row (the builder cross-checks every line
+document id exists in the main base, even though the new line pipeline no
+longer reads main-row values):
 
   main/train  m1 (agency null), m2, m3 (flight_from is the OCR fragment "05/20/");
-              plus the main rows for L1, L2, L3, L5.
+              plus the main rows for L1, L2, L3, L5, L6, L7.
   main/test   m4, m5 + the main row for L4.
-  line/train  L1  channel constant "5" across 3 items (never invalidatable);
-              L2  one item, its 2 page dates cannot be reordered -> only one
-                  date field is ever changed, k caps to 1;
-              L3  one item, fragment start date -> only the start can change,
-                  and only to the single other page date;
-              L5  one item, both dates OCR fragments and no other page date ->
-                  nothing to change, row skipped.
-  line/test   L4  two items, everything invalidatable.
+
+  line/train  L1  3 items, channel constant "5" (never invalidatable); intra
+                  donor count = 2 per row -> intra caps at 2.
+              L2  1 item -> 0 intra donors -> intra skipped entirely.
+              L3  1 item, fragment start date -> still fully feasible for
+                  inter-document (abundant external pool); intra skipped
+                  (0 donors) same as L2.
+              L5  1 item, both dates OCR fragments -> intra skipped (0 donors).
+              L6  6 items, every item's fields entirely distinct from every
+                  other item's (no two items share a value) -> intra reaches
+                  the full k=5 for every one of its 6 rows, and no (field,
+                  donor) pair ever risks reproducing another item verbatim.
+              L7  3 items, likewise mutually distinct -> intra caps at 2 (only
+                  2 donors) for every row -- the donor-scarcity stop-and-label
+                  path, not the duplicate-avoidance path.
+  line/test   L4  2 items -> intra caps at 1 each (1 donor); inter-document is
+                  fully skipped for both (L4 is the only document with line
+                  items in the test split, so the external pool is empty).
+
+These counts are recorded as regression values below; they were derived by
+reasoning about the fixture's construction, then confirmed by running the
+builder and inspecting the output (not fit to whatever the code happened to
+produce).
 """
 
 import json
@@ -30,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"
-CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-09-10-vrdu-invalids-01.yaml"
+CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-09-15-vrdu-invalids-02.yaml"
 PIVOT = 50
 DATE_FIELDS = ["program_start_date", "program_end_date"]
 
@@ -72,19 +88,21 @@ def test_main_pools_dates_drop_fragments_add_sentinels_others_drop_nulls():
     assert sorted(pools["flight_to"]) == sorted(["02/02/20", "01/01/00", "12/31/49"])
 
 
-def test_line_pools_dates_are_one_shared_page_pool():
-    doc_rows = [
-        {"channel": "5", "program_desc": "A", "program_start_date": "01/01/20",
-         "program_end_date": "01/07/20", "sub_amount": None},
-        {"channel": "5", "program_desc": "B", "program_start_date": "01/08/20",
-         "program_end_date": "01/07/20", "sub_amount": "$9"},
+def test_line_inter_pools_excludes_own_document():
+    rows = [
+        {"document_id": "A", "line_index": 0, "channel": "1", "program_desc": "x",
+         "program_start_date": "01/01/20", "program_end_date": "01/05/20", "sub_amount": "$1"},
+        {"document_id": "A", "line_index": 1, "channel": "1b", "program_desc": "x2",
+         "program_start_date": "01/02/20", "program_end_date": "01/06/20", "sub_amount": "$1b"},
+        {"document_id": "B", "line_index": 0, "channel": "2", "program_desc": "y",
+         "program_start_date": "02/01/20", "program_end_date": "02/05/20", "sub_amount": "$2"},
     ]
-    main_row = {"flight_from": "12/20/19", "flight_to": "02/28/"}  # to-date is a fragment, dropped
-    pools = b.line_pools(doc_rows, main_row, ["flight_from", "flight_to"], DATE_FIELDS, PIVOT)
-    assert pools["program_start_date"] is pools["program_end_date"]
-    assert sorted(set(pools["program_start_date"])) == sorted(["01/01/20", "01/07/20", "01/08/20", "12/20/19"])
-    assert pools["channel"] == ["5", "5"]
-    assert pools["sub_amount"] == ["$9"]
+    pools = b.line_inter_pools_by_doc(rows, DATE_FIELDS, PIVOT)
+    assert set(pools) == {"A", "B"}
+    assert pools["A"]["channel"] == ["2"]              # only B's row, A's own two excluded
+    assert pools["B"]["channel"] == ["1", "1b"]
+    assert sorted(pools["A"]["program_start_date"]) == sorted(["02/01/20", "02/05/20"])
+    assert pools["A"]["program_start_date"] is pools["A"]["program_end_date"]  # shared date pool
 
 
 # --- feasibility -------------------------------------------------------
@@ -118,6 +136,19 @@ def test_achievable_counts():
     assert b.achievable_counts(1, (False, False, False)) == {0, 1}
 
 
+def test_achievable_targets_filters_to_range_and_excludes_infeasible_field():
+    row = {"channel": "1", "program_desc": "d",
+           "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    pools = {
+        "channel": ["1", "2"], "program_desc": ["d"], "sub_amount": ["$1", "$2"],  # desc has no differing value
+        "program_start_date": ["01/01/20", "01/05/20"], "program_end_date": ["01/10/20", "01/15/20"],
+    }
+    # feasible_nondate = {channel, sub_amount} = 2; both date-alone options and "both" are feasible
+    # (see achievable_counts) -> achievable = {0,1,2,3,4}; requesting up to 5 caps at 4.
+    targets = b.achievable_targets(row, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, (1, 5))
+    assert targets == [1, 2, 3, 4]
+
+
 # --- corruption units --------------------------------------------------
 
 
@@ -144,6 +175,93 @@ def test_make_invalid_row_returns_none_when_nothing_feasible():
     pools = {"channel": ["7"], "program_desc": ["x"], "sub_amount": ["$5"],
              "program_start_date": ["04/10/20"], "program_end_date": ["04/10/20"]}
     assert b.make_invalid_row(row, 2, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(0)) is None
+
+
+# --- build_intra_chain ---------------------------------------------------
+
+
+def _l6_style_donors():
+    """Five donors, each differing from the base row in ALL five fields, and
+    distinct from each other too -- so every donor is eligible for every field
+    and reaching the full chain of 5 is guaranteed regardless of draw order."""
+    return [
+        {"channel": "2", "program_desc": "Show Two", "program_start_date": "05/02/20",
+         "program_end_date": "05/11/20", "sub_amount": "$110.00"},
+        {"channel": "3", "program_desc": "Show Three", "program_start_date": "05/03/20",
+         "program_end_date": "05/12/20", "sub_amount": "$120.00"},
+        {"channel": "4", "program_desc": "Show Four", "program_start_date": "05/04/20",
+         "program_end_date": "05/13/20", "sub_amount": "$130.00"},
+        {"channel": "5", "program_desc": "Show Five", "program_start_date": "05/05/20",
+         "program_end_date": "05/14/20", "sub_amount": "$140.00"},
+        {"channel": "6", "program_desc": "Show Six", "program_start_date": "05/06/20",
+         "program_end_date": "05/15/20", "sub_amount": "$150.00"},
+    ]
+
+
+def test_build_intra_chain_reaches_max_with_fully_distinct_donors():
+    base = {"channel": "1", "program_desc": "Base Show",
+            "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$100.00"}
+    donors = _l6_style_donors()
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    assert [len(fields) for _row, fields in chain] == [1, 2, 3, 4, 5]
+    # nested: each step's fields are a superset of the previous step's
+    for i in range(len(chain) - 1):
+        assert set(chain[i][1]) < set(chain[i + 1][1])
+    final_row, final_fields = chain[-1]
+    assert final_fields == sorted(b.LINE_FIELDS)
+    for field in b.LINE_FIELDS:
+        assert final_row[field] != base[field]
+        assert any(final_row[field] == donor[field] for donor in donors)  # came from some donor
+
+
+def test_build_intra_chain_caps_at_donor_scarcity():
+    base = {"channel": "8", "program_desc": "Cap Base",
+            "program_start_date": "07/01/20", "program_end_date": "07/10/20", "sub_amount": "$700.00"}
+    donors = _l6_style_donors()[:2]  # only 2 distinct donors available
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    assert [len(fields) for _row, fields in chain] == [1, 2]  # stops at 2, not assumed to be 5
+
+
+def test_build_intra_chain_no_donors_is_empty():
+    base = {"channel": "1", "program_desc": "d",
+            "program_start_date": "01/01/20", "program_end_date": "01/05/20", "sub_amount": "$1"}
+    assert b.build_intra_chain(base, [], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0)) == []
+
+
+def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising():
+    # The only donor differs from base in exactly one field (channel); borrowing
+    # it would reproduce the donor verbatim, so that (field, donor) pair must be
+    # excluded rather than aborting the whole chain.
+    base = {"channel": "1", "program_desc": "A",
+            "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    donor = {"channel": "2", "program_desc": "A",
+             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    assert chain == []
+
+
+def test_build_intra_chain_never_reproduces_a_near_duplicate_donor():
+    # donor_a differs from base ONLY in "channel" -- borrowing it while every
+    # other field still holds its original value would recreate donor_a
+    # verbatim, so that (channel, donor_a) pair must be excluded whenever it
+    # would actually produce that duplicate. donor_b is fully distinct and
+    # collides with nothing, so progress is still made through it (and,
+    # depending on step order, "channel" via donor_a can validly open up too,
+    # once some other field has already diverged from donor_a's matching
+    # values -- the point of this test is that no *emitted* row ever equals
+    # donor_a's or donor_b's tuple, not that the chain length is fixed).
+    base = {"channel": "1", "program_desc": "A",
+            "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    donor_a = {"channel": "2", "program_desc": "A",
+               "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    donor_b = {"channel": "9", "program_desc": "Z",
+               "program_start_date": "09/01/20", "program_end_date": "09/10/20", "sub_amount": "$9"}
+    chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    assert chain  # progress is still made via donor_b despite donor_a's collision risk
+    for row, _fields in chain:
+        got = tuple(row[f] for f in b.LINE_FIELDS)
+        assert got != tuple(donor_a[f] for f in b.LINE_FIELDS)
+        assert got != tuple(donor_b[f] for f in b.LINE_FIELDS)
 
 
 # --- tiny end-to-end -------------------------------------------------
@@ -174,143 +292,136 @@ def _split(rows):
     return [r for r in rows if r["valid"]], [r for r in rows if not r["valid"]]
 
 
-ALL = [
-    ("main_train", ["document_id"], b.MAIN_FIELDS, ["flight_from", "flight_to"]),
-    ("main_test", ["document_id"], b.MAIN_FIELDS, ["flight_from", "flight_to"]),
-    ("line_train", ["document_id", "line_index"], [*b.LINE_CARRIED_FIELDS, *b.LINE_FIELDS], DATE_FIELDS),
-    ("line_test", ["document_id", "line_index"], [*b.LINE_CARRIED_FIELDS, *b.LINE_FIELDS], DATE_FIELDS),
-]
-
-
-def test_counts_and_provenance(built):
-    assert len(built["main_train"]) == 7 * 10
+def test_main_dataset_generation_is_unchanged(built):
+    # 9 docs in the train main base (m1,m2,m3,L1,L2,L3,L5,L6,L7), each achieving
+    # the full k=0..9 (agency etc. always resamplable from the split-wide pool).
+    assert len(built["main_train"]) == 9 * 10
     assert len(built["main_test"]) == 3 * 10
-    assert len(built["line_train"]) == 6 + (3 * 4 + 4 + 4)  # L1 3 items, L2, L3; L5 skipped
-    assert len(built["line_test"]) == 2 + 2 * 4
+    prov = built["provenance"]
+    assert prov["skipped_rows"]["main"]["train"] == [] and prov["capped_rows"]["main"]["train"] == []
+
+
+def test_line_counts_and_provenance(built):
+    valid, invalid = _split(built["line_train"])
+    assert len(valid) == 15  # L1(3) + L2(1) + L3(1) + L5(1) + L6(6) + L7(3)
+    inter = [r for r in invalid if r["error_type"] == "inter_document"]
+    intra = [r for r in invalid if r["error_type"] == "intra_document"]
+    assert len(inter) == 75   # 15 rows x k=1..5, all achievable via the abundant external pool
+    assert len(intra) == 42   # L1: 3x2 + L7: 3x2 + L6: 6x5 = 6+6+30
+
+    valid_t, invalid_t = _split(built["line_test"])
+    assert len(valid_t) == 2
+    assert sum(1 for r in invalid_t if r["error_type"] == "inter_document") == 0
+    assert sum(1 for r in invalid_t if r["error_type"] == "intra_document") == 2
 
     prov = built["provenance"]
-    assert prov["skipped_rows"]["line"]["train"] == [{"document_id": "L5", "line_index": 0}]
-    assert prov["skipped_rows"]["main"]["train"] == [] and prov["capped_rows"]["main"]["train"] == []
-    line_capped = {(c["document_id"], c["k"], c["realized"]) for c in prov["capped_rows"]["line"]["train"]}
-    assert line_capped == {("L2", 2, 1), ("L2", 3, 1), ("L2", 4, 1),
-                           ("L3", 2, 1), ("L3", 3, 1), ("L3", 4, 1)}
-    assert prov["line_date_pool_sizes"]["train"] == {
-        "min": 0, "median": 1.5, "max": 5, "docs_with_no_page_date": 1, "line_rows_with_no_page_date": 1
+    assert prov["config_id"] == "2026-09-15-vrdu-invalids-02"
+    dist = prov["num_invalid_fields_dist"]["line"]["train"]
+    assert {int(k): v for k, v in dist["inter_document"].items()} == {1: 15, 2: 15, 3: 15, 4: 15, 5: 15}
+    assert {int(k): v for k, v in dist["intra_document"].items()} == {1: 12, 2: 12, 3: 6, 4: 6, 5: 6}
+
+
+def test_line_skipped_and_capped_rows(built):
+    prov = built["provenance"]
+    skipped_intra_train = {(r["document_id"], r["line_index"]) for r in prov["skipped_rows"]["line"]["train"]["intra_document"]}
+    assert skipped_intra_train == {("L2", 0), ("L3", 0), ("L5", 0)}
+    assert prov["skipped_rows"]["line"]["train"]["inter_document"] == []
+
+    # test split: L4 is the only line document, so inter-document has no
+    # external pool at all -- both rows skipped.
+    skipped_inter_test = {(r["document_id"], r["line_index"]) for r in prov["skipped_rows"]["line"]["test"]["inter_document"]}
+    assert skipped_inter_test == {("L4", 0), ("L4", 1)}
+
+    capped_intra_train = {(c["document_id"], c["line_index"]): c["reached"] for c in prov["capped_rows"]["line"]["train"]["intra_document"]}
+    assert capped_intra_train == {
+        ("L1", 0): 2, ("L1", 1): 2, ("L1", 2): 2,
+        ("L7", 0): 2, ("L7", 1): 2, ("L7", 2): 2,
     }
-    assert prov["invalid_field_freq"]["line"]["train"]["channel"] == 0  # constant in L1, single elsewhere
-    assert prov["python"] and prov["config_id"] == "2026-09-10-vrdu-invalids-01"
+    capped_intra_test = {(c["document_id"], c["line_index"]): c["reached"] for c in prov["capped_rows"]["line"]["test"]["intra_document"]}
+    assert capped_intra_test == {("L4", 0): 1, ("L4", 1): 1}
 
 
-def test_every_invalid_row_differs_in_exactly_its_listed_fields(built):
-    for key, id_keys, fields, _ in ALL:
-        base_name = key.replace("_train", "/train_base.json").replace("_test", "/test_base.json")
-        base_by_id = {tuple(r[k] for k in id_keys): r
-                      for r in json.loads((built["data_root"] / base_name).read_text())}
-        valid, invalid = _split(built[key])
-        assert len(valid) == len(base_by_id)
-        for row in invalid:
-            base = base_by_id[tuple(row[k] for k in id_keys)]
-            changed = sorted(f for f in fields if row[f] != base[f])
-            assert changed == sorted(row["invalid_fields"])
-            assert 1 <= row["num_invalid_fields"] == len(changed) <= row["k"]
-            assert all(row[f] is not None for f in changed)
+def test_l6_line_index_0_reaches_full_k5_for_both_error_types(built):
+    rows = [r for r in built["line_train"] if r["document_id"] == "L6" and r["line_index"] == 0]
+    by_type = {(r["error_type"], r["k"]): r for r in rows}
+    assert {"inter_document", "intra_document"} == {t for t, _ in by_type if t is not None}
+    for error_type in ("inter_document", "intra_document"):
+        ks = sorted(k for t, k in by_type if t == error_type)
+        assert ks == [1, 2, 3, 4, 5]
+        top = by_type[(error_type, 5)]
+        assert sorted(top["invalid_fields"]) == sorted(b.LINE_FIELDS)
+        for field in b.LINE_FIELDS:
+            assert top[field] != next(r for r in rows if r["k"] == 0)[field]
 
 
-def test_rows_uniquely_keyed_by_id_and_k(built):
-    for key, id_keys, _, _ in ALL:
-        ids = [(*[r[k] for k in id_keys], r["k"]) for r in built[key]]
-        assert len(ids) == len(set(ids))
+def test_rows_uniquely_keyed_and_k_equals_num_invalid_fields(built):
+    for rows in (built["line_train"], built["line_test"]):
+        keys = [(r["document_id"], r["line_index"], r["error_type"], r["k"]) for r in rows]
+        assert len(keys) == len(set(keys))
+        for r in rows:
+            assert r["k"] == r["num_invalid_fields"]
+    for rows in (built["main_train"], built["main_test"]):
+        keys = [(r["document_id"], r["k"]) for r in rows]
+        assert len(keys) == len(set(keys))
 
 
-def test_date_order_holds_on_every_touched_row(built):
-    for key, id_keys, _, date_fields in ALL:
-        _, invalid = _split(built[key])
-        for row in invalid:
-            if not ({date_fields[0], date_fields[1]} & set(row["invalid_fields"])):
-                continue
-            a, z = row[date_fields[0]], row[date_fields[1]]
-            if a is None or z is None:
-                continue
-            assert b.parse_date(a, PIVOT) is not None and b.parse_date(z, PIVOT) is not None
-            assert b.parse_date(a, PIVOT) <= b.parse_date(z, PIVOT)
+def test_every_invalid_line_row_differs_in_exactly_its_listed_fields(built):
+    base_by_id = {(r["document_id"], r["line_index"]): r
+                  for r in json.loads((built["data_root"] / "line/train_base.json").read_text())}
+    _, invalid = _split(built["line_train"])
+    for row in invalid:
+        base = base_by_id[(row["document_id"], row["line_index"])]
+        changed = sorted(f for f in b.LINE_FIELDS if row[f] != base[f])
+        assert changed == sorted(row["invalid_fields"])
+        assert row["k"] == row["num_invalid_fields"] == len(changed) >= 1
+        assert all(row[f] is not None for f in changed)
 
 
-def test_line_date_corruptions_are_real_page_dates(built):
-    """No sentinels on the line side: every corrupted line date already appears on the page."""
-    for key in ("line_train", "line_test"):
-        base_name = key.replace("_train", "/train_base.json").replace("_test", "/test_base.json")
-        line_base = json.loads((built["data_root"] / base_name).read_text())
-        main_name = key.replace("line", "main").replace("_train", "/train_base.json").replace("_test", "/test_base.json")
-        main_by_id = {r["document_id"]: r for r in json.loads((built["data_root"] / main_name).read_text())}
-        by_doc = {}
-        for r in line_base:
-            by_doc.setdefault(r["document_id"], []).append(r)
-        _, invalid = _split(built[key])
-        for row in invalid:
-            page = {r[f] for r in by_doc[row["document_id"]] for f in DATE_FIELDS if r[f]}
-            page |= {main_by_id[row["document_id"]][f] for f in ("flight_from", "flight_to")
-                     if main_by_id[row["document_id"]][f]}
-            for f in DATE_FIELDS:
-                if f in row["invalid_fields"]:
-                    assert row[f] in page, (row["document_id"], row["line_index"], f, row[f])
-            assert "01/01/00" not in (row[DATE_FIELDS[0]], row[DATE_FIELDS[1]])
+def test_date_order_holds_on_every_touched_line_row(built):
+    _, invalid = _split(built["line_train"])
+    invalid += _split(built["line_test"])[1]
+    for row in invalid:
+        if not ({"program_start_date", "program_end_date"} & set(row["invalid_fields"])):
+            continue
+        a, z = row["program_start_date"], row["program_end_date"]
+        if a is None or z is None:
+            continue
+        assert b.parse_date(a, PIVOT) is not None and b.parse_date(z, PIVOT) is not None
+        assert b.parse_date(a, PIVOT) <= b.parse_date(z, PIVOT)
 
 
-def test_forced_single_candidate_cases(built):
-    _, line_inv = _split(built["line_train"])
-    # L1 li0/li2 end on 01/07/20; the only page date <= that (and != the start) is 01/07/20.
-    for row in line_inv:
-        if row["document_id"] == "L1" and row["line_index"] in (0, 2) and row["invalid_fields"] == ["program_start_date"]:
-            assert row["program_start_date"] == "01/07/20"
-    # L3: start can only become the single other page date.
-    l3 = [r for r in line_inv if r["document_id"] == "L3"]
-    assert len(l3) == 4
-    for row in l3:
-        assert row["invalid_fields"] == ["program_start_date"] and row["program_start_date"] == "03/31/20"
-    # L2: start-only -> 02/05/20, end-only -> 02/01/20 (each the sole candidate).
-    for row in (r for r in line_inv if r["document_id"] == "L2"):
-        assert row["num_invalid_fields"] == 1
-        if row["invalid_fields"] == ["program_start_date"]:
-            assert row["program_start_date"] == "02/05/20"
-        else:
-            assert row["invalid_fields"] == ["program_end_date"] and row["program_end_date"] == "02/01/20"
+def test_intra_document_values_always_come_from_the_same_document(built):
+    line_base = json.loads((built["data_root"] / "line/train_base.json").read_text())
+    by_doc = {}
+    for r in line_base:
+        by_doc.setdefault(r["document_id"], []).append(r)
+    _, invalid = _split(built["line_train"])
+    for row in (r for r in invalid if r["error_type"] == "intra_document"):
+        doc_values = {f: {r[f] for r in by_doc[row["document_id"]]} for f in b.LINE_FIELDS}
+        for field in row["invalid_fields"]:
+            assert row[field] in doc_values[field]
 
 
-def test_constant_channel_never_invalidated(built):
-    _, line_inv = _split(built["line_train"])
-    for row in (r for r in line_inv if r["document_id"] == "L1"):
+def test_constant_channel_never_invalidated_intra_document(built):
+    # channel is constant ("5") across all of L1's own line items, so
+    # intra-document (donors = other L1 rows) can never supply a differing
+    # value; inter-document draws from OTHER documents and legitimately can.
+    _, invalid = _split(built["line_train"])
+    for row in (r for r in invalid if r["document_id"] == "L1" and r["error_type"] == "intra_document"):
         assert "channel" not in row["invalid_fields"] and row["channel"] == "5"
 
 
-def test_main_test_corruptions_stay_within_the_test_split_pool(built):
-    train_base = json.loads((built["data_root"] / "main/train_base.json").read_text())
-    test_base = json.loads((built["data_root"] / "main/test_base.json").read_text())
-    _, invalid = _split(built["main_test"])
-    for field in ("advertiser", "property", "product"):
-        train_vals = {r[field] for r in train_base if r[field] is not None}
-        test_vals = {r[field] for r in test_base if r[field] is not None}
-        for row in invalid:
-            if field in row["invalid_fields"]:
-                assert row[field] in test_vals and row[field] not in (train_vals - test_vals)
-
-
-def test_fragment_flight_from_row_keeps_the_pair_verifiable(built):
-    _, invalid = _split(built["main_train"])
-    for row in (r for r in invalid if r["document_id"] == "m3"):
-        # flight_to is only ever changed together with the fragment flight_from
-        if "flight_to" in row["invalid_fields"]:
-            assert "flight_from" in row["invalid_fields"]
-        if "flight_from" not in row["invalid_fields"]:
-            assert row["flight_from"] == "05/20/"  # fragment retained untouched
-
-
-def test_num_invalid_fields_distribution(built):
-    dist = built["provenance"]["num_invalid_fields_dist"]
-    as_ints = lambda d: {int(k): v for k, v in d.items()}
-    assert as_ints(dist["main"]["train"]) == {i: 7 for i in range(10)}
-    assert as_ints(dist["main"]["test"]) == {i: 3 for i in range(10)}
-    assert as_ints(dist["line"]["train"]) == {0: 6, 1: 11, 2: 3, 3: 3, 4: 3}
-    assert as_ints(dist["line"]["test"]) == {0: 2, 1: 2, 2: 2, 3: 2, 4: 2}
+def test_no_intra_document_row_duplicates_another_valid_row_verbatim(built):
+    line_base = json.loads((built["data_root"] / "line/train_base.json").read_text())
+    by_doc = {}
+    for r in line_base:
+        by_doc.setdefault(r["document_id"], []).append(r)
+    _, invalid = _split(built["line_train"])
+    for row in (r for r in invalid if r["error_type"] == "intra_document"):
+        full = tuple(row[f] for f in b.LINE_FIELDS)
+        others = {tuple(r[f] for f in b.LINE_FIELDS) for r in by_doc[row["document_id"]]
+                  if r["line_index"] != row["line_index"]}
+        assert full not in others
 
 
 def test_seed_determinism(built, tmp_path):
