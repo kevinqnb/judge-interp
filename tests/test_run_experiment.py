@@ -1,9 +1,11 @@
-"""Unit tests for scripts/run_experiment.py's pure eval code (compute_metrics)."""
+"""Unit tests for scripts/run_experiment.py's pure eval code (compute_metrics)
+and its context_token_limit gate in build_items."""
 import json
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import run_experiment as run  # noqa: E402
@@ -74,8 +76,9 @@ def test_compute_metrics_empty_class_mask():
     assert m["judge_acc_valid"] == 1.0
 
 
-# tests/fixtures/judge_interp_mini/vrdu/{main,line}/train.json: hand-built mini
-# corpus for build_items (3 rows over 2 docs for main; 3 rows over 1 doc for line).
+# tests/fixtures/judge_interp_mini/vrdu/main/train.json: 3 rows over 2 docs.
+# Measured with the real Qwen2.5-0.5B-Instruct tokenizer (add_special_tokens=False):
+# doc-alpha.txt is 99 tokens, doc-beta.txt is 58 tokens.
 _MINI_PARAMS = {
     "data_root": "tests/fixtures/judge_interp_mini",
     "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -85,12 +88,40 @@ _MINI_PARAMS = {
 }
 
 
+def test_build_items_context_token_limit_null_skips_check():
+    params = {**_MINI_PARAMS, "context_token_limit": None}
+    items = run.build_items(params)
+    assert len(items) == 3
+    assert {it["document_id"] for it in items} == {"doc-alpha", "doc-beta"}
+
+
+def test_build_items_context_token_limit_above_max_passes():
+    params = {**_MINI_PARAMS, "context_token_limit": 200}  # > 99-token doc-alpha
+    items = run.build_items(params)
+    assert len(items) == 3
+
+
+def test_build_items_context_token_limit_enforced():
+    params = {**_MINI_PARAMS, "context_token_limit": 90}  # < 99-token doc-alpha
+    with pytest.raises(ValueError, match=r"'doc-alpha' is 99 tokens > context_token_limit 90"):
+        run.build_items(params)
+
+
+def test_build_items_context_token_limit_counts_tokens_not_chars():
+    # doc-alpha.txt is 217 chars / 99 tokens. 150 sits between the two: a
+    # chars-based check would wrongly raise (217 > 150); the real, token-based
+    # check must not, since 99 < 150.
+    params = {**_MINI_PARAMS, "context_token_limit": 150}
+    items = run.build_items(params)
+    assert len(items) == 3
+
+
 # tests/fixtures/judge_interp_mini/vrdu/line/train.json: 3 rows, one doc
 # (doc-beta), covering the 2026-09-15 collision case: line_index=0, k=1 has
 # both an inter_document and an intra_document invalid variant, disambiguated
 # only by error_type (see prompts.row_key and RepresentationLM._aggregate).
 def test_build_items_line_dataset_carries_error_type():
-    params = {**_MINI_PARAMS, "dataset": "line", "context_char_limit": None}
+    params = {**_MINI_PARAMS, "dataset": "line", "context_token_limit": None}
     items = run.build_items(params)
     assert len(items) == 3
     keys = {(it["line_index"], it["error_type"], it["k"]) for it in items}
@@ -98,7 +129,7 @@ def test_build_items_line_dataset_carries_error_type():
 
 
 def test_build_items_main_dataset_error_type_is_always_none():
-    params = {**_MINI_PARAMS, "context_char_limit": None}
+    params = {**_MINI_PARAMS, "context_token_limit": None}
     items = run.build_items(params)
     assert len(items) == 3
     assert all(it["error_type"] is None for it in items)

@@ -1,8 +1,9 @@
-id: 2026-09-10-repr-line-train-01
+id: 2026-09-15-qwen7b-repr-line-train-01
 project: judge-interp
 description: >-
-  Collect last-layer (post-final-norm) judge representations for every row of
-  data/vrdu/line/train.json (38612 rows: 7732 valid + invalid rows for k=1..4,
+  Collect judge representations at layers 1, 14, 28 (28 = last, post-final-norm;
+  evenly spaced from the first transformer-block output to the last) for every
+  row of data/vrdu/line/train.json (38612 rows: 7732 valid + invalid rows for k=1..4,
   7720/group by k but num_invalid_fields counts differ (7732/8185/8999/9123/4573)
   because the channel-resampling collision rule can change how many fields end
   up actually invalidated -- see prompts/build_vrdu_invalids.py; color the PCA
@@ -14,28 +15,20 @@ params:
   model: Qwen/Qwen2.5-7B-Instruct
   dataset: line
   split: train
-  layers: ["last"]
+  layers: [1, 14, 28]
   dtype: bfloat16
   device: cuda
   include_cohesion: true
   # Token-aware, not char-aware (changed 2026-09-15; was context_char_limit).
-  # Checked against the raw OCR text alone, via params["model"]'s tokenizer --
-  # not the full instructions+query+chat-template prompt built at judge time.
-  # Measured 2026-09-15 with the real Qwen2.5-7B-Instruct tokenizer: worst-case
-  # overhead beyond the raw context (413-token cohesion-on instructions + up to
-  # 158-token query + ~40-token chat-template wrapper) is ~610 tokens, so the
-  # tight ceiling for this value is 32768 - 610 = 32158
-  # (max_position_embeddings). 30000 is intentionally looser than that tight
-  # bound -- a round number with ~2700 tokens of slack to absorb future
-  # instruction/query growth without recomputing the exact ceiling -- while
-  # still sitting well below Qwen's 32768-token limit and far above the real
-  # corpus's measured max (17745 tokens, 2026-09-10).
+  # See 2026-09-15-repr-main-train-01.yaml for the margin rationale --
+  # intentionally looser than the tight 32158-token ceiling, still well under
+  # Qwen's 32768-token max_position_embeddings.
   context_token_limit: 30000
   row_subset: null
   verify_read_point: true
 
   # -- scripts/submit.sh resources --
-  gpu_type: L40S
+  gpu_type:
   gpu_memory: 40G
   gpu_c: 7.0
   omp: 8

@@ -29,7 +29,12 @@ Every ``params`` key is required — a missing key is a hard error, not a defaul
     dtype              "float32" | "float16" | "bfloat16"
     device             device_map string ("cuda", "cuda:0", "cpu")
     include_cohesion   bool — include the cohesion criterion in the instructions
-    context_char_limit null | int — hard error if any OCR context exceeds it
+    context_token_limit null | int — hard error if any OCR context's raw text
+                       tokenizes (via params["model"]'s tokenizer) to more than
+                       this many tokens. Checks the raw OCR context alone, not
+                       the full instructions+query+chat-template prompt built
+                       at judge time — see the configs for the margin this
+                       needs to leave under max_position_embeddings.
     row_subset         null (all rows) | {n: int, seed: int} (deterministic sample)
     verify_read_point  bool — run RepresentationLM.verify_read_point on the first
                        item before judging anything (determinism / read-point
@@ -49,6 +54,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from transformers import AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -58,7 +64,7 @@ from judge_interp.prompts import load_ocr_context, load_split, render_query
 
 _REQUIRED_PARAMS = (
     "data_root", "model", "dataset", "split", "layers", "dtype", "device",
-    "include_cohesion", "context_char_limit", "row_subset", "verify_read_point",
+    "include_cohesion", "context_token_limit", "row_subset", "verify_read_point",
 )
 
 
@@ -99,14 +105,18 @@ def build_items(params: dict) -> list[dict]:
     dataset, split = params["dataset"], params["split"]
     rows = load_split(data_root, dataset, split)
 
-    limit = params["context_char_limit"]
+    limit = params["context_token_limit"]
+    tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
     contexts: dict[str, str] = {}
     for doc_id in {r["document_id"] for r in rows}:
         text = load_ocr_context(data_root, doc_id)
-        if limit is not None and len(text) > limit:
-            raise ValueError(
-                f"OCR context for {doc_id!r} is {len(text)} chars > context_char_limit {limit}"
-            )
+        if limit is not None:
+            n_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+            if n_tokens > limit:
+                raise ValueError(
+                    f"OCR context for {doc_id!r} is {n_tokens} tokens > "
+                    f"context_token_limit {limit}"
+                )
         contexts[doc_id] = text
 
     items = []
