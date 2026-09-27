@@ -40,5 +40,17 @@
     "advertiser": "Zeta Media", "agency": null, "property": "KZZZ", "tv_address": "5 Z St",
     "product": "Prod5", "contract_num": "C005",
     "flight_from": null, "flight_to": null, "gross_amount": "$50.00"
+  },
+  {
+    "document_id": "L6", "valid": true,
+    "advertiser": "Eta Broadcasting", "agency": "Ag Six", "property": "KFFF", "tv_address": "6 F St",
+    "product": "Prod6", "contract_num": "C006",
+    "flight_from": "05/01/20", "flight_to": "05/20/20", "gross_amount": "$600.00"
+  },
+  {
+    "document_id": "L7", "valid": true,
+    "advertiser": "Theta Cable", "agency": "Ag Seven", "property": "KGGG", "tv_address": "7 G St",
+    "product": "Prod7", "contract_num": "C007",
+    "flight_from": "07/01/20", "flight_to": "07/20/20", "gross_amount": "$700.00"
   }
 ]

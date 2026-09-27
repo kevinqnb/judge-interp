@@ -15,10 +15,11 @@ params:
   dtype: bfloat16
   device: cuda
   include_cohesion: true
-  # See 2026-09-10-repr-smoke-01.yaml: measured max 75844 chars / 17745 tokens
-  # across the real OCR corpus; 100000 leaves headroom under the 32768-token
-  # max_position_embeddings ceiling.
-  context_char_limit: 100000
+  # Token-aware, not char-aware (changed 2026-09-15; was context_char_limit).
+  # See 2026-09-15-repr-main-train-01.yaml for the margin rationale --
+  # intentionally looser than the tight 32158-token ceiling, still well under
+  # Qwen's 32768-token max_position_embeddings.
+  context_token_limit: 30000
   row_subset: null
   # Left on: verify_read_point's bf16-on-GPU determinism check has not yet
   # passed for this (model, device, dtype) outside 2026-09-10-repr-smoke-01 --

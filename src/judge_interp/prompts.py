@@ -38,9 +38,10 @@ QUERY_FIELDS: dict[str, list[str]] = {
 }
 
 # Row keys that describe the row rather than the extraction — never shown to the
-# judge (they would leak the label).
+# judge (they would leak the label). ``error_type`` is line-only (null on valid
+# rows; "inter_document" / "intra_document" on invalid ones).
 NON_FIELD_KEYS: frozenset[str] = frozenset(
-    {"document_id", "line_index", "valid", "k", "num_invalid_fields", "invalid_fields"}
+    {"document_id", "line_index", "valid", "k", "num_invalid_fields", "invalid_fields", "error_type"}
 )
 
 LAST_LAYER_TOKEN = "last"
@@ -72,10 +73,15 @@ def load_ocr_context(data_root: str | Path, document_id: str) -> str:
 
 
 def row_key(row: dict, dataset: str) -> tuple:
-    """Identity of a row within a split: (document_id[, line_index], k)."""
+    """Identity of a row within a split: (document_id[, line_index[, error_type]], k).
+
+    Line rows are keyed on ``error_type`` too: since 2026-09-15 the same
+    ``(document_id, line_index, k)`` can carry both an inter-document and an
+    intra-document invalid variant, so ``k`` alone no longer disambiguates.
+    """
     if dataset == "main":
         return (row["document_id"], row["k"])
-    return (row["document_id"], row["line_index"], row["k"])
+    return (row["document_id"], row["line_index"], row["error_type"], row["k"])
 
 
 def render_query(row: dict, dataset: str) -> str:

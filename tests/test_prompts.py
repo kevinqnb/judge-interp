@@ -29,7 +29,8 @@ def test_render_query_main_fields_and_order():
 def test_render_query_line_fields_and_order():
     q = prompts.render_query(_line_row(), "line")
     names = [line.split(":", 1)[0] for line in q.splitlines()]
-    assert names == prompts.LINE_CARRIED_FIELDS + prompts.LINE_FIELDS
+    assert prompts.LINE_CARRIED_FIELDS == []
+    assert names == prompts.LINE_FIELDS
 
 
 def test_render_query_null_and_multiline_values():
@@ -44,7 +45,7 @@ def test_render_query_null_and_multiline_values():
 
 def test_render_query_no_label_keys_leak():
     q = prompts.render_query(_main_row(), "main")
-    for bad in ("valid", "num_invalid_fields", "invalid_fields", "document_id"):
+    for bad in ("valid", "num_invalid_fields", "invalid_fields", "document_id", "error_type"):
         assert bad not in q
 
 
@@ -104,7 +105,8 @@ def test_load_split_missing_file():
 
 def test_row_key_shapes():
     assert prompts.row_key({"document_id": "d", "k": 3}, "main") == ("d", 3)
-    assert prompts.row_key({"document_id": "d", "line_index": 2, "k": 3}, "line") == ("d", 2, 3)
+    row = {"document_id": "d", "line_index": 2, "error_type": "intra_document", "k": 3}
+    assert prompts.row_key(row, "line") == ("d", 2, "intra_document", 3)
 
 
 # --- resolve_layers -------------------------------------------------------

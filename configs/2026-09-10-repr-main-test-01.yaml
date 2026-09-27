@@ -16,7 +16,11 @@ params:
   dtype: bfloat16
   device: cuda
   include_cohesion: true
-  context_char_limit: 100000
+  # Token-aware, not char-aware (changed 2026-09-15; was context_char_limit).
+  # See 2026-09-15-repr-main-train-01.yaml for the margin rationale --
+  # intentionally looser than the tight 32158-token ceiling, still well under
+  # Qwen's 32768-token max_position_embeddings.
+  context_token_limit: 30000
   row_subset: null
   verify_read_point: true
 

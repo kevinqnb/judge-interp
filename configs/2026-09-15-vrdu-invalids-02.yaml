@@ -1,0 +1,46 @@
+id: 2026-09-15-vrdu-invalids-02
+project: judge-interp
+description: >-
+  Rebuild the VRDU line invalids with no carried context fields, two independent
+  error types (inter-document and intra-document with distinct donors per
+  injection), and k expanded to all 5 line fields. Main dataset generation is
+  unchanged from 2026-09-10-vrdu-invalids-01.
+seed: 0
+params:
+  data_root: data/vrdu
+
+  main:
+    # Unchanged from -01: for each k in this inclusive range, one invalid row is
+    # generated per valid base row. Value pools are compiled per split (train
+    # pool for train.json).
+    k_range: [1, 9]
+    pool_scope: per_split
+
+  line:
+    # One invalid row per error type (inter_document, intra_document) per
+    # achievable num_invalid_fields value in this range -- k always equals the
+    # realized count, never a requested-but-uncapped value. 5 = all LINE_FIELDS.
+    k_range: [1, 5]
+
+  # A field whose base value is null MAY be chosen for invalidation and given a
+  # non-null value; a non-null base value is NEVER replaced with null.
+  corrupt_from_null: true
+  corrupt_to_null: false
+
+  dates:
+    # Ordering enforced on every generated row: parsed(from) <= parsed(to)
+    # whenever both are non-null. Date-field pools hold only values that parse as
+    # m/d/y, so an OCR fragment (e.g. "02/21/") is never emitted as an invalid
+    # date.
+    main_fields: [flight_from, flight_to]
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+
+    # Main date pools also carry these two synthetic dates, chosen to parse before
+    # and after every real date in the corpus, so an ordered pair always exists.
+    main_sentinels: ["01/01/00", "12/31/49"]
+
+    # No line_context_fields / line sentinels: line dates (inter- and
+    # intra-document alike) are only ever corrupted to a date that genuinely
+    # appears on some line row -- in another document for inter_document, in the
+    # same document for intra_document.

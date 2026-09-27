@@ -1,44 +1,77 @@
 [
   {
     "document_id": "L1", "line_index": 0, "valid": true,
-    "advertiser": "Alpha Inc", "agency": null, "property": "KAAA",
-    "tv_address": "1 A St", "product": "Prod1", "contract_num": "C001",
     "channel": "5", "program_desc": "News A",
     "program_start_date": "01/01/20", "program_end_date": "01/07/20", "sub_amount": "$10.00"
   },
   {
     "document_id": "L1", "line_index": 1, "valid": true,
-    "advertiser": "Alpha Inc", "agency": null, "property": "KAAA",
-    "tv_address": "1 A St", "product": "Prod1", "contract_num": "C001",
     "channel": "5", "program_desc": "News B",
     "program_start_date": "01/08/20", "program_end_date": "01/14/20", "sub_amount": "$20.00"
   },
   {
     "document_id": "L1", "line_index": 2, "valid": true,
-    "advertiser": "Alpha Inc", "agency": null, "property": "KAAA",
-    "tv_address": "1 A St", "product": "Prod1", "contract_num": "C001",
     "channel": "5", "program_desc": "News C",
     "program_start_date": "01/01/20", "program_end_date": "01/07/20", "sub_amount": "$30.00"
   },
   {
     "document_id": "L2", "line_index": 0, "valid": true,
-    "advertiser": "Beta LLC", "agency": "Ag One", "property": "KBBB",
-    "tv_address": "2 B St", "product": "Prod2", "contract_num": "C002",
     "channel": "9", "program_desc": "Solo Show",
     "program_start_date": "02/01/20", "program_end_date": "02/05/20", "sub_amount": "$99.00"
   },
   {
     "document_id": "L3", "line_index": 0, "valid": true,
-    "advertiser": "Gamma Co", "agency": "Ag Two", "property": "KCCC",
-    "tv_address": "3 C St", "product": "Prod3", "contract_num": "C003",
     "channel": "3", "program_desc": "Frag Start",
     "program_start_date": "03/01/", "program_end_date": "03/31/20", "sub_amount": "$5.00"
   },
   {
     "document_id": "L5", "line_index": 0, "valid": true,
-    "advertiser": "Zeta Media", "agency": null, "property": "KZZZ",
-    "tv_address": "5 Z St", "product": "Prod5", "contract_num": "C005",
     "channel": "7", "program_desc": "Nothing To Change",
     "program_start_date": "04/10/", "program_end_date": "/10/20", "sub_amount": "$50.00"
+  },
+  {
+    "document_id": "L6", "line_index": 0, "valid": true,
+    "channel": "1", "program_desc": "Base Show",
+    "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$100.00"
+  },
+  {
+    "document_id": "L6", "line_index": 1, "valid": true,
+    "channel": "2", "program_desc": "Show Two",
+    "program_start_date": "05/02/20", "program_end_date": "05/11/20", "sub_amount": "$110.00"
+  },
+  {
+    "document_id": "L6", "line_index": 2, "valid": true,
+    "channel": "3", "program_desc": "Show Three",
+    "program_start_date": "05/03/20", "program_end_date": "05/12/20", "sub_amount": "$120.00"
+  },
+  {
+    "document_id": "L6", "line_index": 3, "valid": true,
+    "channel": "4", "program_desc": "Show Four",
+    "program_start_date": "05/04/20", "program_end_date": "05/13/20", "sub_amount": "$130.00"
+  },
+  {
+    "document_id": "L6", "line_index": 4, "valid": true,
+    "channel": "5", "program_desc": "Show Five",
+    "program_start_date": "05/05/20", "program_end_date": "05/14/20", "sub_amount": "$140.00"
+  },
+  {
+    "document_id": "L6", "line_index": 5, "valid": true,
+    "channel": "6", "program_desc": "Show Six",
+    "program_start_date": "05/06/20", "program_end_date": "05/15/20", "sub_amount": "$150.00"
+  },
+  {
+    "document_id": "L7", "line_index": 0, "valid": true,
+    "channel": "8", "program_desc": "Cap Base",
+    "program_start_date": "07/01/20", "program_end_date": "07/10/20", "sub_amount": "$700.00"
+  },
+  {
+    "document_id": "L7", "line_index": 1, "valid": true,
+    "channel": "9", "program_desc": "Cap Two",
+    "program_start_date": "07/02/20", "program_end_date": "07/11/20", "sub_amount": "$710.00"
+  },
+  {
+    "document_id": "L7", "line_index": 2, "valid": true,
+    "channel": "10", "program_desc": "Cap Three",
+    "program_start_date": "07/03/20", "program_end_date": "07/12/20", "sub_amount": "$720.00"
   }
 ]
