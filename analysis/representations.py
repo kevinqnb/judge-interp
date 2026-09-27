@@ -114,6 +114,15 @@ from sklearn.decomposition import PCA
 RUNS_ROOT = Path(os.environ["RUNS_ROOT"])
 FIGURES_DIR = Path(__file__).parent / "figures"
 
+# ACL-paper-style serif type: Nimbus Roman / Liberation Serif are
+# metric-compatible Times New Roman substitutes available on this system;
+# DejaVu Serif is the final fallback if neither is installed.
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Nimbus Roman", "Liberation Serif", "Times New Roman", "DejaVu Serif"],
+})
+COLORBAR_LABEL_FONTSIZE = 14
+
 # (model, dataset) -> run id -- see configs/2026-09-15-<model>-repr-<dataset>-train-01.yaml
 # for the collection params (layers, etc.) behind each run.
 RUN_IDS = {
@@ -315,7 +324,6 @@ def analyze_and_plot(
     layer) for any further inspection by the caller.
     """
     layers = sorted(reps_by_layer)
-    last_layer = max(layers)
     n = num_invalid_fields.shape[0]
     n_groups = len(set(num_invalid_fields.tolist()))
     assert n_groups >= 2, (
@@ -330,7 +338,10 @@ def analyze_and_plot(
         idx = np.arange(n)
 
     results: dict[int, dict] = {}
-    fig, axes = plt.subplots(1, len(layers), figsize=(5 * len(layers), 5), squeeze=False)
+    fig, axes = plt.subplots(
+        1, len(layers), figsize=(5.5 * len(layers), 5.5), squeeze=False,
+        constrained_layout=True,
+    )
     axes = axes[0]
     sc = None
     for ax, layer in zip(axes, layers):
@@ -344,14 +355,14 @@ def analyze_and_plot(
             c=num_invalid_fields[idx], cmap="viridis", s=8, alpha=0.5, linewidths=0,
             vmin=vmin, vmax=vmax,
         )
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
-        # Depth fraction makes e.g. qwen's "layer 14" and llama's "layer 16"
-        # (same rung, different total depth) comparable at a glance.
-        ax.set_title(f"layer {layer} (depth {layer / last_layer:.0%})")
+        var_pc1, var_pc2 = result["pca"].explained_variance_ratio_[:2]
+        ax.set_xlabel(f"PC1 ({var_pc1:.1%})")
+        ax.set_ylabel(f"PC2 ({var_pc2:.1%})")
+        ax.set_title(f"layer {layer}")
+        ax.set_box_aspect(1)
 
-    fig.suptitle(f"{title} (n={n}, showing {len(idx)}/panel)")
-    fig.colorbar(sc, ax=axes.tolist(), label="num_invalid_fields")
+    cbar = fig.colorbar(sc, ax=axes.tolist())
+    cbar.set_label("# Invalid Values", fontsize=COLORBAR_LABEL_FONTSIZE)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
