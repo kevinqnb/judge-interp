@@ -1,5 +1,6 @@
 id: 2026-09-10-repr-line-test-01
 project: judge-interp
+task: record_judge
 description: >-
   Collect last-layer (post-final-norm) judge representations for every row of
   data/vrdu/line/test.json (7147 rows: 1431 valid + invalid rows for k=1..4,

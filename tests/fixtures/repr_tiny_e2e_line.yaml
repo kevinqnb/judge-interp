@@ -1,5 +1,6 @@
 id: repr_tiny_e2e_line
 project: judge-interp
+task: record_judge
 description: >-
   Tiny end-to-end fixture for scripts/run_experiment.py, line dataset:
   Qwen2.5-0.5B-Instruct on CPU over the 3-row hand-built mini corpus

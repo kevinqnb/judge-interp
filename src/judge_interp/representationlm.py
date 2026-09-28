@@ -47,6 +47,28 @@ _PROMPT_TEMPLATE = (
     "## QUERY:\n{query}"
 )
 
+_SPAN_RESERVED_KEYS = frozenset({"char_start", "char_end"})
+
+
+def _to_npz_array(values: list) -> np.ndarray:
+    """Infer a uniform dtype for a column of span metadata values.
+
+    Only bool / int / float / str are supported -- anything else (or a mixed
+    column) is a hard error, since it can't be written to an ``.npz`` shard
+    without silently coercing (e.g. ``None`` becoming a string).
+    """
+    if all(isinstance(v, bool) for v in values):
+        return np.asarray(values, dtype=bool)
+    if all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) for v in values):
+        return np.asarray(values, dtype=np.int64)
+    if all(isinstance(v, (float, np.floating)) for v in values):
+        return np.asarray(values, dtype=np.float64)
+    if all(isinstance(v, str) for v in values):
+        return np.asarray(values, dtype=object).astype("U")
+    raise ValueError(
+        f"unsupported or mixed metadata value types: {sorted({type(v).__name__ for v in values})}"
+    )
+
 
 class RepresentationLM:
     """Judge a data point and capture its last-prompt-token representations.
@@ -596,4 +618,400 @@ class RepresentationLM:
         assert len(set(keys)) == n, (
             f"{n - len(set(keys))} duplicate (doc_id, line_index, error_type, k) rows"
         )
+        return out
+
+    # ------------------------------------------------------------------
+    # Multi-position ("span") representation collection, for the
+    # entity-detection and relation-detection tasks. judge_one/collect above
+    # are untouched -- already-run whole-record experiments stay reproducible.
+
+    def _build_prompt_with_offsets(
+        self, instructions: str, context: str, query: str
+    ) -> tuple[list[int], list[tuple[int, int]], int]:
+        """Like ``_build_prompt``, but also returns each token's character
+        offsets in the final chat-templated string, and the character shift
+        that translates a span given relative to ``query`` into that string.
+
+        Returns:
+            ``(input_ids, offsets, shift)``. ``offsets[i]`` is token ``i``'s
+            ``(start, end)`` character span in the templated string; add
+            ``shift`` to a ``query``-relative ``char_start``/``char_end`` to
+            get its position in that same string.
+
+        Raises:
+            ValueError: the tokenizer is not a fast tokenizer (offset mapping
+                requires one -- no slow-tokenizer fallback).
+            AssertionError: ``query`` doesn't occur exactly once in the raw
+                content string, or the content string doesn't occur exactly
+                once in the chat-templated string (either would make the
+                shift ambiguous), or offset-mapping tokenization disagrees
+                with ``_build_prompt``'s own tokenization of the same string,
+                or offsets are not monotonically non-decreasing.
+        """
+        if not self.tokenizer.is_fast:
+            raise ValueError(
+                f"{self.model_name!r}'s tokenizer is not a fast tokenizer; "
+                "span-to-token mapping requires return_offsets_mapping support."
+            )
+
+        content = _PROMPT_TEMPLATE.format(instructions=instructions, context=context, query=query)
+        assert content.count(query) == 1, (
+            f"query occurs {content.count(query)} time(s) in the assembled content, not "
+            "exactly once -- span offsets would be ambiguous"
+        )
+        query_shift = content.index(query)
+
+        formatted = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
+        )
+        assert isinstance(formatted, str), (
+            f"apply_chat_template(tokenize=False) returned {type(formatted)}, not str"
+        )
+        assert formatted.count(content) == 1, (
+            f"content occurs {formatted.count(content)} time(s) in the chat-templated string, "
+            "not exactly once -- span offsets would be ambiguous"
+        )
+        content_shift = formatted.index(content)
+
+        encoded = self.tokenizer(formatted, add_special_tokens=False, return_offsets_mapping=True)
+        input_ids = list(encoded["input_ids"])
+        offsets = [tuple(o) for o in encoded["offset_mapping"]]
+
+        reference_ids = list(self.tokenizer(formatted, add_special_tokens=False)["input_ids"])
+        assert input_ids == reference_ids, (
+            "offset-mapping tokenization disagrees with the plain tokenization of the same "
+            "string -- return_offsets_mapping must not change input_ids"
+        )
+        for (s0, e0), (s1, e1) in zip(offsets, offsets[1:]):
+            assert s1 >= s0 and e1 >= e0, "token offsets are not monotonically non-decreasing"
+
+        return input_ids, offsets, query_shift + content_shift
+
+    @staticmethod
+    def _last_token_covering(offsets: list[tuple[int, int]], char_pos: int) -> int:
+        """Index of the last token in ``offsets`` whose span covers ``char_pos``.
+
+        "Last", not "first" or "exact boundary": byte-level BPE routinely
+        merges a trailing quote/comma into the same token as an entity's last
+        character, so the token covering that character is not always the one
+        whose span *ends* exactly there.
+
+        Raises:
+            AssertionError: no token covers ``char_pos`` -- a real bug (the
+                span falls outside the tokenized string), not the expected
+                BPE-merge case (which "covering", not "exact end", already
+                accounts for).
+        """
+        matches = [i for i, (s, e) in enumerate(offsets) if s <= char_pos < e]
+        assert matches, f"no token covers character offset {char_pos}"
+        return matches[-1]
+
+    def _p_true_batch(self, logits: np.ndarray) -> dict[str, np.ndarray]:
+        """Vectorized ``_p_true`` over ``logits`` of shape ``[n, vocab]``."""
+        bt = self._binary_token_ids
+        true_ids = [bt["true"], bt["True"]]
+        false_ids = [bt["false"], bt["False"]]
+        t = torch.from_numpy(logits)
+        log_p_true = torch.logsumexp(t[:, true_ids], dim=1)
+        log_p_false = torch.logsumexp(t[:, false_ids], dim=1)
+        probs = torch.softmax(torch.stack([log_p_true, log_p_false], dim=1), dim=1)
+        verdict_token_id = logits.argmax(axis=1)
+        recognised_ids = set(bt.values())
+        verdict_recognised = np.asarray([int(v) in recognised_ids for v in verdict_token_id])
+        verdict_true = np.asarray([int(v) in (bt["true"], bt["True"]) for v in verdict_token_id])
+        return {
+            "p_true": probs[:, 0].numpy().astype(np.float64),
+            "p_false": probs[:, 1].numpy().astype(np.float64),
+            "logit_p_true": log_p_true.numpy().astype(np.float64),
+            "logit_p_false": log_p_false.numpy().astype(np.float64),
+            "verdict_true": verdict_true,
+            "verdict_recognised": verdict_recognised,
+        }
+
+    def judge_spans(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
+        """Judge a single prompt's list of entity/tuple spans in one prefill pass.
+
+        Args:
+            spans: one dict per span, each with ``char_start``/``char_end``
+                (offsets into ``query``, exclusive end -- exactly
+                ``entity_prompts.render_entity_list``'s span convention).
+                Every other key on a span dict is metadata carried through by
+                the caller (``collect_spans``), not read here.
+
+        Returns:
+            Dict with:
+              ``representations``: ``{layer: float32 [n_spans, hidden_size]}``
+                  -- the hidden state at each span's resolved token position.
+              ``token_index``: ``int64 [n_spans]``
+              ``exact_end_alignment``: ``bool [n_spans]`` -- whether the
+                  resolved token's own span ends exactly at the entity's last
+                  character (``False`` is expected/common, not a bug -- see
+                  ``_last_token_covering``).
+              ``p_true`` / ``p_false`` / ``logit_p_true`` / ``logit_p_false``:
+                  ``float64 [n_spans]`` -- computed at every span position
+                  uniformly (cheap: the forward pass already produces full
+                  logits). Only meaningful as a verdict where the caller
+                  placed a genuine yes/no cue at that position; the caller's
+                  own ``kind`` metadata (not read here) says which spans that
+                  applies to.
+              ``verdict_true`` / ``verdict_recognised``: ``bool [n_spans]``
+              ``prompt_n_tokens``: prompt length.
+
+        Raises:
+            ValueError: ``spans`` is empty, or the prompt exceeds
+                ``max_position_embeddings`` (see ``judge_one``).
+        """
+        if not spans:
+            raise ValueError("spans is empty")
+
+        input_ids, offsets, shift = self._build_prompt_with_offsets(instructions, context, query)
+        prompt_n_tokens = len(input_ids)
+        if prompt_n_tokens > self.max_position_embeddings:
+            raise ValueError(
+                f"prompt is {prompt_n_tokens} tokens > max_position_embeddings "
+                f"{self.max_position_embeddings}; truncation would cut into the "
+                "query, not spare context -- fix the input rather than truncate."
+            )
+
+        token_index: list[int] = []
+        exact_end_alignment: list[bool] = []
+        for span in spans:
+            char_end = shift + span["char_end"]
+            idx = self._last_token_covering(offsets, char_end - 1)
+            token_index.append(idx)
+            exact_end_alignment.append(offsets[idx][1] == char_end)
+        idx_tensor = torch.tensor(token_index, dtype=torch.long)
+
+        saved: dict[int, "torch.Tensor"] = {}
+        with torch.no_grad(), self.llm.trace(input_ids):
+            for layer in self.layers:  # ascending -- resolve_layers sorted it
+                h = self._read_point(layer)
+                seq = h[0] if h.ndim == 3 else h
+                saved[layer] = seq[idx_tensor, :].detach().to(torch.float32).save()
+            logits_saved = self.llm.logits[0, idx_tensor, :].detach().to(torch.float32).save()
+
+        representations = {
+            layer: np.asarray(t.cpu().numpy(), dtype=np.float32) for layer, t in saved.items()
+        }
+        logits = np.asarray(logits_saved.cpu().numpy(), dtype=np.float32)
+
+        n_spans = len(spans)
+        for layer, arr in representations.items():
+            assert arr.shape == (n_spans, self.hidden_size), (layer, arr.shape)
+            assert np.isfinite(arr).all(), f"non-finite representation at layer {layer}"
+        assert logits.shape == (n_spans, int(self.llm.config.vocab_size)), logits.shape
+
+        p_true_out = self._p_true_batch(logits)
+
+        out = {
+            "representations": representations,
+            "token_index": np.asarray(token_index, dtype=np.int64),
+            "exact_end_alignment": np.asarray(exact_end_alignment, dtype=bool),
+            "prompt_n_tokens": prompt_n_tokens,
+            **p_true_out,
+        }
+
+        del saved, logits_saved
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        return out
+
+    # ------------------------------------------------------------------
+
+    def collect_spans(
+        self,
+        items: list[dict],
+        cache_dir: str | Path,
+        verify_read_point: bool,
+    ) -> dict:
+        """Judge every item's spans and return stacked per-span representations.
+
+        Args:
+            items: one dict per prompt, each with ``document_id``,
+                ``instructions``, ``context``, ``query``, and ``spans`` (see
+                ``judge_spans``). Unlike ``collect`` (one fixed instruction
+                block for the whole run), ``instructions`` is per-item here:
+                entity detection's instructions name the specific entity type
+                being judged, which varies across items in the same run.
+                Every span dict, across every item, must carry the exact same
+                set of metadata keys beyond ``char_start``/``char_end`` (e.g.
+                ``kind``, ``entity_type``, ``value``, ``label_valid``) -- a
+                ragged schema is a caller bug, not something to silently pad.
+                Each metadata value must be a ``bool``, ``int``, ``float``, or
+                ``str`` (see ``_to_npz_array``).
+            cache_dir: directory for per-document ``.npz`` shards. A document
+                whose shard already holds its expected span count is skipped
+                -- a lighter resumability check than ``collect``'s exact
+                row-key comparison, sufficient here since ``items``' traversal
+                order (hence a document's span order) is fixed by the caller's
+                deterministic item-building code, not by this method.
+            verify_read_point: run ``verify_read_point`` on the first item's
+                whole prompt before judging anything (same rationale as
+                ``collect``).
+
+        Returns:
+            Dict of parallel arrays, one row per span occurrence, in
+            ``(sorted document_id, item order within document, span order
+            within item)`` order:
+              - ``representations``: ``{layer: float32 [n, hidden_size]}``
+              - ``layers``: ``int64 [len(self.layers)]``
+              - ``doc_ids``: ``str [n]``
+              - ``item_index``: ``int64 [n]`` -- index into ``items``
+              - ``token_index`` / ``exact_end_alignment``: as ``judge_spans``
+              - ``p_true`` / ``p_false`` / ``logit_p_true`` / ``logit_p_false``:
+                ``float64 [n]``
+              - ``verdict_true`` / ``verdict_recognised``: ``bool [n]``
+              - every span metadata key, stacked into an array of its inferred
+                dtype
+        """
+        if not items:
+            raise ValueError("items is empty")
+        for it in items:
+            if not it["spans"]:
+                raise ValueError(f"item for document {it['document_id']!r} has no spans")
+
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        extra_keys = sorted(set(items[0]["spans"][0]) - _SPAN_RESERVED_KEYS)
+        for it in items:
+            for span in it["spans"]:
+                keys = set(span) - _SPAN_RESERVED_KEYS
+                assert keys == set(extra_keys), (
+                    f"span metadata keys {sorted(keys)} != {extra_keys} -- every span across "
+                    "every item must carry the same metadata keys"
+                )
+
+        if verify_read_point:
+            first = items[0]
+            self.verify_read_point(first["instructions"], first["context"], first["query"])
+
+        by_doc: dict[str, list[int]] = {}
+        for i, it in enumerate(items):
+            by_doc.setdefault(it["document_id"], []).append(i)
+
+        for i, doc_id in enumerate(sorted(by_doc)):
+            shard = cache_dir / f"{doc_id}.npz"
+            expected_n_spans = sum(len(items[j]["spans"]) for j in by_doc[doc_id])
+            if shard.is_file():
+                with np.load(shard, allow_pickle=False) as z:
+                    if int(z["n_spans"]) == expected_n_spans:
+                        if self.verbose:
+                            print(f"[{i + 1}/{len(by_doc)}] {doc_id}: cached, skipping")
+                        continue
+                shard.unlink()  # incomplete / stale -- recompute
+
+            if self.verbose:
+                print(f"[{i + 1}/{len(by_doc)}] {doc_id}: judging {len(by_doc[doc_id])} item(s)")
+            self._judge_document_spans(items, by_doc[doc_id], extra_keys, shard)
+
+        return self._aggregate_spans(by_doc, extra_keys, cache_dir)
+
+    def _judge_document_spans(
+        self,
+        items: list[dict],
+        item_indices: list[int],
+        extra_keys: list[str],
+        shard: Path,
+    ) -> None:
+        """Judge one document's items' spans and write its shard atomically."""
+        per_layer: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
+        item_index_col: list[int] = []
+        scalars: dict[str, list] = {
+            k: []
+            for k in (
+                "token_index", "exact_end_alignment", "p_true", "p_false", "logit_p_true",
+                "logit_p_false", "verdict_true", "verdict_recognised",
+            )
+        }
+        extra_cols: dict[str, list] = {k: [] for k in extra_keys}
+
+        for j in item_indices:
+            it = items[j]
+            res = self.judge_spans(it["instructions"], it["context"], it["query"], it["spans"])
+            n = len(it["spans"])
+            for L in self.layers:
+                per_layer[L].append(res["representations"][L])
+            item_index_col.extend([j] * n)
+            scalars["token_index"].extend(res["token_index"].tolist())
+            scalars["exact_end_alignment"].extend(res["exact_end_alignment"].tolist())
+            scalars["p_true"].extend(res["p_true"].tolist())
+            scalars["p_false"].extend(res["p_false"].tolist())
+            scalars["logit_p_true"].extend(res["logit_p_true"].tolist())
+            scalars["logit_p_false"].extend(res["logit_p_false"].tolist())
+            scalars["verdict_true"].extend(res["verdict_true"].tolist())
+            scalars["verdict_recognised"].extend(res["verdict_recognised"].tolist())
+            for span in it["spans"]:
+                for k in extra_keys:
+                    extra_cols[k].append(span[k])
+
+        n_spans = len(item_index_col)
+        payload = {
+            "n_spans": np.asarray(n_spans, dtype=np.int64),
+            "item_index": np.asarray(item_index_col, dtype=np.int64),
+            "layers": np.asarray(self.layers, dtype=np.int64),
+            "token_index": np.asarray(scalars["token_index"], dtype=np.int64),
+            "exact_end_alignment": np.asarray(scalars["exact_end_alignment"], dtype=bool),
+            "p_true": np.asarray(scalars["p_true"], dtype=np.float64),
+            "p_false": np.asarray(scalars["p_false"], dtype=np.float64),
+            "logit_p_true": np.asarray(scalars["logit_p_true"], dtype=np.float64),
+            "logit_p_false": np.asarray(scalars["logit_p_false"], dtype=np.float64),
+            "verdict_true": np.asarray(scalars["verdict_true"], dtype=bool),
+            "verdict_recognised": np.asarray(scalars["verdict_recognised"], dtype=bool),
+        }
+        for L in self.layers:
+            # concatenate, not stack: each item contributes a variable number
+            # of span-rows, unlike judge_one/_judge_document's one-row-per-item.
+            payload[f"rep_{L}"] = np.concatenate(per_layer[L], axis=0).astype(np.float32)
+        for k in extra_keys:
+            payload[f"extra_{k}"] = _to_npz_array(extra_cols[k])
+
+        tmp = shard.with_name(shard.stem + ".tmp.npz")
+        np.savez(tmp, **payload)
+        tmp.rename(shard)
+
+    def _aggregate_spans(self, by_doc: dict, extra_keys: list[str], cache_dir: Path) -> dict:
+        """Concatenate every document shard in sorted order into one result."""
+        rep_blocks: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
+        cols: dict[str, list[np.ndarray]] = {
+            k: []
+            for k in (
+                "item_index", "token_index", "exact_end_alignment", "p_true", "p_false",
+                "logit_p_true", "logit_p_false", "verdict_true", "verdict_recognised",
+            )
+        }
+        extra_cols: dict[str, list[np.ndarray]] = {k: [] for k in extra_keys}
+        doc_id_col: list[np.ndarray] = []
+
+        for doc_id in sorted(by_doc):
+            with np.load(cache_dir / f"{doc_id}.npz", allow_pickle=False) as z:
+                assert list(z["layers"]) == self.layers, (doc_id, z["layers"])
+                n = int(z["n_spans"])
+                for L in self.layers:
+                    rep_blocks[L].append(z[f"rep_{L}"])
+                for k in cols:
+                    cols[k].append(z[k])
+                for k in extra_keys:
+                    extra_cols[k].append(z[f"extra_{k}"])
+                doc_id_col.append(np.asarray([doc_id] * n, dtype=object).astype("U"))
+
+        representations = {
+            L: np.concatenate(rep_blocks[L], axis=0).astype(np.float32) for L in self.layers
+        }
+        out: dict = {"representations": representations, "layers": np.asarray(self.layers, dtype=np.int64)}
+        out["doc_ids"] = np.concatenate(doc_id_col, axis=0)
+        for k, parts in cols.items():
+            out[k] = np.concatenate(parts, axis=0)
+        for k, parts in extra_cols.items():
+            out[k] = np.concatenate(parts, axis=0)
+
+        n = len(out["doc_ids"])
+        for L in self.layers:
+            assert representations[L].shape == (n, self.hidden_size), (L, representations[L].shape)
+            assert np.isfinite(representations[L]).all(), f"non-finite reps at layer {L}"
+        for k, v in out.items():
+            if k in ("representations", "layers"):
+                continue
+            assert len(v) == n, f"{k}: len {len(v)} != n {n}"
         return out

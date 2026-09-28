@@ -1,5 +1,6 @@
 id: 2026-09-15-qwen7b-repr-main-train-01
 project: judge-interp
+task: record_judge
 description: >-
   Collect judge representations at layers 1, 14, 28 (28 = last, post-final-norm;
   evenly spaced from the first transformer-block output to the last) for every

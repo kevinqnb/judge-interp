@@ -1,0 +1,21 @@
+id: relation_tiny_e2e
+project: judge-interp
+task: relation_detection
+description: >-
+  Tiny end-to-end fixture for scripts/run_experiment.py's relation_detection
+  task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/entity_relation_mini's
+  line corpus. Exercises plumbing and determinism (multi-type entity-list
+  rendering, tuple-membership bookkeeping), not judge quality. See
+  tests/test_relation_prompts.py for the hand-worked-out expected tuples.
+seed: 0
+params:
+  data_root: tests/fixtures/entity_relation_mini
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  split: train
+  layers: [0, 12, "last"]
+  dtype: float32
+  device: cpu
+  context_token_limit: null
+  row_subset: null
+  verify_read_point: true
+  min_valid_per_type: 1

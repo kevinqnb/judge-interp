@@ -1,0 +1,13 @@
+POLITICAL ADVERTISING CONTRACT
+
+Advertiser: Acme Committee
+Property: WAAA
+Address: 63 Chestnut St.
+Boston, MA 02101
+Contract #: 12345
+Flight: 01/05/20 - 01/12/20
+Gross Amount: $1,200.00
+
+LINE SCHEDULE
+Ch. 7   Evening News       02/10/20-02/17/20
+Ch. 13  Late Movie         02/10/20-02/17/20   $500.00

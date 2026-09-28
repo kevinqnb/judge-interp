@@ -1,5 +1,6 @@
 id: 2026-09-10-repr-smoke-01
 project: judge-interp
+task: record_judge
 description: >-
   Rung-2/3 GPU smoke for the real Qwen2.5-7B-Instruct representation-collection
   pipeline (2026-09-10-judge-representationlm-01's build-time smoke only ran the
