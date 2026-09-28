@@ -1,0 +1,38 @@
+id: 2026-09-27-llama8b-relation-line-test-01
+project: judge-interp
+task: relation_detection
+description: >-
+  Collect relation-detection representations (layers 1, 16, 32) for every
+  document in data/vrdu/line/test.json with >=1 renderable entity-type
+  list, using Llama-3.1-8B-Instruct. Same min_valid_per_type=1 as
+  2026-09-27-llama8b-relation-line-train-01, over line's 127-document test
+  split: all 127 documents kept, 2339 valid entities rendered, against 1431
+  valid tuples and 4157 invalid tuples in ground-truth
+  artifacts/tuple_membership.json (2026-09-27 measurement). Held-out
+  counterpart to 2026-09-27-llama8b-relation-line-train-01; not used by the
+  initial train-only analysis but collected now so it's available for
+  held-out checks.
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  split: test
+  layers: [1, 16, 32]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: null
+  verify_read_point: true
+  min_valid_per_type: 1
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # See 2026-09-27-llama8b-relation-line-train-01.yaml for the ~1.8s/item
+  # basis (Qwen7B-confirmed, reused for Llama-8B unconfirmed). 127 x 1.8s =
+  # 0.06h; this walltime is really budget for model load, not the items
+  # themselves.
+  walltime: "01:00:00"

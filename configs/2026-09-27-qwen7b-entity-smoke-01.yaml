@@ -1,0 +1,87 @@
+id: 2026-09-27-qwen7b-entity-smoke-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Rung-2/3 GPU smoke for entity_detection's collect_spans path (built
+  2026-09-27-entity-relation-detection-01; unlike record_judge's
+  2026-09-10-repr-smoke-01, this task has had no GPU smoke at all -- only CPU
+  end-to-end against Qwen2.5-0.5B-Instruct on the tiny fixture, see
+  tests/fixtures/entity_tiny_e2e.yaml). 20 items sampled from data/vrdu/line's
+  2121-item train set (row_subset samples across (document, field) lists, not
+  raw rows) using the exact production thresholds below (min_valid_per_list=1,
+  min_invalid_per_list=1, max_invalid_per_list=30) -- line is the harder path
+  (variable-length lists, offset-mapped multi-span reads across many entities
+  per item) vs main's short, near-uniform lists. seed=225 is deliberately
+  chosen, not arbitrary: it's the smallest seed (of 0..224 searched) whose
+  20-item sample includes (4956f339-5a45-9929-25b4-31552572480c,
+  program_desc), the single longest item across every entity/relation split
+  (18758 total prompt tokens, 2026-09-27 measurement) -- a random seed's
+  sample maxed out at ~10166 tokens, nowhere near the real worst case. This
+  matters because judge_spans (unlike record_judge's judge_one/collect, which
+  passes logits_to_keep=1) omits logits_to_keep and reads full-sequence
+  logits before indexing down to the requested span positions: at the
+  corpus's worst-case ~18.8k-token prompt that materializes a
+  [18758, 152064] logits tensor -- an estimated 5.7 GB (bf16) to 11.4 GB
+  (fp32) transient allocation with no precedent in any record_judge run
+  (whose logits_to_keep=1 design never exceeds a handful of KB regardless of
+  context length). This smoke exists specifically to find out whether that
+  fits in the 40G budget below alongside model weights (~15GB bf16) and KV
+  cache -- not just to check plumbing. Also confirms: span-to-token offset
+  mapping works under real bfloat16/CUDA (not just the CPU/float32 tiny e2e),
+  verify_read_point passes, and per-item timing to size the production
+  line/train and line/test walltimes below.
+
+  Prediction (computed on CPU from this exact seed/config before running,
+  2026-09-27): 20 items, 1094 spans total (547 content + 547 cue -- one pair
+  per entity, entity counts per list ranging with max_invalid_per_list=30),
+  n_valid + n_invalid entities summing to 547 content spans.
+  verdict_recognised_rate at the 547 cue spans is predicted to land at or
+  near 0.0, not because of model scale: each cue position sits mid-query,
+  immediately followed by "\n" and the next candidate's own line (see
+  entity_instructions.py's _HEADER -- the model is instructed to answer only
+  after the full numbered list ends, one "<n>: true/false" line per
+  candidate, not inline per cue). The literal next-token argmax at a cue
+  position is therefore expected to be a continuation token (newline/next
+  digit), not "true"/"false", on any model size -- matching the 0.0 already
+  observed on the CPU tiny e2e's 0.5B model (build note, 2026-09-27). If this
+  run instead shows a much-higher-than-0.0 rate, treat that as the surprise
+  worth investigating before trusting the rest of the pipeline, not the
+  reverse. This does not block the entity-detection hypothesis itself, which
+  reads the *representations* at cue/content positions, not verdict tokens.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: line
+  split: train
+  layers: [1, 14, 28]
+  dtype: bfloat16
+  device: cuda
+  # Tightened from record_judge's 30000 -- see
+  # 2026-09-27-qwen7b-entity-line-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: {n: 20, seed: 225}
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  # gpu_type left blank (per 2026-09-15's qwen7b/llama8b record_judge
+  # configs) so SGE schedules any GPU type meeting gpu_memory/gpu_c below.
+  # 40G/7.0 is the confirmed-working combination for Qwen2.5-7B +
+  # nnsight/nnterp on this cluster for record_judge (2026-09-10-repr-smoke-01,
+  # run on an L40S) -- but record_judge's judge_one/collect never materializes
+  # more than a single position's logits (logits_to_keep=1). This task's
+  # judge_spans does not set logits_to_keep, so 40G is UNCONFIRMED for
+  # collect_spans specifically -- see the description's memory estimate
+  # (~5.7-11.4GB transient for the worst-case prompt alone, on top of ~15GB
+  # of bf16 weights). If this smoke OOMs, that is the finding -- report it and
+  # stop rather than bumping gpu_memory and resubmitting.
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # 20 items is negligible; this walltime is budget for model load + first
+  # collect_spans-on-GPU surprises, not the items themselves.
+  walltime: "01:00:00"

@@ -1,0 +1,45 @@
+id: 2026-09-27-llama8b-entity-line-train-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Collect entity-detection representations (layers 1, 16, 32) for every
+  surviving (document, field) entity list built from
+  data/vrdu/line/train.json using Llama-3.1-8B-Instruct. Same thresholds
+  and item counts as 2026-09-27-qwen7b-entity-line-train-01: 2121 lists (424
+  skipped) totaling 11762 valid + 49779 decoy entities (2026-09-27
+  measurement, thresholds are model-independent) -- see that config for the
+  max_invalid_per_list=30 tradeoff (line's decoy pools run far richer than
+  main's: median 34, p99 ~112, max 305 uncapped). Feeds the planned
+  per-document-centered pooled-PCA + within-document shuffle-control analysis
+  testing whether valid/invalid entities separate geometrically within a
+  document (2026-09-27-entity-relation-detection-01's hypothesis).
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  dataset: line
+  split: train
+  layers: [1, 16, 32]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: null
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Reuses 2026-09-27-qwen7b-entity-line-train-01's confirmed ~2.7s/item
+  # figure as a starting budget -- no Llama-8B timing exists for this task,
+  # only Qwen7B's (per this session's decision not to run a dedicated Llama
+  # smoke, 2026-09-27). 2121 x 2.7s = 1.6h; walltime below keeps the original
+  # generous margin rather than tightening it, since Llama's own per-item
+  # cost on this exact (model, device, dtype) is unconfirmed. Resumable via
+  # collect_spans' per-document shard cache if killed early.
+  walltime: "06:00:00"

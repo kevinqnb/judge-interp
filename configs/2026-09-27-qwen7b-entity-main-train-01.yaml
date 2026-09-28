@@ -1,0 +1,70 @@
+id: 2026-09-27-qwen7b-entity-main-train-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Collect entity-detection representations (layers 1, 14, 28; 28 = last,
+  post-final-norm) for every surviving (document, field) entity list built
+  from data/vrdu/main/train.json using Qwen2.5-7B-Instruct.
+  min_valid_per_list=1/min_invalid_per_list=1/max_invalid_per_list=30 over
+  main's 513-document train split yields 4002 lists (615 (document, field)
+  pairs skipped for having zero valid or zero decoy values -- main has one row
+  per document, so decoys are capped by that document's own corruption count,
+  never by max_invalid_per_list: no main list exceeds 9 decoys, measured
+  2026-09-27) totaling 4002 valid +
+  19519 decoy entities (2026-09-27 measurement). Feeds the planned
+  per-document-centered pooled-PCA + within-document shuffle-control analysis
+  testing whether valid/invalid entities separate geometrically within a
+  document (2026-09-27-entity-relation-detection-01's hypothesis).
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: main
+  split: train
+  layers: [1, 14, 28]
+  dtype: bfloat16
+  device: cuda
+  # Tightened from record_judge's 30000 (see e.g.
+  # 2026-09-10-repr-main-train-01.yaml) because this task's query overhead --
+  # the rendered entity list itself -- is far larger than record_judge's
+  # ~610-token instructions+query+chat-template overhead. Measured 2026-09-27
+  # with the real Qwen2.5-7B-Instruct tokenizer at this task's production
+  # max_invalid_per_list=30: the worst rendered list across all four
+  # entity_detection splits (line/train) is ~1332 tokens, and
+  # relation_detection's worst per-document all-types list is ~1768 tokens.
+  # 28000 leaves 32768-28000=4768 tokens of margin under Qwen's
+  # max_position_embeddings -- ~2.3x the largest measured *total* overhead
+  # (query 1768 + instructions ~298 + chat-template ~40 = ~2106) -- while
+  # still sitting far above the real corpus's measured max raw OCR
+  # context (17745 tokens, 2026-09-10). main's own lists are short (max ~261
+  # query tokens) so this ceiling is never close to binding here; it is set
+  # once at this conservative value so every entity/relation config in this
+  # family shares one number instead of tuning per-split margins.
+  context_token_limit: 28000
+  row_subset: null
+  # Not yet confirmed for entity_detection on this exact (model, device,
+  # dtype) outside 2026-09-27-qwen7b-entity-smoke-01 -- run that smoke first
+  # and keep this on until it passes.
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  # Moderate cap: main lists never reach it (natural max is 9 decoys), so this
+  # value only binds for the line splits -- see
+  # 2026-09-27-qwen7b-entity-line-train-01.yaml for the line-specific
+  # tradeoff (median line list ~34 decoys, p99 ~112, max 305, uncapped).
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  # Same confirmed-working combination as record_judge's Qwen2.5-7B jobs
+  # (2026-09-10-repr-smoke-01); model weights already cached under HF_HOME.
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Unconfirmed estimate, not a measurement: reuses record_judge's <=2.5s/item
+  # budget (2026-09-10-repr-main-train-01) since main/entity items are
+  # comparable in context length to main/record_judge rows and this task has
+  # had no GPU smoke yet. 4002 items x 2.5s = 2.8h; walltime below is a ~2.2x
+  # margin over that. Update once 2026-09-27-qwen7b-entity-smoke-01's
+  # log.txt gives a real seconds/item figure.
+  walltime: "06:00:00"

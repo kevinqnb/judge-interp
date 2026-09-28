@@ -1,0 +1,59 @@
+id: 2026-09-27-qwen7b-relation-smoke-01
+project: judge-interp
+task: relation_detection
+description: >-
+  Rung-2/3 GPU smoke for relation_detection's collect_spans path (built
+  2026-09-27-entity-relation-detection-01; no GPU smoke yet -- only CPU
+  end-to-end against Qwen2.5-0.5B-Instruct on the tiny fixture, see
+  tests/fixtures/relation_tiny_e2e.yaml). 20 documents sampled from
+  data/vrdu/line's 509-document train set (row_subset samples one item per
+  document) using production min_valid_per_type=1. seed=34 is deliberately
+  chosen, not arbitrary: it's the smallest seed (of 0..199 searched) whose
+  20-document sample includes 4956f339-5a45-9929-25b4-31552572480c, the
+  single longest item across every entity/relation split (18673 total prompt
+  tokens, 2026-09-27 measurement -- the same document that drives
+  2026-09-27-qwen7b-entity-smoke-01's seed choice). This matters because
+  judge_spans omits logits_to_keep and reads full-sequence logits before
+  indexing down: see that config's description for the ~5.7-11.4GB transient
+  memory estimate this worst-case prompt implies, with no precedent in any
+  record_judge run. This smoke exists specifically to find out whether that
+  fits in the 40G budget below, not just to check plumbing. Also confirms
+  multi-type entity-list rendering (up to 5 TYPE sections/prompt) and
+  span-to-token offset mapping work under real bfloat16/CUDA, verify_read_point
+  passes, and tuple_membership.json writes correctly.
+
+  Prediction (computed on CPU from this exact seed/config before running,
+  2026-09-27): 20 items (documents), 621 spans total, all "content" kind --
+  relation_detection's items carry no "cue" spans by design (only valid
+  entities are rendered, no verdict to judge), so n_cue_spans=0 and
+  compute_span_metrics' judge_accuracy / verdict_recognised_rate are expected
+  null, not a bug -- see run_experiment.py's compute_span_metrics docstring.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  split: train
+  layers: [1, 14, 28]
+  dtype: bfloat16
+  device: cuda
+  # Tightened from record_judge's 30000 -- see
+  # 2026-09-27-qwen7b-relation-line-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: {n: 20, seed: 34}
+  verify_read_point: true
+  min_valid_per_type: 1
+
+  # -- scripts/submit.sh resources --
+  # gpu_type left blank (per 2026-09-15's qwen7b/llama8b record_judge
+  # configs) so SGE schedules any GPU type meeting gpu_memory/gpu_c below.
+  # See 2026-09-27-qwen7b-entity-smoke-01.yaml for why 40G is UNCONFIRMED for
+  # collect_spans (full-sequence logits, unlike record_judge's
+  # logits_to_keep=1). If this smoke OOMs, that is the finding -- report it
+  # and stop rather than bumping gpu_memory and resubmitting.
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # 20 items is negligible; this walltime is budget for model load + first
+  # collect_spans-on-GPU surprises, not the items themselves.
+  walltime: "01:00:00"

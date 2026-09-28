@@ -1,0 +1,51 @@
+id: 2026-09-27-llama8b-relation-line-train-01
+project: judge-interp
+task: relation_detection
+description: >-
+  Collect relation-detection representations (layers 1, 16, 32; 32 = last,
+  post-final-norm) for every document in data/vrdu/line/train.json with
+  >=1 renderable entity-type list, using Llama-3.1-8B-Instruct. Same
+  thresholds and item counts as 2026-09-27-qwen7b-relation-line-train-01: all
+  509 documents kept, 11762 valid entities rendered, against 7732 valid tuples
+  and 22313 invalid tuples in ground-truth artifacts/tuple_membership.json
+  (2026-09-27 measurement, thresholds are model-independent). Feeds the
+  planned per-document-centered pooled-PCA + within-document shuffle-control
+  analysis testing whether entities cluster by true source tuple, with shared
+  entities producing "orbiting" clusters
+  (2026-09-27-entity-relation-detection-01's hypothesis). No verdict-bearing
+  "cue" spans exist for this task, so metrics.json's judge_accuracy /
+  verdict_recognised_rate are expected null.
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  split: train
+  layers: [1, 16, 32]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: null
+  # Not yet confirmed for relation_detection on Llama-3.1-8B specifically --
+  # only 2026-09-27-qwen7b-relation-smoke-01 (Qwen-only) has run. Per-model
+  # confirmed: a dedicated Llama-8B smoke was considered and explicitly
+  # declined (2026-09-27) -- the Qwen7B smoke's collect_spans plumbing and
+  # memory-risk findings are taken as covering this task's code path well
+  # enough to proceed straight to this production job. Left on regardless,
+  # since it's cheap and this exact (model, device, dtype) combination is
+  # still unconfirmed.
+  verify_read_point: true
+  min_valid_per_type: 1
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Reuses 2026-09-27-qwen7b-relation-line-train-01's confirmed ~1.8s/item
+  # figure as a starting budget -- no Llama-8B timing exists for this task,
+  # only Qwen7B's (per this session's decision not to run a dedicated Llama
+  # smoke, 2026-09-27). 509 x 1.8s = 0.25h; walltime below keeps the
+  # original generous margin rather than tightening it. Resumable via
+  # collect_spans' per-document shard cache if killed early.
+  walltime: "02:00:00"

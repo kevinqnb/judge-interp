@@ -1,0 +1,56 @@
+id: 2026-09-27-qwen7b-relation-line-train-01
+project: judge-interp
+task: relation_detection
+description: >-
+  Collect relation-detection representations (layers 1, 14, 28; 28 = last,
+  post-final-norm) for every document in data/vrdu/line/train.json with
+  >=1 renderable entity-type list, using Qwen2.5-7B-Instruct.
+  min_valid_per_type=1 over line's 509-document train split keeps all 509
+  documents (none dropped entirely -- every document has at least one field
+  with a valid entity), rendering 11762 valid entities across up to 5 TYPE
+  sections/prompt, against 7732 valid tuples (base line items) and 22313
+  invalid tuples (intra_document-swapped rows) in ground-truth
+  artifacts/tuple_membership.json (2026-09-27 measurement; tuples are never
+  rendered into the prompt -- only the per-type entity lists are, confirmed
+  against src/judge_interp/relation_prompts.py's module docstring). Feeds the
+  planned per-document-centered pooled-PCA + within-document shuffle-control
+  analysis testing whether entities cluster by true source tuple, with shared
+  entities producing "orbiting" clusters
+  (2026-09-27-entity-relation-detection-01's hypothesis). No verdict-bearing
+  "cue" spans exist for this task (see compute_span_metrics docstring), so
+  metrics.json's judge_accuracy / verdict_recognised_rate are expected null --
+  representations are read at each entity's own content position only.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  split: train
+  layers: [1, 14, 28]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale
+  # (this split's own worst-case query, ~1768 tokens, is the largest measured
+  # overhead across the whole entity/relation config family).
+  context_token_limit: 28000
+  row_subset: null
+  # Not yet confirmed for relation_detection on this exact (model, device,
+  # dtype) outside 2026-09-27-qwen7b-relation-smoke-01 -- run that smoke
+  # first and keep this on until it passes.
+  verify_read_point: true
+  min_valid_per_type: 1
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Confirmed 2026-09-27 by 2026-09-27-qwen7b-relation-smoke-01 (20 items
+  # from this exact split, including the single longest item in the corpus,
+  # no OOM on 40G): ~1.8s/item end-to-end (68s total - ~31s model load -
+  # verify_read_point overhead, over 20 items) -- faster than
+  # entity_detection's ~2.7s/item, consistent with relation's items carrying
+  # no cue spans to add span-count overhead. 509 x 1.8s = 0.25h; walltime
+  # below is a generous margin given fixed model-load time dominates a job
+  # this small. Resumable via collect_spans' per-document shard cache if
+  # killed early.
+  walltime: "02:00:00"

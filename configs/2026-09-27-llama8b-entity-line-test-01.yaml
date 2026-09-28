@@ -1,0 +1,39 @@
+id: 2026-09-27-llama8b-entity-line-test-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Collect entity-detection representations (layers 1, 16, 32) for every
+  surviving (document, field) entity list built from
+  data/vrdu/line/test.json using Llama-3.1-8B-Instruct. Same thresholds
+  as 2026-09-27-llama8b-entity-line-train-01, over line's 127-document test
+  split: 527 lists (108 skipped) totaling 2339 valid + 9886 decoy entities
+  (2026-09-27 measurement). Held-out counterpart to
+  2026-09-27-llama8b-entity-line-train-01; not used by the initial train-only
+  analysis but collected now so it's available for held-out checks.
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  dataset: line
+  split: test
+  layers: [1, 16, 32]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale.
+  context_token_limit: 28000
+  row_subset: null
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # See 2026-09-27-llama8b-entity-line-train-01.yaml for the ~2.7s/item
+  # basis (Qwen7B-confirmed, reused for Llama-8B unconfirmed). 527 x 2.7s =
+  # 0.4h; padded generously since fixed model-load time is a larger fraction
+  # of a job this small.
+  walltime: "02:00:00"

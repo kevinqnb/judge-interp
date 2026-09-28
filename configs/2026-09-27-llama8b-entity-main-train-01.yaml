@@ -1,0 +1,55 @@
+id: 2026-09-27-llama8b-entity-main-train-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Collect entity-detection representations (layers 1, 16, 32; 32 = last,
+  post-final-norm) for every surviving (document, field) entity list built
+  from data/vrdu/main/train.json using Llama-3.1-8B-Instruct. Same
+  thresholds and item counts as
+  2026-09-27-qwen7b-entity-main-train-01: 4002 lists (615 skipped) totaling
+  4002 valid + 19519 decoy entities (2026-09-27 measurement, thresholds are
+  model-independent). Feeds the planned per-document-centered pooled-PCA +
+  within-document shuffle-control analysis testing whether valid/invalid
+  entities separate geometrically within a document
+  (2026-09-27-entity-relation-detection-01's hypothesis).
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  dataset: main
+  split: train
+  layers: [1, 16, 32]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale.
+  # Llama-3.1-8B-Instruct's own max_position_embeddings (131072) is nowhere
+  # near binding here; this value is kept the same as the Qwen configs so the
+  # whole entity/relation family shares one number rather than a
+  # per-model-tokenizer-tuned ceiling.
+  context_token_limit: 28000
+  row_subset: null
+  # Not yet confirmed for entity_detection on Llama-3.1-8B specifically --
+  # only 2026-09-27-qwen7b-entity-smoke-01 (Qwen-only) has run. Per-model
+  # confirmed: a dedicated Llama-8B smoke was considered and explicitly
+  # declined (2026-09-27) -- the Qwen7B smoke's collect_spans plumbing and
+  # memory-risk findings are taken as covering this task's code path well
+  # enough to proceed straight to this production job. Left on regardless,
+  # since it's cheap and this exact (model, device, dtype) combination is
+  # still unconfirmed.
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  # Same combination as record_judge's Llama-3.1-8B jobs
+  # (2026-09-15-llama8b-repr-main-train-01); model weights already cached
+  # under HF_HOME.
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Unconfirmed estimate: reuses 2026-09-27-qwen7b-entity-main-train-01's
+  # <=2.5s/item budget (no Llama-8B timing exists for this task either).
+  # 4002 items x 2.5s = 2.8h; walltime below is a ~2.2x margin over that.
+  walltime: "06:00:00"

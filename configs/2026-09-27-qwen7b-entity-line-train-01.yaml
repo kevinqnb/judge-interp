@@ -1,0 +1,52 @@
+id: 2026-09-27-qwen7b-entity-line-train-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Collect entity-detection representations (layers 1, 14, 28) for every
+  surviving (document, field) entity list built from
+  data/vrdu/line/train.json using Qwen2.5-7B-Instruct.
+  min_valid_per_list=1/min_invalid_per_list=1/max_invalid_per_list=30 over
+  line's 509-document train split yields 2121 lists (424 skipped) totaling
+  11762 valid + 49779 decoy entities (2026-09-27 measurement). line's decoy
+  pools are far richer than main's (uncapped decoy count per list: median 34,
+  p99 ~112, max 305, 2026-09-27) -- max_invalid_per_list=30 keeps roughly the
+  median list intact while trimming the long tail, a deliberate choice over
+  uncapped (would let a handful of 300-entity lists dominate compute) or a
+  tight cap like 8 (would discard most of line's negative-example density).
+  Feeds the planned per-document-centered pooled-PCA + within-document
+  shuffle-control analysis testing whether valid/invalid entities separate
+  geometrically within a document (2026-09-27-entity-relation-detection-01's
+  hypothesis).
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: line
+  split: train
+  layers: [1, 14, 28]
+  dtype: bfloat16
+  device: cuda
+  # See 2026-09-27-qwen7b-entity-main-train-01.yaml for the margin rationale
+  # (this split's own worst-case query, ~1332 tokens at cap=30, is the
+  # entity-detection figure that rationale is built around).
+  context_token_limit: 28000
+  row_subset: null
+  verify_read_point: true
+  min_valid_per_list: 1
+  min_invalid_per_list: 1
+  max_invalid_per_list: 30
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  # Confirmed 2026-09-27 by 2026-09-27-qwen7b-entity-smoke-01 (20 items from
+  # this exact split, including the single longest item in the corpus, no
+  # OOM on 40G): ~2.7s/item end-to-end (86s total - ~31s model load -
+  # verify_read_point overhead, over 20 items). 2121 x 2.7s = 1.6h; walltime
+  # below is a generous margin over that (kept at the pre-smoke estimate
+  # rather than tightened, since fixed model-load time and any GPU-type
+  # variance under a blank gpu_type both eat into it). Resumable via
+  # collect_spans' per-document shard cache if killed early.
+  walltime: "06:00:00"
