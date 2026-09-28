@@ -1,0 +1,7 @@
+CONTRACT
+Advertiser: Acme
+Property: WAAA
+Contract #: 111
+Ch. 7 News
+Ch. 7 Movie
+See also Sports schedule.

@@ -1,0 +1,31 @@
+id: 2026-09-28-qwen7b-entity-mixed-test-01
+project: judge-interp
+task: entity_detection_mixed
+description: >-
+  Mixed-type entity detection with substituted decoys, test split (128 docs, 10 samples each, sum m = 3323 per sample). Same setup as the train config. samples_per_doc and walltime are placeholders pending the smoke timing.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  split: test
+  # Embedding output and post-final-norm only (EntityDetectionLM enforces this).
+  layers: [0, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  doc_subset: null
+  verify_read_point: true
+  # s prompts per document; k ~ Uniform{k_min..m} per prompt (k_min=0 keeps
+  # all-valid prompts as a control).
+  samples_per_doc: 10
+  k_min: 0
+
+  # -- scripts/submit.sh resources --
+  # No logits are materialised (logits_to_keep=1), so the 40G/7.0 combination
+  # confirmed for Qwen2.5-7B record_judge runs is the starting point. Worst
+  # k=m prompt on data/ is ~19k tokens (2026-09-28 measurement).
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "02:00:00"

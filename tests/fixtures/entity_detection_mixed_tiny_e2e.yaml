@@ -1,0 +1,24 @@
+id: entity_detection_mixed_tiny_e2e
+project: judge-interp
+task: entity_detection_mixed
+description: >-
+  Tiny end-to-end fixture for scripts/run_experiment.py's entity_detection_mixed
+  task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/entity_detection_mini
+  (3 documents, m = 6/5/5 -- see tests/test_entity_detection.py for the
+  hand-worked ground truth). Exercises plumbing and determinism only. Expected:
+  n_prompts = 3 docs x samples_per_doc, n_spans = samples_per_doc x (6+5+5),
+  and n_invalid_spans = the sum of the drawn k's (predictable model-free from
+  entity_detection.sample_prompt_entries with this seed).
+seed: 0
+params:
+  data_root: tests/fixtures/entity_detection_mini
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  split: train
+  layers: [0, "last"]
+  dtype: float32
+  device: cpu
+  context_token_limit: null
+  doc_subset: null
+  verify_read_point: true
+  samples_per_doc: 3
+  k_min: 0

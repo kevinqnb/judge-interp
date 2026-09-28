@@ -1,0 +1,7 @@
+[
+ {"document_id": "doc-a", "line_index": 0, "valid": true, "error_type": null, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "channel": "7", "program_desc": "News", "program_start_date": null, "program_end_date": null, "sub_amount": null},
+ {"document_id": "doc-a", "line_index": 1, "valid": true, "error_type": null, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "channel": "7", "program_desc": "Movie", "program_start_date": null, "program_end_date": null, "sub_amount": null},
+ {"document_id": "doc-a", "line_index": 0, "valid": false, "error_type": "inter_document", "k": 1, "num_invalid_fields": 1, "invalid_fields": ["channel"], "channel": "99", "program_desc": "News", "program_start_date": null, "program_end_date": null, "sub_amount": null},
+ {"document_id": "doc-b", "line_index": 0, "valid": true, "error_type": null, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "channel": "9", "program_desc": "Weather", "program_start_date": null, "program_end_date": null, "sub_amount": null},
+ {"document_id": "doc-c", "line_index": 0, "valid": true, "error_type": null, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "channel": "7", "program_desc": "Sports", "program_start_date": null, "program_end_date": null, "sub_amount": null}
+]

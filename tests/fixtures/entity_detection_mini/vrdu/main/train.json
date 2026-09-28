@@ -1,0 +1,6 @@
+[
+ {"document_id": "doc-a", "valid": true, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "advertiser": "Acme", "agency": null, "property": "WAAA", "tv_address": null, "product": null, "contract_num": "111", "flight_from": null, "flight_to": null, "gross_amount": null},
+ {"document_id": "doc-a", "valid": false, "k": 1, "num_invalid_fields": 1, "invalid_fields": ["property"], "advertiser": "Acme", "agency": null, "property": "WZZZ", "tv_address": null, "product": null, "contract_num": "111", "flight_from": null, "flight_to": null, "gross_amount": null},
+ {"document_id": "doc-b", "valid": true, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "advertiser": "Bravo", "agency": null, "property": "WBBB", "tv_address": null, "product": null, "contract_num": "222", "flight_from": null, "flight_to": null, "gross_amount": null},
+ {"document_id": "doc-c", "valid": true, "k": 0, "num_invalid_fields": 0, "invalid_fields": [], "advertiser": "Acme", "agency": null, "property": "WCCC", "tv_address": null, "product": null, "contract_num": "333", "flight_from": null, "flight_to": null, "gross_amount": null}
+]

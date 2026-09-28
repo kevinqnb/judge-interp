@@ -40,6 +40,14 @@ Every ``params`` key is required — a missing key is a hard error, not a defaul
                        item before judging anything (determinism / read-point
                        gate; see its docstring). Leave true unless this exact
                        (model, device, dtype) has already been checked.
+
+Task ``entity_detection_mixed`` (judge_interp/entity_detection.py) takes no
+``dataset``/``row_subset``; instead:
+    layers             must be [0, "last"]
+    doc_subset         null (all documents) | {n: int, seed: int}
+    samples_per_doc    s -- prompts drawn per document
+    k_min              smallest k (decoys per prompt) that can be drawn; k is
+                       uniform on [k_min, m]
 """
 from __future__ import annotations
 
@@ -78,6 +86,14 @@ _TASK_PARAMS: dict[str, tuple[str, ...]] = {
     "relation_detection": (
         "data_root", "model", "split", "layers", "dtype", "device",
         "context_token_limit", "row_subset", "verify_read_point", "min_valid_per_type",
+    ),
+    # All entity types (main + line) in one substituted-decoy list per
+    # (document, sample) -- see judge_interp/entity_detection.py. layers must
+    # be [0, "last"].
+    "entity_detection_mixed": (
+        "data_root", "model", "split", "layers", "dtype", "device",
+        "context_token_limit", "doc_subset", "verify_read_point",
+        "samples_per_doc", "k_min",
     ),
 }
 # Allowed for any task -- read only by scripts/submit.sh, ignored here.
@@ -433,7 +449,13 @@ def main(argv=None) -> None:
 
     from judge_interp.representationlm import RepresentationLM
 
-    rlm = RepresentationLM(
+    lm_class = RepresentationLM
+    if task == "entity_detection_mixed":
+        from judge_interp.entity_detection import EntityDetectionLM
+
+        lm_class = EntityDetectionLM
+
+    rlm = lm_class(
         model_name=params["model"],
         layers=params["layers"],
         device=params["device"],
@@ -489,6 +511,23 @@ def main(argv=None) -> None:
             json.dumps(tuple_membership, indent=2)
         )
         metrics = compute_span_metrics(result)
+
+    elif task == "entity_detection_mixed":
+        from judge_interp import entity_detection
+
+        limit = params["context_token_limit"]
+        tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
+        items = entity_detection.build_items(params, seed, REPO_ROOT, tokenizer)
+        print(f"{cfg['id']}: {len(items)} prompt(s) "
+              f"({params['samples_per_doc']}/doc), split={params['split']}")
+
+        result = rlm.collect_entities(
+            items,
+            cache_dir=run_dir / "artifacts" / "cache",
+            verify_read_point=params["verify_read_point"],
+        )
+        _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
+        metrics = entity_detection.compute_metrics(result)
 
     else:
         raise AssertionError(f"unhandled task {task!r} -- load_config should have rejected this")
