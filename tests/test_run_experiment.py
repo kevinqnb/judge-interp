@@ -133,3 +133,12 @@ def test_build_items_main_dataset_error_type_is_always_none():
     items = run.build_items(params)
     assert len(items) == 3
     assert all(it["error_type"] is None for it in items)
+
+
+@pytest.mark.parametrize("kind", ["smoke", "train", "test"])
+def test_relation_listed_configs_load(kind):
+    cfg = run.load_config(
+        Path(__file__).resolve().parent.parent / "configs" / f"2026-09-28-qwen7b-relation-listed-{kind}-01.yaml"
+    )
+    assert cfg["task"] == "relation_detection_listed"
+    assert cfg["params"]["layers"] == [0, "last"]

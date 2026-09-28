@@ -48,6 +48,13 @@ Task ``entity_detection_mixed`` (judge_interp/entity_detection.py) takes no
     samples_per_doc    s -- prompts drawn per document
     k_min              smallest k (decoys per prompt) that can be drawn; k is
                        uniform on [k_min, m]
+
+Task ``relation_detection_listed`` (judge_interp/relation_detection.py) takes no
+``row_subset``; instead:
+    layers             must be [0, "last"]
+    doc_subset         null (all documents) | {n: int, seed: int}
+    min_valid_per_type a type with fewer distinct valid values is omitted
+    min_types_per_doc  a document with fewer renderable types is skipped (>= 2)
 """
 from __future__ import annotations
 
@@ -94,6 +101,13 @@ _TASK_PARAMS: dict[str, tuple[str, ...]] = {
         "data_root", "model", "split", "layers", "dtype", "device",
         "context_token_limit", "doc_subset", "verify_read_point",
         "samples_per_doc", "k_min",
+    ),
+    # Line-field relation detection, entities read in their prompted lists --
+    # see judge_interp/relation_detection.py. layers must be [0, "last"].
+    "relation_detection_listed": (
+        "data_root", "model", "split", "layers", "dtype", "device",
+        "context_token_limit", "doc_subset", "verify_read_point", "min_valid_per_type",
+        "min_types_per_doc",
     ),
 }
 # Allowed for any task -- read only by scripts/submit.sh, ignored here.
@@ -454,6 +468,10 @@ def main(argv=None) -> None:
         from judge_interp.entity_detection import EntityDetectionLM
 
         lm_class = EntityDetectionLM
+    elif task == "relation_detection_listed":
+        from judge_interp.relation_detection import RelationDetectionLM
+
+        lm_class = RelationDetectionLM
 
     rlm = lm_class(
         model_name=params["model"],
@@ -528,6 +546,28 @@ def main(argv=None) -> None:
         )
         _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
         metrics = entity_detection.compute_metrics(result)
+
+    elif task == "relation_detection_listed":
+        from judge_interp import relation_detection
+
+        limit = params["context_token_limit"]
+        tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
+        items, tuple_membership, skipped_docs = relation_detection.build_items(
+            params, seed, REPO_ROOT, tokenizer
+        )
+        print(f"{cfg['id']}: {len(items)} document prompt(s), split={params['split']}; "
+              f"skipped {len(skipped_docs)} document(s) with < {params['min_types_per_doc']} types: {skipped_docs}")
+
+        result = rlm.collect_relations(
+            items,
+            cache_dir=run_dir / "artifacts" / "cache",
+            verify_read_point=params["verify_read_point"],
+        )
+        _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
+        (run_dir / "artifacts" / "tuple_membership.json").write_text(
+            json.dumps(tuple_membership, indent=2)
+        )
+        metrics = relation_detection.compute_metrics(result, len(skipped_docs))
 
     else:
         raise AssertionError(f"unhandled task {task!r} -- load_config should have rejected this")
