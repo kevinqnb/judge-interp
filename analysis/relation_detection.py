@@ -1,444 +1,489 @@
-"""Relation-detection representations, per document: centered PCA colored by
-ground-truth source tuple.
+"""Listed relation-detection representations: PCA by source tuple, then a validity probe on
+per-relation-type cosine similarities with calibration.
 
-Visualization only (2026-09-28) -- no correlational statistics yet. Reads one
-of the 2026-09-27 ``relation_detection`` **train**-split runs
-(Qwen2.5-7B-Instruct or Llama-3.1-8B-Instruct, ``line`` dataset only -- see
-``configs/2026-09-27-<model>-relation-line-train-01.yaml``) and, for a single
-user-given ``document_id``, plots 2-component PCA of every entity presented to
-the model for that document, colored by which valid ground-truth tuple(s) it
-belongs to.
+Usage: ``uv run --python 3.12 python analysis/relation_detection.py configs/<id>.yaml``
+(every value lives in the config's ``params``; a missing key is a KeyError).
 
-Hypothesis (2026-09-27-entity-relation-detection-01, verbatim): entities
-cluster by their true source tuple, with shared entities producing "orbiting"
-clusters. "Source" here means a ``valid: true`` row in
-``artifacts/tuple_membership.json`` -- the actual base line items the
-document's entity lists were built from. ``intra_document``-swapped
-(invalid) tuples are corruptions, not ground-truth data points, and are never
-used as a source here.
+Reads the ``relation_detection_listed`` train and test runs named in the config
+(``src/judge_interp/relation_detection.py``; layers ``[0, last]``, one row per list
+entry = one row per distinct ``(entity_type, value)`` of a document) and does, in order:
 
-**Source collapsing.** Two different valid line items can carry identical
-field values across every field (observed in this corpus, e.g. document
-``00a83bbc-...``'s ``line_index`` 0 and 1) -- the model has no way to
-distinguish such rows from the rendered entity list alone, since entity lists
-only ever show *values*, never row identity. Treating each as its own source
-would mark every one of their shared entities as spuriously "multi-source".
-Valid tuples with byte-identical ``entity_index`` values are therefore
-collapsed into one source, labeled by the sorted list of ``line_index``
-values that share it (2026-09-28 design decision, confirmed with the user).
+1. **Preprocess** each split into ``X``:
+   (a) ``X = rep_last - rep_0`` (layer 0 is the token-embedding output, so this removes
+       the token-identity component);
+   (b) subtract each document's mean row;
+   (c) if ``subtract_entity_type_mean``: subtract each entity type's mean row, fit on the
+       *train* split after (b) and applied to both splits (as in analysis/entity_detection.py).
+2. **PCA** fit on the train ``X`` (all rows). For a few example train documents, each
+   entity is coloured by the ground-truth source tuple it belongs to; an entity that belongs
+   to more than one source is grey. Two panels per document: the train-wide PCA projected,
+   and a PCA refit on that document alone.
+   *Source* = a ``valid: true`` row of ``tuple_membership.json``; valid rows with identical
+   ``entity_index`` are collapsed into one source (entity lists show values, never row
+   identity, so the model cannot tell them apart). Entities join to sources on
+   ``(entity_type, value)`` and the join is asserted complete in both directions.
+3. **Datasets** ``Z^Tr``, ``Z^Tst`` (one per split, own RNG): for each of ``s`` samples draw a
+   document, an entity ``e`` uniformly from its entities, a source tuple uniformly among
+   the sources containing ``e`` (resampled if the tuple has < 2 non-null entities: nothing
+   to subsample), ``k ~ U{1..m-1}`` other members to keep -> valid ``z``; then
+   ``q ~ U{1..k}`` of the kept others are replaced by a *different-valued* entity of the
+   same type from the same document -> ``z'``. ``z'`` is labelled invalid only if **no**
+   source contains all its ``(type, value)`` pairs (a swap can land on another valid tuple,
+   e.g. a shared channel/date with a sibling program). If no different-valued swap exists, or
+   the swap lands on another valid tuple, the *whole sample is dropped* (valid entry too) and
+   redrawn, so every emitted sample is one valid + one invalid entry over the same entity types
+   (``s`` = number of such pairs). Otherwise decoy availability would depend on the type pattern
+   and leak the label through which relation slots are filled. Drop rates are reported.
+4. **Feature**: a ``C(5,2)=10``-dimensional vector, one slot per *relation type* (unordered pair
+   of the 5 entity types, ``RELATION_TYPES``; the fixed type count, not the per-tuple ``m``, so
+   a slot means the same relation in every sample). For each other entity ``o`` in ``z`` the
+   cosine similarity of ``X[e]`` and ``X[o]`` goes in the slot of ``(type(e), type(o))``;
+   relations not present in ``z`` stay 0. (Only pairs involving ``e`` are filled.) A valid ``z``
+   and its ``z'`` have the same types, so the set of filled slots carries no label information.
+   Logistic regression on the vector (train -> test), **positive class = valid**.
+   Accuracy/precision/recall/F1/AUROC, smooth ECE + reliability diagram (the functions in
+   analysis/entity_detection.py, reused unchanged).
+5. **Controls**: shuffled-train-label AUROC ~ 0.5; same-seed resample + refit gives identical
+   output; replacing X with Gaussian noise gives AUROC ~ 0.5; per-``k`` AUROC is reported
+   (the number of filled slots equals ``k``).
 
-**Entity -> source join.** An entity is joined to its source(s) by
-``(entity_type, value)`` -- never by ``value`` alone, since a value can recur
-verbatim across different field types (e.g. an identical date string in both
-``program_start_date`` and ``program_end_date``). Every rendered entity is
-asserted to have >=1 matching source: relation-detection's entity lists are
-built only from valid rows' non-null values
-(``relation_prompts.build_relation_lists`` forces ``min_invalid_per_list=0,
-max_invalid_per_list=0``), so a rendered entity with zero matching sources
-would mean the join itself is broken, not an expected corpus edge case.
-Conversely, every non-null value in every (collapsed) valid source is asserted
-to appear among the rendered entities -- with ``min_valid_per_type=1`` no
-field with a valid value is dropped from rendering, so a miss there is also a
-join bug, not corpus structure.
-
-**Coloring.** Each source gets one color from a golden-angle HSV cycle --
-chosen because the number of sources per document ranges 1 to 110 (median 13,
-2026-09-28 measurement over line/train's ``tuple_membership.json``), far
-beyond any fixed categorical design-system palette (e.g. Okabe-Ito's 8), and a
-golden-angle hue step maximizes pairwise hue separation for an arbitrary,
-not-known-in-advance count. An entity matching exactly one source is drawn as
-a plain filled marker in that source's color; an entity matching multiple
-sources is drawn as a pie marker split evenly among its matching sources'
-colors -- a literal multi-color mark for "belongs to several sources
-simultaneously", per the task spec. Because a full color legend is unreadable
-past a handful of sources, this script always prints a per-document summary
-(entity count, source count, multi-source count) so a document can be judged
-before or after plotting for whether its figure will actually be legible; an
-in-plot legend is added only when the source count is small enough to fit one.
-
-PCA here needs no separate per-document centering step (unlike
-``analysis/entity_detection.py``'s pooled-across-documents case): the whole
-analysis is already scoped to one document, so sklearn's own mean subtraction
-inside ``PCA.fit_transform`` *is* the "centered" of "centered PCA
-representations" the task asks for.
-
-Figures are saved to ``analysis/figures/`` instead of being displayed inline.
+Figures go to ``analysis/figures/<id>/``; ``metrics.json``, ``config.snapshot.yaml`` and
+``artifacts/{train,test}_pairs.npz`` go to ``$RUNS_ROOT/<id>/``.
 """
+from __future__ import annotations
 
-import argparse
 import colorsys
+import itertools
+import importlib.util
 import json
 import os
+import shutil
+import sys
+from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import to_hex
+import yaml
 from sklearn.decomposition import PCA
+from sklearn.metrics import roc_auc_score
 
 from judge_interp.prompts import LINE_FIELDS
 
-RUNS_ROOT = Path(os.environ["RUNS_ROOT"])
-FIGURES_DIR = Path(__file__).parent / "figures"
+_spec = importlib.util.spec_from_file_location("analysis_entity_detection", Path(__file__).parent / "entity_detection.py")
+ed = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ed)  # reused unchanged: preprocessing helpers, metrics, smECE, reliability plot, LR fit
 
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Nimbus Roman", "Liberation Serif", "Times New Roman", "DejaVu Serif"],
 })
 
-RUN_IDS = {
-    "qwen7b": "2026-09-27-qwen7b-relation-line-train-01",
-    "llama8b": "2026-09-27-llama8b-relation-line-train-01",
-}
-
-# Above this many sources, an in-figure legend is unreadable -- a full
-# color-keyed source table is always printed to stdout regardless (see
-# analyze_and_plot_document), but the in-figure legend is only added below
-# this count.
-MAX_LEGEND_SOURCES = 12
-
-# Marker size (matplotlib scatter `s`, points^2) for a single-source entity's
-# plain dot -- pie markers are scaled to match this exactly (see
-# _pie_marker_and_size).
-MARKER_SIZE = 40
-
-# Sources per document at or above this count still produce a legible figure
-# (enough hue separation, printed table still short); used only to suggest
-# candidate document_ids in --sweep mode, not to gate anything.
-GOOD_SOURCE_COUNT_RANGE = (5, 12)
+FIGURES_DIR = Path(__file__).parent / "figures"
+MULTI_SOURCE_COLOR = "#9A9A9A"
+MARKER_SIZE = 30
+GOLDEN = 0.6180339887498949  # hue step maximising separation for an unknown, large source count
+MAX_OTHERS = len(LINE_FIELDS) - 1
+# Relation types = unordered pairs of entity types, in LINE_FIELDS order.
+RELATION_TYPES = list(itertools.combinations(LINE_FIELDS, 2))
+RELATION_INDEX = {rt: i for i, rt in enumerate(RELATION_TYPES)}
 
 
-def load_run(run_id: str) -> dict:
-    """Load one relation_detection run: per-layer content-span representations
-    plus ``doc_ids`` / ``entity_type`` / ``value``, and its
-    ``tuple_membership.json``.
-
-    Hard-gates on ``run.json``'s status and on every span being ``kind ==
-    "content"`` -- relation_detection renders no cue spans by design (see
-    ``run_experiment.py``'s ``compute_span_metrics`` docstring), so a "cue"
-    span here would mean the wrong artifact was read.
-    """
-    run_dir = RUNS_ROOT / run_id
+# --------------------------------------------------------------------------- loading
+def load_split(run_id: str, runs_root: Path, max_docs: int | None) -> dict:
+    """Load one run into ``X = rep_last - rep_0`` plus per-row metadata and tuple membership."""
+    run_dir = runs_root / run_id
     manifest = json.loads((run_dir / "run.json").read_text())
     metrics = json.loads((run_dir / "metrics.json").read_text())
-
-    assert manifest["status"] == "success", f"{run_id}: run.json status is {manifest['status']!r}, not 'success'"
-    assert manifest["task"] == "relation_detection", (
-        f"{run_id}: task is {manifest['task']!r}, not 'relation_detection'"
-    )
-    assert metrics["n_cue_spans"] == 0, f"{run_id}: n_cue_spans={metrics['n_cue_spans']}, expected 0"
+    assert manifest["status"] == "success", f"{run_id}: status {manifest['status']!r}"
+    assert manifest["task"] == "relation_detection_listed", f"{run_id}: task {manifest['task']!r}"
+    tm = json.loads((run_dir / "artifacts" / "tuple_membership.json").read_text())
 
     with np.load(run_dir / "artifacts" / "span_representations.npz", allow_pickle=False) as z:
         layers = z["layers"].tolist()
-        kind = z["kind"]
-        assert set(np.unique(kind).tolist()) == {"content"}, (
-            f"{run_id}: unexpected span kind(s) {sorted(set(kind.tolist()))}"
-        )
-        doc_ids = z["doc_ids"]
-        entity_type = z["entity_type"]
-        value = z["value"]
-        reps = {L: z[f"rep_{L}"] for L in layers}
-
-    n = int(metrics["n_spans"])
-    assert doc_ids.shape == (n,)
-    assert entity_type.shape == (n,)
-    assert value.shape == (n,)
-    for L, arr in reps.items():
-        assert arr.shape[0] == n, (L, arr.shape)
-
-    tuple_membership = json.loads((run_dir / "artifacts" / "tuple_membership.json").read_text())
-
-    print(
-        f"{run_id}: status={manifest['status']}, git_sha={manifest['git_sha']}, "
-        f"git_dirty={manifest['git_dirty']}, n_entities={n}, "
-        f"n_documents={len(set(doc_ids.tolist()))}, layers={layers}, "
-        f"hidden={reps[layers[0]].shape[1]}"
-    )
-
-    return {
-        "run_id": run_id,
-        "layers": layers,
-        "reps": reps,
-        "doc_ids": doc_ids,
-        "entity_type": entity_type,
-        "value": value,
-        "tuple_membership": tuple_membership,
-    }
+        assert len(layers) == 2 and layers[0] == 0, f"{run_id}: layers {layers}, expected [0, last]"
+        doc_ids, etype, value = z["doc_ids"], z["entity_type"], z["value"]
+        n_all = doc_ids.shape[0]
+        assert etype.shape == value.shape == (n_all,)
+        keep = np.ones(n_all, dtype=bool)
+        if max_docs is not None:
+            keep = np.isin(doc_ids, list(dict.fromkeys(doc_ids.tolist()))[:max_docs])
+        x = z[f"rep_{layers[1]}"][keep]
+        rep0 = z["rep_0"][keep]
+        assert x.dtype == np.float32 and rep0.shape == x.shape
+        x -= rep0
+        del rep0
+        doc_ids, etype, value = doc_ids[keep], etype[keep], value[keep]
+    if max_docs is None:
+        assert len(x) == metrics["n_spans"], f"{run_id}: {len(x)} rows != metrics n_spans"
+    assert np.isfinite(x).all(), f"{run_id}: non-finite values in X"
+    docs = list(dict.fromkeys(doc_ids.tolist()))
+    assert set(docs) <= set(tm), f"{run_id}: npz documents missing from tuple_membership"
+    if max_docs is None:
+        assert set(docs) == set(tm), f"{run_id}: npz documents != tuple_membership documents"
+    tm = {d: tm[d] for d in docs}
+    keys = list(zip(doc_ids.tolist(), etype.tolist(), value.tolist()))
+    assert len(set(keys)) == len(keys), f"{run_id}: duplicate (doc, entity_type, value) rows"
+    print(f"{run_id}: n={len(x)} docs={len(docs)} hidden={x.shape[1]} layers=[0,{layers[1]}]")
+    return {"run_id": run_id, "X": x, "doc_ids": doc_ids, "entity_type": etype, "value": value,
+            "docs": docs, "tuple_membership": tm}
 
 
-def _collapse_valid_sources(tuples: list[dict]) -> list[dict]:
-    """Collapse ``valid: true`` tuples with byte-identical ``entity_index``
-    values into one source each. See this module's docstring.
-
-    Returns one dict per source, sorted by its smallest ``line_index``
-    (deterministic order -> deterministic color assignment):
-    ``{"line_indices": [int, ...], "entity_index": {field: value}}``.
+# ------------------------------------------------------------------ sources / joins
+def collapse_valid_sources(tuples: list[dict]) -> list[dict]:
+    """One source per distinct ``entity_index`` among ``valid: true`` rows, sorted by smallest
+    ``line_index``. Each: ``{"line_indices", "entity_index", "items"}``, ``items`` = frozenset of
+    the non-null ``(field, value)`` pairs.
     """
-    valid_tuples = [t for t in tuples if t["valid"]]
-    assert valid_tuples, "document has no valid tuples -- cannot build any source"
-
     by_key: dict[tuple, dict] = {}
-    for t in valid_tuples:
+    for t in tuples:
+        if not t["valid"]:
+            continue
         key = tuple(sorted(t["entity_index"].items()))
-        line_index = t["row_key"][1]
-        if key not in by_key:
-            by_key[key] = {"line_indices": [line_index], "entity_index": t["entity_index"]}
-        else:
-            assert by_key[key]["entity_index"] == t["entity_index"]
-            by_key[key]["line_indices"].append(line_index)
-
+        src = by_key.setdefault(key, {"line_indices": [], "entity_index": t["entity_index"]})
+        src["line_indices"].append(t["row_key"][1])
+    assert by_key, "document has no valid tuples"
     sources = list(by_key.values())
-    for src in sources:
-        src["line_indices"].sort()
+    for s in sources:
+        s["line_indices"].sort()
+        s["items"] = frozenset((f, v) for f, v in s["entity_index"].items() if v is not None)
+        assert set(s["entity_index"]) <= set(LINE_FIELDS)
     sources.sort(key=lambda s: s["line_indices"][0])
     return sources
 
 
-def _golden_angle_colors(n: int) -> list[tuple[float, float, float]]:
-    """``n`` RGB colors spaced by the golden angle (~137.5 deg) in hue, fixed
-    saturation/value -- maximizes pairwise hue separation for an a-priori
-    unknown, potentially large ``n`` (up to 110 sources/document here). See
-    this module's docstring for why no fixed categorical palette is used.
+def build_doc_info(split: dict) -> dict[str, dict]:
+    """Per document: ``rows`` (row index per entity key), ``keys`` (row order), ``sources``,
+    ``matches`` (source indices per key), ``by_type`` (type -> values). Join asserted complete
+    both ways: every rendered entity is in >= 1 source, every source item was rendered.
     """
-    golden_angle = 0.6180339887498949
-    return [colorsys.hsv_to_rgb((i * golden_angle) % 1.0, 0.75, 0.85) for i in range(n)]
+    rows_by_doc: dict[str, list[int]] = defaultdict(list)
+    for i, d in enumerate(split["doc_ids"].tolist()):
+        rows_by_doc[d].append(i)
+    info = {}
+    for doc in split["docs"]:
+        rows = rows_by_doc[doc]
+        keys = [(split["entity_type"][i], split["value"][i]) for i in rows]
+        key_row = {k: r for k, r in zip(keys, rows)}
+        sources = collapse_valid_sources(split["tuple_membership"][doc])
+        matches = [[j for j, s in enumerate(sources) if k in s["items"]] for k in keys]
+        for k, m in zip(keys, matches):
+            assert m, f"{doc}: rendered entity {k} is in no valid source -- join is broken"
+        rendered = set(keys)
+        for s in sources:
+            assert s["items"] <= rendered, f"{doc}: source {s['line_indices']} has unrendered items -- join is broken"
+        by_type: dict[str, list[str]] = defaultdict(list)
+        for t, v in keys:
+            by_type[t].append(v)
+        info[doc] = {"key_row": key_row, "keys": keys, "sources": sources, "matches": matches, "by_type": dict(by_type)}
+    return info
 
 
-def _match_sources(entity_type: str, value: str, sources: list[dict]) -> list[int]:
-    return [i for i, src in enumerate(sources) if src["entity_index"].get(entity_type) == value]
+# ------------------------------------------------------------------ preprocessing
+def preprocess(tr: dict, te: dict, subtract_entity_type_mean: bool) -> None:
+    """In place: per-document centering, then (optionally) train-fit per-entity-type centering."""
+    ed.center_per_document(tr["X"], tr["doc_ids"])
+    ed.center_per_document(te["X"], te["doc_ids"])
+    if subtract_entity_type_mean:
+        means = ed.fit_type_means(tr["X"], tr["entity_type"])
+        ed.subtract_type_means(tr["X"], tr["entity_type"], means)
+        ed.subtract_type_means(te["X"], te["entity_type"], means)
+        scale = float(tr["X"].std())
+        for t in means:
+            dev = float(np.abs(tr["X"][tr["entity_type"] == t].mean(axis=0)).max())
+            assert dev <= ed.ZERO_MEAN_RTOL * scale, f"type {t!r} mean not ~0 after type centering: {dev}"
+        print(f"per-entity-type centering: {sorted(means)}")
 
 
-def _wedge_marker(frac_start: float, frac_end: float, n_arc: int = 24) -> np.ndarray:
-    """Vertices of one pie wedge (as a fraction of a full circle,
-    ``frac_start``/``frac_end`` in ``[0, 1]``), centered at the origin with
-    unit radius, closed back to the origin -- usable directly as a
-    ``matplotlib`` scatter ``marker``.
+# -------------------------------------------------------------------------- sampler
+def sample_pairs(info: dict[str, dict], docs: list[str], s: int, rng: np.random.Generator) -> dict:
+    """Build ``Z`` (see module docstring, step 3). Returns arrays, one row per emitted z / z'.
+
+    ``e_row`` / ``other_rows`` (padded with -1 to ``MAX_OTHERS``) index into the split's X.
+    Asserts every valid z is a subset of some source and every emitted invalid z' of none.
     """
-    angles = np.linspace(2 * np.pi * frac_start, 2 * np.pi * frac_end, n_arc)
-    x = np.concatenate([[0.0], np.cos(angles), [0.0]])
-    y = np.concatenate([[0.0], np.sin(angles), [0.0]])
-    return np.column_stack([x, y])
-
-
-def _wedge_marker_size(verts: np.ndarray, target_size: float) -> float:
-    """``scatter``'s ``s`` for ``verts`` so it renders at the same on-screen
-    size as a plain circular marker plotted with ``s=target_size``.
-
-    ``scatter`` rescales a custom-path marker to its own vertex extent, so a
-    narrow wedge (small ``|verts|.max()``) would otherwise render larger than
-    a wide one at the same ``s`` -- multiplying by ``|verts|.max() ** 2``
-    (vertices lie on the unit circle here, so this is always 1, but the
-    factor is kept so the helper is correct for a non-unit-radius marker too)
-    undoes that rescaling.
-    """
-    return target_size * float(np.abs(verts).max() ** 2)
-
-
-def _scatter_pie(ax, x: float, y: float, colors: list, target_size: float) -> None:
-    """Draw one point as a pie marker split evenly among ``colors``, via
-    ``n`` overlaid custom-marker scatter calls -- markers are sized/shaped in
-    display space (points), unlike a data-space patch (e.g. ``Wedge``), so
-    the result is a round pie regardless of the axes' data aspect ratio or
-    which point happens to set the axis limits.
-    """
-    n = len(colors)
-    for i, color in enumerate(colors):
-        verts = _wedge_marker(i / n, (i + 1) / n)
-        ax.scatter(
-            [x], [y], marker=verts, s=_wedge_marker_size(verts, target_size),
-            facecolor=color, edgecolors="black", linewidths=0.3,
-        )
-
-
-def _join_document(doc_id: str, keys: list[tuple[str, str]], tuples: list[dict]) -> tuple[list[dict], list[list[int]]]:
-    """Collapse ``doc_id``'s valid tuples into sources and join ``keys``
-    (``(entity_type, value)`` per rendered entity) to them, asserting the join
-    is complete in both directions. Shared by ``analyze_and_plot_document``
-    and ``sweep_all_documents`` so their validation can't drift apart.
-    """
-    assert len(set(keys)) == len(keys), f"{doc_id}: duplicate (entity_type, value) rendered entities"
-
-    sources = _collapse_valid_sources(tuples)
-    matches = [_match_sources(et, v, sources) for et, v in keys]
-    for (et, v), m in zip(keys, matches):
-        assert m, f"{doc_id}: rendered entity ({et!r}, {v!r}) matches no valid source -- join is broken"
-
-    rendered_set = set(keys)
-    for src in sources:
-        for field in LINE_FIELDS:
-            v = src["entity_index"].get(field)
-            if v is None:
-                continue
-            assert (field, v) in rendered_set, (
-                f"{doc_id}: source {src['line_indices']}'s {field}={v!r} was never rendered -- join is broken"
-            )
-    return sources, matches
-
-
-def sweep_all_documents(run: dict) -> None:
-    """Validate the source-collapse + entity<->source join for every document
-    in ``run["tuple_membership"]`` (no plotting). The per-document asserts in
-    ``analyze_and_plot_document`` were only ever exercised, during
-    development, against a handful of hand-picked documents -- this checks
-    all of them before a user passes an arbitrary ``document_id``.
-
-    Also prints, per ``entity_type``, the share of that type's rendered
-    entities that are multi-source -- e.g. a value like a channel call sign
-    or a recurring date is far more likely to be shared across several
-    source line items than a free-text ``program_desc`` is, so pie-vs-dot
-    placement in a document's figure partly reflects entity *type*, not only
-    "how many sources this value happens to have" -- and suggests a few
-    ``document_id``s whose source count falls in ``GOOD_SOURCE_COUNT_RANGE``
-    (enough sources for the hypothesis to be interesting, few enough for the
-    figure and the printed table to stay legible).
-    """
-    doc_ids = run["doc_ids"]
-    entity_type_all = run["entity_type"]
-    value_all = run["value"]
-
-    docs = sorted(run["tuple_membership"])
-    assert set(docs) == set(np.unique(doc_ids).tolist()), (
-        "tuple_membership.json document set != span_representations.npz document set"
-    )
-
-    n_multi_by_type: dict[str, int] = {f: 0 for f in LINE_FIELDS}
-    n_total_by_type: dict[str, int] = {f: 0 for f in LINE_FIELDS}
-    candidates: list[tuple[str, int]] = []
-
-    for doc_id in docs:
-        mask = doc_ids == doc_id
-        keys = list(zip(entity_type_all[mask].tolist(), value_all[mask].tolist()))
-        sources, matches = _join_document(doc_id, keys, run["tuple_membership"][doc_id])
-
-        for (et, _), m in zip(keys, matches):
-            n_total_by_type[et] += 1
-            if len(m) > 1:
-                n_multi_by_type[et] += 1
-
-        if GOOD_SOURCE_COUNT_RANGE[0] <= len(sources) <= GOOD_SOURCE_COUNT_RANGE[1]:
-            candidates.append((doc_id, len(sources)))
-
-    print(f"swept {len(docs)} documents: join + reverse-check OK on every one")
-    print("multi-source rate by entity_type:")
-    for f in LINE_FIELDS:
-        if n_total_by_type[f] == 0:
+    out: dict[str, list] = defaultdict(list)
+    n_pairs = 0
+    stats = {"draws": 0, "rejected_m_lt_2": 0, "no_swap_possible": 0, "swap_still_valid": 0}
+    while n_pairs < s:
+        stats["draws"] += 1
+        doc = docs[rng.integers(len(docs))]
+        d = info[doc]
+        e_idx = int(rng.integers(len(d["keys"])))
+        src = d["sources"][d["matches"][e_idx][rng.integers(len(d["matches"][e_idx]))]]
+        e_key = d["keys"][e_idx]
+        members = [(f, src["entity_index"][f]) for f in LINE_FIELDS if src["entity_index"].get(f) is not None]
+        m = len(members)
+        if m < 2:
+            stats["rejected_m_lt_2"] += 1
             continue
-        pct = 100.0 * n_multi_by_type[f] / n_total_by_type[f]
-        print(f"    {f}: {n_multi_by_type[f]}/{n_total_by_type[f]} ({pct:.1f}%) multi-source")
-    print(
-        f"{len(candidates)} document(s) with {GOOD_SOURCE_COUNT_RANGE[0]}-{GOOD_SOURCE_COUNT_RANGE[1]} "
-        "sources (legible figure candidates), e.g.:"
-    )
-    for doc_id, n_sources in candidates[:10]:
-        print(f"    {doc_id} ({n_sources} sources)")
+        assert e_key in members
+        others = [x for x in members if x != e_key]
+        k = int(rng.integers(1, m))  # 1..m-1
+        kept = [others[i] for i in sorted(rng.permutation(len(others))[:k])]
+        z = [e_key] + kept
+        assert any(frozenset(z) <= sx["items"] for sx in d["sources"]), "valid z not inside any source"
+
+        q = int(rng.integers(1, k + 1))  # 1..k
+        swap_pos = sorted(rng.permutation(k)[:q])
+        z2 = list(kept)
+        n_changed = 0
+        for pos in swap_pos:
+            t, v = kept[pos]
+            cands = [c for c in d["by_type"][t] if c != v]
+            if cands:
+                z2[pos] = (t, cands[rng.integers(len(cands))])
+                n_changed += 1
+
+        def emit(others_keys, label, n_ch):
+            rows = [d["key_row"][kk] for kk in others_keys]
+            out["doc"].append(doc)
+            out["e_row"].append(d["key_row"][e_key])
+            out["other_rows"].append(rows + [-1] * (MAX_OTHERS - len(rows)))
+            out["label"].append(label)
+            out["m"].append(m)
+            out["k"].append(k)
+            out["q"].append(q)
+            out["n_changed"].append(n_ch)
+            out["pair_id"].append(n_pairs)
+
+        if n_changed == 0:
+            stats["no_swap_possible"] += 1
+            continue
+        if any(frozenset([e_key] + z2) <= sx["items"] for sx in d["sources"]):
+            stats["swap_still_valid"] += 1
+            continue
+        emit(kept, True, 0)
+        emit(z2, False, n_changed)
+        n_pairs += 1
+    res = {k_: np.array(v) for k_, v in out.items()}
+    res["label"] = res["label"].astype(bool)
+    assert res["other_rows"].shape[1] == MAX_OTHERS
+    assert int(res["label"].sum()) == s and int((~res["label"]).sum()) == s, "not one valid + one invalid per pair"
+    assert stats["draws"] == s + stats["rejected_m_lt_2"] + stats["no_swap_possible"] + stats["swap_still_valid"]
+    res["stats"] = stats
+    return res
 
 
-def analyze_and_plot_document(run: dict, document_id: str, out_path: Path) -> None:
-    doc_ids = run["doc_ids"]
-    mask = doc_ids == document_id
-    assert mask.any(), (
-        f"document_id {document_id!r} not found among {len(set(doc_ids.tolist()))} documents "
-        f"in {run['run_id']}"
-    )
-    assert document_id in run["tuple_membership"], (
-        f"document_id {document_id!r} has entities in {run['run_id']} but no entry in "
-        "tuple_membership.json -- inconsistent artifacts"
-    )
+def relation_features(x: np.ndarray, etype: np.ndarray, e_row: np.ndarray, other_rows: np.ndarray,
+                      absent_fill: float) -> np.ndarray:
+    """``(f, present)``, both ``(n, len(RELATION_TYPES))`` (float64, bool): slot ``(type(e), type(o))`` = ``cos(X[e], X[o])`` for each
+    other entity ``o``; absent relations are ``absent_fill`` (config ``absent_fill``). ``-1`` entries in ``other_rows`` are padding.
+    """
+    f = np.full((len(e_row), len(RELATION_TYPES)), absent_fill, dtype=np.float64)
+    present = np.zeros(f.shape, dtype=bool)
+    for i in range(len(e_row)):
+        xe = x[e_row[i]].astype(np.float64)
+        ne = np.linalg.norm(xe)
+        assert ne > 0
+        te = str(etype[e_row[i]])
+        n_filled = 0
+        for r in other_rows[i]:
+            if r < 0:
+                continue
+            xo = x[r].astype(np.float64)
+            no = np.linalg.norm(xo)
+            assert no > 0
+            to = str(etype[r])
+            assert to != te
+            idx = RELATION_INDEX[tuple(sorted((te, to), key=LINE_FIELDS.index))]
+            assert not present[i, idx], "two others share a relation type"
+            present[i, idx] = True
+            f[i, idx] = xe @ xo / (ne * no)
+            n_filled += 1
+        assert n_filled == int((other_rows[i] >= 0).sum()) >= 1
+    assert np.isfinite(f).all() and (np.abs(f[present]) <= 1 + 1e-9).all()
+    return f, present
 
-    entity_type = run["entity_type"][mask]
-    value = run["value"][mask]
-    n = int(mask.sum())
 
-    keys = list(zip(entity_type.tolist(), value.tolist()))
-    n_sources_raw = sum(1 for t in run["tuple_membership"][document_id] if t["valid"])
-    sources, matches = _join_document(document_id, keys, run["tuple_membership"][document_id])
-    if n_sources_raw != len(sources):
-        print(f"[{document_id}] collapsed {n_sources_raw} valid tuples into {len(sources)} distinct source(s)")
+# ---------------------------------------------------------------------------- plots
+def source_colors(n: int) -> list[tuple[float, float, float]]:
+    return [colorsys.hsv_to_rgb((i * GOLDEN) % 1.0, 0.75, 0.85) for i in range(n)]
 
-    n_multi = sum(1 for m in matches if len(m) > 1)
-    print(
-        f"[{document_id}] {n} entities, {len(sources)} source(s) "
-        f"({n_multi} multi-source entit{'y' if n_multi == 1 else 'ies'})"
-    )
 
-    colors = _golden_angle_colors(len(sources))
-    layers = run["layers"]
-
-    fig, axes = plt.subplots(
-        1, len(layers), figsize=(5.5 * len(layers), 5.5), squeeze=False, constrained_layout=True
-    )
-    axes = axes[0]
-    for ax, layer in zip(axes, layers):
-        x = run["reps"][layer][mask]
-        pca = PCA(n_components=2)
-        scores = pca.fit_transform(x)
-
-        for i in range(n):
-            m = matches[i]
-            if len(m) == 1:
-                ax.scatter(
-                    scores[i, 0], scores[i, 1], color=colors[m[0]], s=MARKER_SIZE,
-                    edgecolors="black", linewidths=0.3,
-                )
-            else:
-                _scatter_pie(ax, scores[i, 0], scores[i, 1], [colors[j] for j in m], MARKER_SIZE)
-
-        var1, var2 = pca.explained_variance_ratio_[:2]
-        ax.set_xlabel(f"PC1 ({var1:.1%})")
-        ax.set_ylabel(f"PC2 ({var2:.1%})")
-        ax.set_title(f"layer {layer}")
+def plot_example_doc(doc: str, d: dict, x_doc: np.ndarray, global_scores: np.ndarray, max_legend: int,
+                     seed: int, out_dir: Path) -> None:
+    n_src = len(d["sources"])
+    cols = source_colors(n_src)
+    face = [cols[m[0]] if len(m) == 1 else MULTI_SOURCE_COLOR for m in d["matches"]]
+    n_multi = sum(len(m) > 1 for m in d["matches"])
+    local = PCA(n_components=2, svd_solver="full", random_state=seed).fit(x_doc)
+    panels = [("train-wide PCA", global_scores, None), ("per-document PCA", local.transform(x_doc), local)]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5.4), constrained_layout=True)
+    for ax, (name, sc, pca) in zip(axes, panels):
+        ax.scatter(sc[:, 0], sc[:, 1], c=face, s=MARKER_SIZE, edgecolors="black", linewidths=0.3)
+        ev = ("" if pca is None else f" ({pca.explained_variance_ratio_[0]:.1%})", "" if pca is None else f" ({pca.explained_variance_ratio_[1]:.1%})")
+        ax.set(xlabel="PC1" + ev[0], ylabel="PC2" + ev[1], title=name)
         ax.set_box_aspect(1)
-
-    # Always print a color-keyed source table -- an in-figure legend past
-    # MAX_LEGEND_SOURCES is unreadable, but a printed table with no color
-    # column is useless for mapping a pie slice back to its source. Printing
-    # it unconditionally also covers the in-between case (e.g. the median
-    # document's 13 sources, just over MAX_LEGEND_SOURCES=12) with a real
-    # color reference rather than nothing.
-    print(f"[{document_id}] source table (color, line_indices, entity_index):")
-    for i, (color, src) in enumerate(zip(colors, sources)):
-        print(f"    source {i} {to_hex(color)}: line_indices={src['line_indices']} entity_index={src['entity_index']}")
-
-    if len(sources) <= MAX_LEGEND_SOURCES:
-        handles = [
-            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=c, markeredgecolor="black", markersize=8,
-                       label=f"line {src['line_indices']}")
-            for c, src in zip(colors, sources)
-        ]
-        axes[0].legend(handles=handles, loc="best", fontsize=7, framealpha=0.9, title="source (line_index)")
-    else:
-        print(f"[{document_id}] {len(sources)} sources > {MAX_LEGEND_SOURCES} -- skipping in-figure legend, see source table above")
-
-    fig.suptitle(f"relation_detection | doc {document_id} | {run['run_id']}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150)
+    if n_src <= max_legend:
+        h = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=c, markeredgecolor="black", markersize=7,
+                        label=f"line {s['line_indices']}") for c, s in zip(cols, d["sources"])]
+        h.append(plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=MULTI_SOURCE_COLOR,
+                            markeredgecolor="black", markersize=7, label="multiple sources"))
+        axes[1].legend(handles=h, loc="best", fontsize=7, framealpha=0.9)
+    fig.suptitle(f"doc {doc[:8]} | {len(face)} entities, {n_src} sources, {n_multi} multi-source (grey)")
+    fig.savefig(out_dir / f"pca_sources_{doc[:8]}.png", dpi=150)
     plt.close(fig)
-    print(f"[{document_id}] saved figure to {out_path}")
+
+
+def pick_example_docs(info: dict, docs: list[str], n: int, lo: int, hi: int, seed: int) -> list[str]:
+    cand = [d for d in docs if lo <= len(info[d]["sources"]) <= hi]
+    assert len(cand) >= n, f"only {len(cand)} train docs with {lo}-{hi} sources, need {n}"
+    rng = np.random.default_rng(seed)
+    return [cand[i] for i in sorted(rng.choice(len(cand), size=n, replace=False))]
+
+
+# ----------------------------------------------------------------------------- main
+def fit_and_score(f_tr, y_tr, f_te, p, seed):
+    clf = ed.fit_logreg(f_tr, y_tr, p, seed)
+    return clf, clf.predict_proba(f_te)[:, 1]
+
+
+def run(cfg: dict, runs_root: Path) -> dict:
+    p, seed = cfg["params"], cfg["seed"]
+    out = runs_root / cfg["id"]
+    fig_dir = FIGURES_DIR / cfg["id"]
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    (out / "artifacts").mkdir(parents=True, exist_ok=True)
+
+    tr = load_split(p["train_run_id"], runs_root, p["max_docs"])
+    te = load_split(p["test_run_id"], runs_root, p["max_docs"])
+    assert not (set(tr["docs"]) & set(te["docs"])), "train/test documents overlap"
+    info_tr, info_te = build_doc_info(tr), build_doc_info(te)
+    preprocess(tr, te, p["subtract_entity_type_mean"])
+
+    metrics: dict[str, float] = {}
+
+    # -- PCA by source tuple (train) --
+    pca = PCA(n_components=p["pca_n_components"], svd_solver=p["pca_svd_solver"], random_state=seed).fit(tr["X"])
+    metrics["pca_evr_pc1"], metrics["pca_evr_pc2"] = (float(v) for v in pca.explained_variance_ratio_[:2])
+    rows_by_doc = defaultdict(list)
+    for i, dd in enumerate(tr["doc_ids"].tolist()):
+        rows_by_doc[dd].append(i)
+    ex_docs = pick_example_docs(info_tr, tr["docs"], p["n_example_docs"], p["example_min_sources"],
+                                p["example_max_sources"], seed)
+    print("example documents:", ex_docs)
+    for doc in ex_docs:
+        r = np.array(rows_by_doc[doc])
+        plot_example_doc(doc, info_tr[doc], tr["X"][r], pca.transform(tr["X"][r]), p["max_legend_sources"], seed, fig_dir)
+    del pca
+
+    # -- Z^Tr / Z^Tst --
+    def make(split_name, split, info, s, stream):
+        z = sample_pairs(info, split["docs"], s, np.random.default_rng([seed, stream]))
+        z["f"], z["present"] = relation_features(split["X"], split["entity_type"], z["e_row"], z["other_rows"], p["absent_fill"])
+        st = z["stats"]
+        for k_, v in st.items():
+            metrics[f"{split_name}_{k_}"] = int(v)
+        metrics[f"{split_name}_n_valid"] = int(z["label"].sum())
+        metrics[f"{split_name}_n_invalid"] = int((~z["label"]).sum())
+        metrics[f"{split_name}_no_swap_rate"] = st["no_swap_possible"] / st["draws"]
+        metrics[f"{split_name}_swap_still_valid_rate"] = st["swap_still_valid"] / st["draws"]
+        metrics[f"{split_name}_m_lt_2_reject_rate"] = st["rejected_m_lt_2"] / st["draws"]
+        for j, rt in enumerate(RELATION_TYPES):
+            for lab, name in ((True, "valid"), (False, "invalid")):
+                mk = (z["label"] == lab) & z["present"][:, j]
+                if mk.any():
+                    metrics[f"{split_name}_cos_mean_{rt[0]}__{rt[1]}_{name}"] = float(z["f"][mk, j].mean())
+        print(f"{split_name}: valid={metrics[f'{split_name}_n_valid']} invalid={metrics[f'{split_name}_n_invalid']} {st}")
+        return z
+
+    z_tr = make("train", tr, info_tr, p["s_train"], 0)
+    z_te = make("test", te, info_te, p["s_test"], 1)
+    y_tr, y_te = z_tr["label"], z_te["label"]
+    for y in (y_tr, y_te):
+        assert y.any() and (~y).any(), "one class missing"
+
+    # -- logistic regression on d --
+    clf, probs = fit_and_score(z_tr["f"], y_tr, z_te["f"], p, seed)
+    for k_, v in ed.classification_metrics(y_te, probs, p["decision_threshold"]).items():
+        metrics[f"test_{k_}"] = v
+    metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(z_tr["f"])[:, 1]))
+    metrics["lr_intercept"] = float(clf.intercept_[0])
+    for j, rt in enumerate(RELATION_TYPES):
+        metrics[f"lr_coef_{rt[0]}__{rt[1]}"] = float(clf.coef_[0, j])
+    for kk in range(1, MAX_OTHERS + 1):
+        sel = z_te["k"] == kk
+        if sel.any() and y_te[sel].any() and (~y_te[sel]).any():
+            metrics[f"test_auroc_k{kk}"] = float(roc_auc_score(y_te[sel], probs[sel]))
+            metrics[f"test_n_k{kk}"] = int(sel.sum())
+
+    dd = ed.smooth_ece(probs, y_te, p["ece_n_boot"], seed)
+    metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(dd["ce"]), float(dd["ce_ci_width"])
+    fig, ax = plt.subplots(figsize=(4.4, 4.4), constrained_layout=True)
+    ed.plot_reliability(ax, dd, ed.VALID_COLOR)
+    ax.set_title(f"Test reliability (smECE = {dd['ce']:.3f} ± {dd['ce_ci_width']:.3f})", fontsize=11)
+    fig.savefig(fig_dir / "calibration.png", dpi=200)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), constrained_layout=True)
+    ys = np.arange(len(RELATION_TYPES))
+    for lab, name, c, off in ((True, "valid", ed.VALID_COLOR, -0.15), (False, "invalid", ed.INVALID_COLOR, 0.15)):
+        means = [np.nan if not ((z_te["label"] == lab) & z_te["present"][:, j]).any()
+                 else z_te["f"][(z_te["label"] == lab) & z_te["present"][:, j], j].mean() for j in range(len(RELATION_TYPES))]
+        ax.scatter(means, ys + off, color=c, s=30, label=name)
+    ax.set_yticks(ys, [f"{a}–{b}" for a, b in RELATION_TYPES], fontsize=8)
+    ax.set(xlabel="mean cosine(X[e], X[o]) where relation present (test)")
+    ax.legend()
+    fig.savefig(fig_dir / "relation_cosine_means.png", dpi=150)
+    plt.close(fig)
+
+    # presence-only baseline: the same slots as 0/1 indicators, no cosines. If the cosine probe's AUROC
+    # is no better than this, the probe is using which relation types are present, not representations.
+    _, pres_probs = fit_and_score(z_tr["present"].astype(float), y_tr, z_te["present"].astype(float), p, seed)
+    metrics["test_auroc_presence_only"] = float(roc_auc_score(y_te, pres_probs))
+    docs_te = np.unique(z_te["doc"])
+    by_doc = {d_: np.flatnonzero(z_te["doc"] == d_) for d_ in docs_te}
+    brng = np.random.default_rng([seed, 3])
+    boots = {"cos": [], "presence": []}
+    for _ in range(p["auroc_n_boot"]):
+        sel = np.concatenate([by_doc[d_] for d_ in brng.choice(docs_te, len(docs_te))])
+        if y_te[sel].any() and (~y_te[sel]).any():
+            boots["cos"].append(roc_auc_score(y_te[sel], probs[sel]))
+            boots["presence"].append(roc_auc_score(y_te[sel], pres_probs[sel]))
+    for name, v_ in boots.items():
+        metrics[f"test_auroc_{name}_ci_lo"], metrics[f"test_auroc_{name}_ci_hi"] = (float(x_) for x_ in np.percentile(v_, [2.5, 97.5]))
+
+    # -- controls --
+    if p["run_controls"]:
+        tol = p["shuffled_label_auroc_tolerance"]
+        y_perm = np.random.default_rng(seed).permutation(y_tr)
+        _, pp = fit_and_score(z_tr["f"], y_perm, z_te["f"], p, seed)
+        metrics["control_shuffled_auroc"] = float(roc_auc_score(y_te, pp))
+        assert abs(metrics["control_shuffled_auroc"] - 0.5) <= tol, "shuffled-label AUROC not ~0.5 -- leakage"
+        # same seed -> identical sampling and predictions
+        z_te2 = sample_pairs(info_te, te["docs"], p["s_test"], np.random.default_rng([seed, 1]))
+        f2, _ = relation_features(te["X"], te["entity_type"], z_te2["e_row"], z_te2["other_rows"], p["absent_fill"])
+        assert np.array_equal(f2, z_te["f"]) and np.array_equal(z_te2["label"], y_te), "same-seed resample differs"
+        _, probs2 = fit_and_score(z_tr["f"], y_tr, z_te["f"], p, seed)
+        assert np.array_equal(probs, probs2), "same-seed refit differs"
+        metrics["control_seed_determinism"] = 1.0
+        # noise-X ablation
+        rng = np.random.default_rng([seed, 2])
+        xn_tr = rng.standard_normal(tr["X"].shape, dtype=np.float32)
+        xn_te = rng.standard_normal(te["X"].shape, dtype=np.float32)
+        dn_tr, _ = relation_features(xn_tr, tr["entity_type"], z_tr["e_row"], z_tr["other_rows"], p["absent_fill"])
+        dn_te, _ = relation_features(xn_te, te["entity_type"], z_te["e_row"], z_te["other_rows"], p["absent_fill"])
+        _, pn = fit_and_score(dn_tr, y_tr, dn_te, p, seed)
+        metrics["control_noise_x_auroc"] = float(roc_auc_score(y_te, pn))
+        assert abs(metrics["control_noise_x_auroc"] - 0.5) <= tol, "noise-X AUROC not ~0.5 -- label leaks through structure"
+
+    for name, z in (("train", z_tr), ("test", z_te)):
+        np.savez_compressed(out / "artifacts" / f"{name}_pairs.npz", **{k_: v for k_, v in z.items() if k_ != "stats"})
+    np.savez_compressed(out / "artifacts" / "test_predictions.npz", prob_valid=probs, label_valid=y_te, d=z_te["f"])
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    print(json.dumps(metrics, indent=2))
+    return metrics
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "document_id", nargs="?", default=None,
-        help="document_id to plot (must exist in the chosen run's tuple_membership.json); "
-        "omit when using --sweep",
-    )
-    ap.add_argument("--model", choices=sorted(RUN_IDS), required=True)
-    ap.add_argument(
-        "--sweep", action="store_true",
-        help="validate the source join over every document (no plotting) and suggest legible "
-        "document_ids instead of plotting one",
-    )
-    args = ap.parse_args()
-    if args.sweep == (args.document_id is not None):
-        ap.error("pass exactly one of a document_id or --sweep")
-
-    run = load_run(RUN_IDS[args.model])
-    if args.sweep:
-        sweep_all_documents(run)
-        return
-    out_path = FIGURES_DIR / f"{args.model}_relation_{args.document_id}_pca.png"
-    analyze_and_plot_document(run, args.document_id, out_path)
+    cfg_path = Path(sys.argv[1])
+    cfg = yaml.safe_load(cfg_path.read_text())
+    runs_root = Path(os.environ["RUNS_ROOT"])
+    out = runs_root / cfg["id"]
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cfg_path, out / "config.snapshot.yaml")
+    run(cfg, runs_root)
 
 
 if __name__ == "__main__":

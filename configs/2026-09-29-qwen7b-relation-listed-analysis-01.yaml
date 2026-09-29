@@ -1,0 +1,39 @@
+id: 2026-09-29-qwen7b-relation-listed-analysis-01
+project: judge-interp
+description: >-
+  Analysis of the listed relation-detection runs (Qwen2.5-7B-Instruct): X = last-layer minus layer-0
+  content-span representations, per-document then per-entity-type mean-centering (train type means);
+  train PCA colored by source tuple (grey = multi-source) for example documents; synthetic valid/invalid
+  partial-tuple datasets Z; logistic regression on the 10-dim relation-type cosine vector (cos(X[e], X[o]) per relation type, 0 if absent) (train -> test) with
+  accuracy/precision/recall/F1/AUROC and smooth ECE + reliability diagram. Positive class = valid.
+seed: 0
+params:
+  train_run_id: 2026-09-28-qwen7b-relation-listed-train-01
+  test_run_id: 2026-09-28-qwen7b-relation-listed-test-01
+  subtract_entity_type_mean: true
+  # value written into relation-type slots absent from z
+  absent_fill: 0.0
+  auroc_n_boot: 200
+  # PCA / example plots
+  pca_n_components: 2
+  pca_svd_solver: randomized
+  n_example_docs: 4
+  example_min_sources: 5
+  example_max_sources: 12
+  max_legend_sources: 12
+  # Z construction: s = number of (valid, invalid) pairs; samples with no possible or a still-valid swap are dropped
+  s_train: 20000
+  s_test: 5000
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error)
+  lr_C: 1.0
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 2000
+  run_controls: true
+  shuffled_label_auroc_tolerance: 0.03
+  # -- scripts/submit.sh --analysis resources (CPU only; walltime is a placeholder) --
+  omp: 8
+  walltime: "02:00:00"
+  # smoke: restrict each split to its first N documents (null = all)
+  max_docs: null
