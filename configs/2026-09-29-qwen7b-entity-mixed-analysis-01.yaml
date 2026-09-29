@@ -1,0 +1,34 @@
+id: 2026-09-29-qwen7b-entity-mixed-analysis-01
+project: judge-interp
+description: >-
+  Analysis of the mixed entity-detection runs (Qwen2.5-7B-Instruct): X = last-layer minus layer-0
+  content-span representations, per-document then global mean-centering; train-split PCA colored by
+  validity and by k/m; logistic regression (train -> test) with accuracy/precision/recall/F1/AUROC
+  and smooth ECE + reliability diagram. Positive class = valid.
+seed: 0
+params:
+  train_run_id: 2026-09-28-qwen7b-entity-mixed-train-01
+  test_run_id: 2026-09-28-qwen7b-entity-mixed-test-01
+  # preprocessing flags (added for -03; false = the pipeline this run used)
+  subtract_entity_type_mean: false
+  standardize: false
+  # PCA / scatter
+  pca_n_components: 2
+  pca_svd_solver: randomized
+  max_scatter_points: 20000
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error)
+  lr_C: 1.0
+  lr_max_iter: 500
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  # smooth ECE (relplot) + bootstrap for its CI
+  ece_n_boot: 2000
+  # controls
+  run_controls: true
+  shuffled_label_auroc_tolerance: 0.03
+  # -- scripts/submit.sh --analysis resources (CPU only; walltime is a placeholder) --
+  omp: 8
+  walltime: "04:00:00"
+
+  # smoke: restrict each split to its first N documents (null = all)
+  max_docs: null

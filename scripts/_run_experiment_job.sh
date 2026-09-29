@@ -25,4 +25,11 @@ cd "$REPO_ROOT"
 # the $HOME disk quota re-downloading the model.
 export HF_HOME=/projectnb/mcnet/kevin/cache-hf
 
+# CPU-only analysis job (submit.sh --analysis <script>): ANALYSIS_SCRIPT is always
+# passed by submit.sh, empty for a normal experiment. BLAS threads follow the slots.
+if [ -n "${ANALYSIS_SCRIPT}" ]; then
+    export OMP_NUM_THREADS="${NSLOTS:?NSLOTS not set -- not running under SGE}"
+    exec uv run --python 3.12 --extra analysis python "${ANALYSIS_SCRIPT}" "configs/${ID}.yaml"
+fi
+
 exec uv run --python 3.12 python scripts/run_experiment.py "configs/${ID}.yaml"
