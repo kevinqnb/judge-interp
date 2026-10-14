@@ -52,6 +52,17 @@ Task ``entity_detection_mixed`` (judge_interp/entity_detection.py) takes no
     k_min              smallest k (decoys per prompt) that can be drawn; k is
                        uniform on [k_min, m]
 
+Task ``entity_detection_row`` (judge_interp/entity_detection_row.py): one prompt per
+selected dataset row (document + that single row; entities in double quotes), the
+hidden state read at each non-null entity's closing quote. Takes ``dataset``,
+``split``, ``error_types`` as ``record_judge`` does, no ``row_subset`` /
+``include_cohesion``; instead:
+    layers             any valid layer list (no pin)
+    rows_per_stratum   {"valid": n, "<error_type>": n, ...}; keys must equal
+                       "valid" + ``error_types`` exactly; n is null (all rows) or
+                       an int >= 1, and a stratum smaller than n is a hard error.
+                       Drawn with the run ``seed``.
+
 Task ``relation_detection_listed`` (judge_interp/relation_detection.py) takes no
 ``row_subset``; instead:
     layers             must be [0, "last"]
@@ -106,6 +117,12 @@ _TASK_PARAMS: dict[str, tuple[str, ...]] = {
         "context_token_limit", "doc_subset", "verify_read_point",
         "samples_per_doc", "k_min",
     ),
+    # One prompt per (document, row), entities read at their closing quote --
+    # see judge_interp/entity_detection_row.py.
+    "entity_detection_row": (
+        "data_root", "model", "dataset", "split", "layers", "dtype", "device",
+        "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
+    ),
     # Line-field relation detection, entities read in their prompted lists --
     # see judge_interp/relation_detection.py. layers must be [0, "last"].
     "relation_detection_listed": (
@@ -155,7 +172,7 @@ def load_config(path: Path) -> dict:
     if extra:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
-    if task in ("record_judge", "entity_detection") and params["dataset"] not in ("main", "line"):
+    if task in ("record_judge", "entity_detection", "entity_detection_row") and params["dataset"] not in ("main", "line"):
         raise ValueError(f"params.dataset must be 'main' or 'line', got {params['dataset']!r}")
     return cfg
 
@@ -472,6 +489,10 @@ def main(argv=None) -> None:
         from judge_interp.entity_detection import EntityDetectionLM
 
         lm_class = EntityDetectionLM
+    elif task == "entity_detection_row":
+        from judge_interp.entity_detection_row import EntityRowLM
+
+        lm_class = EntityRowLM
     elif task == "relation_detection_listed":
         from judge_interp.relation_detection import RelationDetectionLM
 
@@ -550,6 +571,22 @@ def main(argv=None) -> None:
         )
         _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
         metrics = entity_detection.compute_metrics(result)
+
+    elif task == "entity_detection_row":
+        from judge_interp import entity_detection_row
+
+        limit = params["context_token_limit"]
+        tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
+        items = entity_detection_row.build_items(params, seed, REPO_ROOT, tokenizer)
+        print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={params['dataset']}, split={params['split']}")
+
+        result = rlm.collect_rows(
+            items,
+            cache_dir=run_dir / "artifacts" / "cache",
+            verify_read_point=params["verify_read_point"],
+        )
+        _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
+        metrics = entity_detection_row.compute_metrics(result)
 
     elif task == "relation_detection_listed":
         from judge_interp import relation_detection

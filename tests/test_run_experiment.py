@@ -148,3 +148,22 @@ def test_relation_listed_configs_load(kind):
     )
     assert cfg["task"] == "relation_detection_listed"
     assert cfg["params"]["layers"] == [0, "last"]
+
+
+def test_entity_row_fixture_config_loads_and_requires_every_key(tmp_path):
+    import yaml
+
+    path = Path(__file__).resolve().parent / "fixtures" / "entity_row_tiny_e2e.yaml"
+    cfg = run.load_config(path)
+    assert cfg["task"] == "entity_detection_row"
+    for key in ("rows_per_stratum", "error_types", "layers"):
+        broken = {**cfg, "params": {k: v for k, v in cfg["params"].items() if k != key}}
+        p = tmp_path / "entity_row_tiny_e2e.yaml"
+        p.write_text(yaml.safe_dump(broken))
+        with pytest.raises(KeyError, match=key):
+            run.load_config(p)
+    bad = {**cfg, "params": {**cfg["params"], "row_subset": None}}
+    p = tmp_path / "entity_row_tiny_e2e.yaml"
+    p.write_text(yaml.safe_dump(bad))
+    with pytest.raises(KeyError, match="row_subset"):
+        run.load_config(p)
