@@ -305,8 +305,8 @@ def plot_pca(scores, idx, label_valid, error_rate, evr, out_dir: Path, title: st
 def plot_probe_axis(logit, orth_pc, label_valid, error_rate, orth_evr, idx, out_dir: Path, title: str) -> None:
     """Test points on (probe logit, PC1 orthogonal to the probe): validity | k/m."""
     lg, pc = logit[idx], orth_pc[idx]
-    xlab = "Probe logit (valid); 0 = 0.5 threshold"
-    ylab = f"PC1 orthogonal to probe ({orth_evr:.1%} of orthogonal variance)"
+    xlab = "e @ w + b"
+    ylab = f"PC1 orthogonal to w ({orth_evr:.1%} of orthogonal variance)"
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 5.2), sharex=True, sharey=True, constrained_layout=True)
     colors = np.where(label_valid[idx], VALID_COLOR, INVALID_COLOR)
     ax1.scatter(lg, pc, c=colors, s=5, alpha=0.5, linewidths=0)
