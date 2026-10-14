@@ -16,13 +16,12 @@ params:
   device: cuda
   context_token_limit: 28000
   verify_read_point: true
-  error_types: [inter_document, intra_document, cross_type]
+  error_types: [inter_document, intra_document]
   # Stratified row draw (seeded by `seed`); keys must be "valid" + error_types.
   rows_per_stratum:
     valid: 250
     inter_document: 250
     intra_document: 250
-    cross_type: 250
 
   # -- scripts/submit.sh resources --
   # No logits are materialised (logits_to_keep=1); 40G / 7.0 is the combination confirmed
