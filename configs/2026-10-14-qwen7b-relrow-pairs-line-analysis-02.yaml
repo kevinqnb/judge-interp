@@ -1,0 +1,30 @@
+id: 2026-10-14-qwen7b-relrow-pairs-line-analysis-02
+project: judge-interp
+description: >-
+  Rerun of the previous analysis config with the P(valid) histogram (prob_histogram.png) added; every other value unchanged.
+  Pair-based relation-row analysis, line dataset (Qwen2.5-7B-Instruct, full train/test relrow runs): every field pair
+  of a source row is one sample, valid iff both fields are valid, invalid iff exactly one is, both-invalid pairs dropped;
+  per-document mean-centred layer-20 closing-quote activations of the two fields concatenated; strongly regularised
+  logistic validity probe (C=0.01); smECE / Brier skill score / AUROC on test, per-error-type report, field-pair
+  baseline and controls. Rung 4 after 2026-10-14-qwen7b-relrow-pairs-tiny-01 matched all its predictions.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-relrow-line-train-01
+  test_run_id: 2026-10-14-qwen7b-relrow-line-test-01
+  # same layer as the smoke/tiny runs; one of [0, 8, 14, 20, 24, 28], 0 is rejected
+  layer: 20
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  run_controls: true
+  # test AUROC is averaged over n_shuffles permuted-train-label fits
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  # -- scripts/submit.sh --analysis resources (CPU only) --
+  omp: 16
+  walltime: "06:00:00"
+  max_docs: null
