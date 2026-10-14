@@ -1,0 +1,27 @@
+id: 2026-10-14-qwen7b-relrow-pairs-tiny-01
+project: judge-interp
+description: >-
+  Tiny end-to-end (rung 3) for the pair-based analysis/relation_detection_row.py: first 100 documents of each
+  qwen7b relrow line split, layer 20, controls ON. Pairs of fields from one source row, valid iff both fields valid,
+  invalid iff exactly one invalid, both-invalid pairs dropped; concatenated activations; LR with C=0.01.
+  PREDICTIONS (stated before the run): (1) mean shuffled-label test AUROC within 0.03 of 0.5 (asserted) and
+  same-seed refit identical (asserted); (2) field-pair-identity baseline AUROC near chance (< 0.60);
+  (3) probe test AUROC > 0.65 and above the baseline by >= 0.10; (4) detect_inter_document > detect_intra_document;
+  (5) n_*_pairs_dropped_both_invalid > 0; train AUROC > test AUROC (7168 dims, a few thousand pairs).
+  If any of these fail, stop and investigate before scaling.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-relrow-line-train-01
+  test_run_id: 2026-10-14-qwen7b-relrow-line-test-01
+  layer: 20
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 200
+  run_controls: true
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  omp: 8
+  walltime: "00:30:00"
+  max_docs: 100

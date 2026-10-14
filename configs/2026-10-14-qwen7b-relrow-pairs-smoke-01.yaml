@@ -1,0 +1,26 @@
+id: 2026-10-14-qwen7b-relrow-pairs-smoke-01
+project: judge-interp
+description: >-
+  Smoke for the pair-based analysis/relation_detection_row.py (Qwen2.5-7B-Instruct, line train/test relrow runs, first 20
+  documents of each split): every field pair of a source row is one sample, labelled valid iff both fields are valid (or
+  both were copied from the same donor row); concatenated per-document mean-centred layer-20 closing-quote activations;
+  strongly regularised logistic validity probe. Plumbing only: the sets are tiny, controls are off.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-relrow-line-train-01
+  test_run_id: 2026-10-14-qwen7b-relrow-line-test-01
+  # one of the runs' layers [0, 8, 14, 20, 24, 28]; 0 is the constant null control and is rejected
+  layer: 20
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 200
+  run_controls: false
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  omp: 8
+  walltime: "00:30:00"
+  # smoke: restrict each split to its first N documents (null = all)
+  max_docs: 20
