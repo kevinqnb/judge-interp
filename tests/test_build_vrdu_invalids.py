@@ -473,17 +473,17 @@ def test_cross_type_candidates_same_kind_cross_dataset_and_exclusions():
     # amount: main gross_amount can take the line sub_amount and vice versa.
     assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("gross_amount")] == [("$9", "line", "sub_amount", 0)]
     assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("sub_amount")] == [("$5", "main", "gross_amount", None)]
-    # name: advertiser <- agency "B" (null fields skipped); channel "9" is not valid for advertiser.
-    assert sorted(v for v, _ in cands("advertiser")) == ["9", "9", "B"]
-    # a value already valid for the target is excluded: channel "9" is valid for channel.
-    assert "9" not in [v for v, _ in cands("channel")]
+    # name: advertiser <- agency "B" only (null fields skipped; channel has no kind, so its "9" is never offered).
+    assert sorted(v for v, _ in cands("advertiser")) == ["B"]
+    # a value already valid for the target is excluded: advertiser "A" is valid for advertiser.
+    assert "A" not in [v for v, _ in cands("advertiser")] and [v for v, _ in cands("agency")] == ["A"]
     # date: the line fragment is dropped; flight_from may take flight_to and the parseable line dates,
     # but not its own valid value.
     got = sorted(v for v, _ in cands("flight_from"))
     assert got == ["02/02/20", "02/03/20", "03/01/20"]
     assert counts["excluded_unparseable_date"] >= 1 and counts["excluded_valid_for_target"] >= 1
     # contract_num / program_desc have no kind
-    assert "contract_num" not in b.field_kinds(KINDS) and "program_desc" not in b.field_kinds(KINDS)
+    assert not {"contract_num", "channel", "program_desc"} & set(b.field_kinds(KINDS))
 
 
 def test_cross_type_value_valid_for_target_elsewhere_in_document_is_excluded():
@@ -558,7 +558,7 @@ def test_cross_type_rows_exist_in_both_datasets_and_are_real_same_kind_values(bu
             for f in r["invalid_fields"]:
                 assert kind_of[r["field_errors"][f]["source"]["field"]] == kind_of[f]
     prov = built["provenance"]["cross_type"]
-    assert prov["fields_without_kind"] == ["contract_num", "program_desc"]
+    assert prov["fields_without_kind"] == ["contract_num", "channel", "program_desc"]
     assert prov["main"]["train"]["candidate_counts"]["considered"] > 0
 
 

@@ -36,14 +36,15 @@ params:
   cross_type:
     # A cross_type field takes a value from another field of the same kind in the
     # same document (main or line). Fields in no kind (contract_num, program_desc)
-    # are never touched. tv_address and channel are grouped with names loosely.
+    # are never touched. channel is left out: it is a short number, a poor same-kind
+    # partner for names. tv_address is grouped with names loosely.
     kinds:
-      name: [advertiser, agency, property, tv_address, product, channel]
+      name: [advertiser, agency, property, tv_address, product]
       date: [flight_from, flight_to, program_start_date, program_end_date]
       amount: [gross_amount, sub_amount]
     # One cross_type row per achievable k in this range (k = number of kinded
-    # fields at most: 8 main, 4 line).
+    # fields at most: 8 main, 3 line).
     main:
       k_range: [1, 8]
     line:
-      k_range: [1, 4]
+      k_range: [1, 3]
