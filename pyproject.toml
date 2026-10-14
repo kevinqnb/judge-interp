@@ -16,6 +16,7 @@ gpu = [
     "nnsight==0.5.11",
     "nnterp>=1.2.1",
     "torch>=2.4.0",
+    "torchvision>=0.29.1",
     "transformers>=4.51.0",
 ]
 
