@@ -1,0 +1,29 @@
+id: relation_row_tiny_e2e
+project: judge-interp
+task: relation_detection_row
+description: >-
+  Tiny end-to-end fixture for scripts/run_experiment.py's relation_detection_row
+  task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/relation_row_mini, line
+  dataset, every row (see tests/test_relation_detection_row.py for the hand-worked
+  rows). Exercises plumbing and determinism only. Expected: n_prompts = 6,
+  n_spans = 5 + 4 + 5 + 5 + 4 + 5 = 28 (doc-a line 1 and its inter_document
+  variant have program_desc null), n_invalid_spans = 2 + 1 + 1 = 4
+  (n_spans_intra_document = 2, n_spans_cross_type = 1, n_spans_inter_document = 1),
+  n_valid_spans = 24, and n_rows_with_mixed_entities = 3.
+seed: 0
+params:
+  data_root: tests/fixtures/relation_row_mini
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  dataset: line
+  split: train
+  layers: [0, 12, "last"]
+  dtype: float32
+  device: cpu
+  context_token_limit: null
+  verify_read_point: true
+  error_types: [inter_document, intra_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    intra_document: null
+    cross_type: null

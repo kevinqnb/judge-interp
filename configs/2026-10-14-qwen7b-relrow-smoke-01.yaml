@@ -1,0 +1,34 @@
+id: 2026-10-14-qwen7b-relrow-smoke-01
+project: judge-interp
+task: relation_detection_row
+description: >-
+  GPU smoke for relation_detection_row (Qwen2.5-7B-Instruct, line train, 4 rows per stratum): one prompt per (document, line-item row), relation instructions, representations read at each non-null entity's closing quote at layers 0 (null control), 8, 14, 20, 24 and last, labelled per entity from field_errors. Confirms the GPU plumbing (bf16, 7B, verify_read_point) and the label bookkeeping only; expected 16 prompts, a span count equal to the non-null fields of the drawn rows (16*4 to 16*5), n_distinct_quote_token_ids = 1 and exact_end_alignment_rate = 0.0 (the quote merges with the pad space and newline).
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset: line
+  split: train
+  # 28 blocks: 0 = token embedding (identical for every entity -> null control),
+  # 28 = post-final-norm.
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  error_types: [inter_document, intra_document, cross_type]
+  # Stratified row draw (seeded by `seed`); keys must be "valid" + error_types.
+  rows_per_stratum:
+    valid: 4
+    inter_document: 4
+    intra_document: 4
+    cross_type: 4
+
+  # -- scripts/submit.sh resources --
+  # No logits are materialised (logits_to_keep=1); 40G / 7.0 is the combination confirmed
+  # for Qwen2.5-7B record_judge, mixed-entity and entity-row runs.
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"
