@@ -123,8 +123,8 @@ def load_ground_truth(data_root: str | Path, split: str) -> dict[str, dict[str, 
         AssertionError: a main document without exactly one valid row, a line
             row for a document with no main row, or a non-``str`` value.
     """
-    main_rows = load_split(data_root, "main", split)
-    line_rows = load_split(data_root, "line", split)
+    main_rows = load_split(data_root, "main", split, [])  # ground truth reads valid rows only
+    line_rows = load_split(data_root, "line", split, [])
 
     truth: dict[str, dict[str, set[str]]] = {}
     for r in main_rows:

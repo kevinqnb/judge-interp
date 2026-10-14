@@ -98,7 +98,7 @@ def build_entity_lists(
             f"min_invalid_per_list ({min_invalid_per_list})"
         )
 
-    rows = load_split(data_root, dataset, split)
+    rows = load_split(data_root, dataset, split, ["inter_document"])  # this task's decoys are inter-document only
     by_doc: dict[str, list[dict]] = {}
     for r in rows:
         by_doc.setdefault(r["document_id"], []).append(r)

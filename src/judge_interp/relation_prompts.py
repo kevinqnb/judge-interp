@@ -70,7 +70,7 @@ def build_relation_lists(data_root: str | Path, split: str, seed: int, min_valid
     for key, entities in lists.items():
         assert all(label for _, label in entities), f"{key}: relation lists must be valid-only"
 
-    rows = load_split(data_root, "line", split)
+    rows = load_split(data_root, "line", split, ["intra_document"])
     by_doc: dict[str, list[dict]] = {}
     for r in rows:
         by_doc.setdefault(r["document_id"], []).append(r)

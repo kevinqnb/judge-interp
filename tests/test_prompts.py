@@ -83,28 +83,48 @@ def test_load_ocr_context_empty():
 
 
 def test_load_split_reads_rows():
-    rows = prompts.load_split(FIXTURE, "main", "train")
+    rows = prompts.load_split(FIXTURE, "main", "train", ["inter_document"])
     assert len(rows) == 3
     assert rows[0]["document_id"] == "doc-alpha"
 
 
+def test_load_split_selects_error_types_and_always_keeps_valid_rows():
+    # the fixture's main file holds 3 valid/inter rows plus one cross_type row
+    def kinds(error_types):
+        return sorted((r["document_id"], str(r["error_type"])) for r in prompts.load_split(FIXTURE, "main", "train", error_types))
+    assert kinds([]) == [("doc-alpha", "None"), ("doc-beta", "None")]
+    assert kinds(["inter_document"]) == [("doc-alpha", "None"), ("doc-alpha", "inter_document"), ("doc-beta", "None")]
+    assert kinds(["cross_type"]) == [("doc-alpha", "None"), ("doc-alpha", "cross_type"), ("doc-beta", "None")]
+    assert len(kinds(["inter_document", "cross_type"])) == 4
+
+
+def test_load_split_rejects_bad_error_types():
+    for bad in (["intra_document"], ["nope"], ["cross_type", "cross_type"], "cross_type", None):
+        with pytest.raises(ValueError, match="error_types"):
+            prompts.load_split(FIXTURE, "main", "train", bad)
+
+
 def test_load_split_bad_dataset_or_split():
     with pytest.raises(ValueError):
-        prompts.load_split(FIXTURE, "sections", "train")
+        prompts.load_split(FIXTURE, "sections", "train", [])
     with pytest.raises(ValueError):
-        prompts.load_split(FIXTURE, "main", "dev")
+        prompts.load_split(FIXTURE, "main", "dev", [])
 
 
 def test_load_split_missing_file():
     with pytest.raises(FileNotFoundError):
-        prompts.load_split(FIXTURE / "nope", "main", "train")
+        prompts.load_split(FIXTURE / "nope", "main", "train", [])
 
 
 # --- row_key ----------------------------------------------------------
 
 
 def test_row_key_shapes():
-    assert prompts.row_key({"document_id": "d", "k": 3}, "main") == ("d", 3)
+    assert prompts.row_key({"document_id": "d", "error_type": "cross_type", "k": 3}, "main") == ("d", "cross_type", 3)
+    # inter_document and cross_type rows with the same k no longer collide
+    a = prompts.row_key({"document_id": "d", "error_type": "inter_document", "k": 2}, "main")
+    b = prompts.row_key({"document_id": "d", "error_type": "cross_type", "k": 2}, "main")
+    assert a != b
     row = {"document_id": "d", "line_index": 2, "error_type": "intra_document", "k": 3}
     assert prompts.row_key(row, "line") == ("d", 2, "intra_document", 3)
 

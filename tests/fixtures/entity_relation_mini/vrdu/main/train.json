@@ -2,6 +2,7 @@
   {
     "document_id": "doc-x",
     "valid": true,
+    "error_type": null,
     "k": 0,
     "num_invalid_fields": 0,
     "invalid_fields": [],
@@ -18,9 +19,13 @@
   {
     "document_id": "doc-x",
     "valid": false,
+    "error_type": "inter_document",
     "k": 2,
     "num_invalid_fields": 2,
-    "invalid_fields": ["property", "gross_amount"],
+    "invalid_fields": [
+      "property",
+      "gross_amount"
+    ],
     "advertiser": "Acme Committee",
     "agency": null,
     "property": "WBBB",
@@ -34,9 +39,12 @@
   {
     "document_id": "doc-x",
     "valid": false,
+    "error_type": "inter_document",
     "k": 1,
     "num_invalid_fields": 1,
-    "invalid_fields": ["agency"],
+    "invalid_fields": [
+      "agency"
+    ],
     "advertiser": "Acme Committee",
     "agency": "Big Agency",
     "property": "WAAA",
@@ -50,9 +58,12 @@
   {
     "document_id": "doc-x",
     "valid": false,
+    "error_type": "inter_document",
     "k": 1,
     "num_invalid_fields": 1,
-    "invalid_fields": ["property"],
+    "invalid_fields": [
+      "property"
+    ],
     "advertiser": "Acme Committee",
     "agency": null,
     "property": "WDDD",
@@ -66,6 +77,7 @@
   {
     "document_id": "doc-y",
     "valid": true,
+    "error_type": null,
     "k": 0,
     "num_invalid_fields": 0,
     "invalid_fields": [],
@@ -82,9 +94,12 @@
   {
     "document_id": "doc-y",
     "valid": false,
+    "error_type": "inter_document",
     "k": 1,
     "num_invalid_fields": 1,
-    "invalid_fields": ["property"],
+    "invalid_fields": [
+      "property"
+    ],
     "advertiser": "Bravo for Senate",
     "agency": "Big Agency",
     "property": "WCCC",

@@ -85,6 +85,7 @@ _MINI_PARAMS = {
     "dataset": "main",
     "split": "train",
     "row_subset": None,
+    "error_types": ["inter_document"],
 }
 
 
@@ -121,18 +122,23 @@ def test_build_items_context_token_limit_counts_tokens_not_chars():
 # both an inter_document and an intra_document invalid variant, disambiguated
 # only by error_type (see prompts.row_key and RepresentationLM._aggregate).
 def test_build_items_line_dataset_carries_error_type():
-    params = {**_MINI_PARAMS, "dataset": "line", "context_token_limit": None}
+    params = {**_MINI_PARAMS, "dataset": "line", "context_token_limit": None,
+              "error_types": ["inter_document", "intra_document"]}
     items = run.build_items(params)
     assert len(items) == 3
     keys = {(it["line_index"], it["error_type"], it["k"]) for it in items}
     assert keys == {(0, None, 0), (0, "intra_document", 1), (0, "inter_document", 1)}
 
 
-def test_build_items_main_dataset_error_type_is_always_none():
+def test_build_items_main_dataset_carries_error_type_and_honours_the_filter():
     params = {**_MINI_PARAMS, "context_token_limit": None}
     items = run.build_items(params)
     assert len(items) == 3
-    assert all(it["error_type"] is None for it in items)
+    assert sorted(str(it["error_type"]) for it in items) == ["None", "None", "inter_document"]
+    both = run.build_items({**params, "error_types": ["inter_document", "cross_type"]})
+    assert len(both) == 4 and sum(it["error_type"] == "cross_type" for it in both) == 1
+    valid_only = run.build_items({**params, "error_types": []})
+    assert len(valid_only) == 2 and all(it["label"] for it in valid_only)
 
 
 @pytest.mark.parametrize("kind", ["smoke", "train", "test"])

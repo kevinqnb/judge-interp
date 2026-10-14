@@ -38,28 +38,56 @@ QUERY_FIELDS: dict[str, list[str]] = {
 }
 
 # Row keys that describe the row rather than the extraction — never shown to the
-# judge (they would leak the label). ``error_type`` is line-only (null on valid
-# rows; "inter_document" / "intra_document" on invalid ones).
+# judge (they would leak the label). ``error_type`` is null on valid rows and one
+# of the dataset's error types on invalid ones; ``field_errors`` labels each field.
 NON_FIELD_KEYS: frozenset[str] = frozenset(
-    {"document_id", "line_index", "valid", "k", "num_invalid_fields", "invalid_fields", "error_type"}
+    {"document_id", "line_index", "valid", "k", "num_invalid_fields", "invalid_fields",
+     "error_type", "field_errors"}
 )
+
+# Invalid-row error types each dataset's file contains (see build_vrdu_invalids.py).
+ERROR_TYPES: dict[str, tuple[str, ...]] = {
+    "main": ("inter_document", "cross_type"),
+    "line": ("inter_document", "intra_document", "cross_type"),
+}
 
 LAST_LAYER_TOKEN = "last"
 
 
-def load_split(data_root: str | Path, dataset: str, split: str) -> list[dict]:
-    """Read ``<data_root>/vrdu/<dataset>/<split>.json`` (valid + invalid rows)."""
+def load_split(data_root: str | Path, dataset: str, split: str, error_types: list[str]) -> list[dict]:
+    """Read ``<data_root>/vrdu/<dataset>/<split>.json``: every valid row plus the
+    invalid rows whose ``error_type`` is in ``error_types``.
+
+    ``error_types`` is required: the file holds several error types and silently
+    reading all of them would change what a run measures. An empty list selects
+    valid rows only.
+
+    Raises:
+        ValueError: unknown dataset / split / error type, or duplicates.
+    """
     if dataset not in QUERY_FIELDS:
         raise ValueError(f"dataset must be one of {sorted(QUERY_FIELDS)}, got {dataset!r}")
     if split not in ("train", "test"):
         raise ValueError(f"split must be 'train' or 'test', got {split!r}")
+    if not isinstance(error_types, list):
+        raise ValueError(f"error_types must be a list, got {error_types!r}")
+    unknown = set(error_types) - set(ERROR_TYPES[dataset])
+    if unknown or len(set(error_types)) != len(error_types):
+        raise ValueError(
+            f"error_types {error_types!r} must be distinct members of {list(ERROR_TYPES[dataset])} for {dataset!r}"
+        )
     path = Path(data_root) / "vrdu" / dataset / f"{split}.json"
     if not path.is_file():
         raise FileNotFoundError(f"no such split file: {path}")
     with open(path) as f:
         rows = json.load(f)
     assert isinstance(rows, list) and rows, f"{path}: expected a non-empty list"
-    return rows
+    kept = [r for r in rows if r["valid"] or r["error_type"] in error_types]
+    assert all(r["error_type"] in ERROR_TYPES[dataset] for r in rows if not r["valid"]), (
+        f"{path}: invalid row with an unrecognised error_type"
+    )
+    assert any(r["valid"] for r in kept), f"{path}: no valid rows"
+    return kept
 
 
 def load_ocr_context(data_root: str | Path, document_id: str) -> str:
@@ -73,14 +101,14 @@ def load_ocr_context(data_root: str | Path, document_id: str) -> str:
 
 
 def row_key(row: dict, dataset: str) -> tuple:
-    """Identity of a row within a split: (document_id[, line_index[, error_type]], k).
+    """Identity of a row within a split: (document_id[, line_index], error_type, k).
 
-    Line rows are keyed on ``error_type`` too: since 2026-09-15 the same
-    ``(document_id, line_index, k)`` can carry both an inter-document and an
-    intra-document invalid variant, so ``k`` alone no longer disambiguates.
+    Both datasets are keyed on ``error_type``: the same ``(document_id[,
+    line_index], k)`` can carry several invalid variants, so ``k`` alone does
+    not disambiguate (line since 2026-09-15, main since 2026-10-14).
     """
     if dataset == "main":
-        return (row["document_id"], row["k"])
+        return (row["document_id"], row["error_type"], row["k"])
     return (row["document_id"], row["line_index"], row["error_type"], row["k"])
 
 

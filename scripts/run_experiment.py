@@ -35,6 +35,9 @@ Every ``params`` key is required — a missing key is a hard error, not a defaul
                        the full instructions+query+chat-template prompt built
                        at judge time — see the configs for the margin this
                        needs to leave under max_position_embeddings.
+    error_types        list of invalid-row error types to include alongside every
+                       valid row (main: inter_document, cross_type; line also
+                       intra_document). Required: the files hold all of them.
     row_subset         null (all rows) | {n: int, seed: int} (deterministic sample)
     verify_read_point  bool — run RepresentationLM.verify_read_point on the first
                        item before judging anything (determinism / read-point
@@ -84,6 +87,7 @@ _TASK_PARAMS: dict[str, tuple[str, ...]] = {
     "record_judge": (
         "data_root", "model", "dataset", "split", "layers", "dtype", "device",
         "include_cohesion", "context_token_limit", "row_subset", "verify_read_point",
+        "error_types",
     ),
     "entity_detection": (
         "data_root", "model", "dataset", "split", "layers", "dtype", "device",
@@ -160,7 +164,7 @@ def build_items(params: dict) -> list[dict]:
     """One judge item per row: identity + label metadata + context + query."""
     data_root = REPO_ROOT / params["data_root"]
     dataset, split = params["dataset"], params["split"]
-    rows = load_split(data_root, dataset, split)
+    rows = load_split(data_root, dataset, split, params["error_types"])
 
     limit = params["context_token_limit"]
     tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
@@ -181,7 +185,7 @@ def build_items(params: dict) -> list[dict]:
         items.append({
             "document_id": r["document_id"],
             "line_index": r["line_index"] if dataset == "line" else None,
-            "error_type": r["error_type"] if dataset == "line" else None,
+            "error_type": r["error_type"],
             "label": bool(r["valid"]),
             "k": r["k"],
             "num_invalid_fields": r["num_invalid_fields"],

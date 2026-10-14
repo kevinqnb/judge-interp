@@ -20,4 +20,5 @@ params:
   include_cohesion: true
   context_token_limit: null
   row_subset: null
+  error_types: [inter_document, intra_document]
   verify_read_point: true
