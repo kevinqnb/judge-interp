@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"
-CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-09-15-vrdu-invalids-02.yaml"
+CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-14-vrdu-invalids-03.yaml"
 PIVOT = 50
 DATE_FIELDS = ["program_start_date", "program_end_date"]
 
@@ -184,7 +184,7 @@ def _l6_style_donors():
     """Five donors, each differing from the base row in ALL five fields, and
     distinct from each other too -- so every donor is eligible for every field
     and reaching the full chain of 5 is guaranteed regardless of draw order."""
-    return [
+    donors = [
         {"channel": "2", "program_desc": "Show Two", "program_start_date": "05/02/20",
          "program_end_date": "05/11/20", "sub_amount": "$110.00"},
         {"channel": "3", "program_desc": "Show Three", "program_start_date": "05/03/20",
@@ -196,6 +196,7 @@ def _l6_style_donors():
         {"channel": "6", "program_desc": "Show Six", "program_start_date": "05/06/20",
          "program_end_date": "05/15/20", "sub_amount": "$150.00"},
     ]
+    return [{**d, "line_index": i + 1} for i, d in enumerate(donors)]
 
 
 def test_build_intra_chain_reaches_max_with_fully_distinct_donors():
@@ -203,11 +204,12 @@ def test_build_intra_chain_reaches_max_with_fully_distinct_donors():
             "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$100.00"}
     donors = _l6_style_donors()
     chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
-    assert [len(fields) for _row, fields in chain] == [1, 2, 3, 4, 5]
+    assert [len(fields) for _row, fields, _donors in chain] == [1, 2, 3, 4, 5]
     # nested: each step's fields are a superset of the previous step's
     for i in range(len(chain) - 1):
         assert set(chain[i][1]) < set(chain[i + 1][1])
-    final_row, final_fields = chain[-1]
+    final_row, final_fields, final_donors = chain[-1]
+    assert set(final_donors) == set(final_fields) and all(final_donors[f] >= 1 for f in final_fields)
     assert final_fields == sorted(b.LINE_FIELDS)
     for field in b.LINE_FIELDS:
         assert final_row[field] != base[field]
@@ -219,7 +221,7 @@ def test_build_intra_chain_caps_at_donor_scarcity():
             "program_start_date": "07/01/20", "program_end_date": "07/10/20", "sub_amount": "$700.00"}
     donors = _l6_style_donors()[:2]  # only 2 distinct donors available
     chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
-    assert [len(fields) for _row, fields in chain] == [1, 2]  # stops at 2, not assumed to be 5
+    assert [len(fields) for _row, fields, _donors in chain] == [1, 2]  # stops at 2, not assumed to be 5
 
 
 def test_build_intra_chain_no_donors_is_empty():
@@ -234,7 +236,7 @@ def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising
     # excluded rather than aborting the whole chain.
     base = {"channel": "1", "program_desc": "A",
             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
-    donor = {"channel": "2", "program_desc": "A",
+    donor = {"channel": "2", "program_desc": "A", "line_index": 1,
              "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
     chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
     assert chain == []
@@ -252,13 +254,13 @@ def test_build_intra_chain_never_reproduces_a_near_duplicate_donor():
     # donor_a's or donor_b's tuple, not that the chain length is fixed).
     base = {"channel": "1", "program_desc": "A",
             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
-    donor_a = {"channel": "2", "program_desc": "A",
+    donor_a = {"channel": "2", "program_desc": "A", "line_index": 1,
                "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
-    donor_b = {"channel": "9", "program_desc": "Z",
+    donor_b = {"channel": "9", "program_desc": "Z", "line_index": 2,
                "program_start_date": "09/01/20", "program_end_date": "09/10/20", "sub_amount": "$9"}
     chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
     assert chain  # progress is still made via donor_b despite donor_a's collision risk
-    for row, _fields in chain:
+    for row, _fields, _donors in chain:
         got = tuple(row[f] for f in b.LINE_FIELDS)
         assert got != tuple(donor_a[f] for f in b.LINE_FIELDS)
         assert got != tuple(donor_b[f] for f in b.LINE_FIELDS)
@@ -295,10 +297,15 @@ def _split(rows):
 def test_main_dataset_generation_is_unchanged(built):
     # 9 docs in the train main base (m1,m2,m3,L1,L2,L3,L5,L6,L7), each achieving
     # the full k=0..9 (agency etc. always resamplable from the split-wide pool).
-    assert len(built["main_train"]) == 9 * 10
-    assert len(built["main_test"]) == 3 * 10
+    # (cross_type rows are counted separately below; inter_document rows are
+    # exactly what the -02 pipeline produced.)
+    def inter(rows):
+        return [r for r in rows if r["valid"] or r["error_type"] == "inter_document"]
+    assert len(inter(built["main_train"])) == 9 * 10
+    assert len(inter(built["main_test"])) == 3 * 10
     prov = built["provenance"]
-    assert prov["skipped_rows"]["main"]["train"] == [] and prov["capped_rows"]["main"]["train"] == []
+    assert prov["skipped_rows"]["main"]["train"]["inter_document"] == []
+    assert prov["capped_rows"]["main"]["train"]["inter_document"] == []
 
 
 def test_line_counts_and_provenance(built):
@@ -315,7 +322,7 @@ def test_line_counts_and_provenance(built):
     assert sum(1 for r in invalid_t if r["error_type"] == "intra_document") == 2
 
     prov = built["provenance"]
-    assert prov["config_id"] == "2026-09-15-vrdu-invalids-02"
+    assert prov["config_id"] == "2026-10-14-vrdu-invalids-03"
     dist = prov["num_invalid_fields_dist"]["line"]["train"]
     assert {int(k): v for k, v in dist["inter_document"].items()} == {1: 15, 2: 15, 3: 15, 4: 15, 5: 15}
     assert {int(k): v for k, v in dist["intra_document"].items()} == {1: 12, 2: 12, 3: 6, 4: 6, 5: 6}
@@ -344,7 +351,7 @@ def test_line_skipped_and_capped_rows(built):
 def test_l6_line_index_0_reaches_full_k5_for_both_error_types(built):
     rows = [r for r in built["line_train"] if r["document_id"] == "L6" and r["line_index"] == 0]
     by_type = {(r["error_type"], r["k"]): r for r in rows}
-    assert {"inter_document", "intra_document"} == {t for t, _ in by_type if t is not None}
+    assert {"inter_document", "intra_document", "cross_type"} == {t for t, _ in by_type if t is not None}
     for error_type in ("inter_document", "intra_document"):
         ks = sorted(k for t, k in by_type if t == error_type)
         assert ks == [1, 2, 3, 4, 5]
@@ -361,7 +368,7 @@ def test_rows_uniquely_keyed_and_k_equals_num_invalid_fields(built):
         for r in rows:
             assert r["k"] == r["num_invalid_fields"]
     for rows in (built["main_train"], built["main_test"]):
-        keys = [(r["document_id"], r["k"]) for r in rows]
+        keys = [(r["document_id"], r["error_type"], r["k"]) for r in rows]
         assert len(keys) == len(set(keys))
 
 
@@ -434,3 +441,139 @@ def test_seed_determinism(built, tmp_path):
     b.main(["--config", str(cfg2)])
     for name in ["main/train.json", "main/test.json", "line/train.json", "line/test.json"]:
         assert (built["data_root"] / name).read_bytes() == (other / name).read_bytes()
+
+
+# --- cross_type ------------------------------------------------------------
+
+KINDS = yaml.safe_load(CONFIG.read_text())["params"]["cross_type"]["kinds"]
+
+
+def _counts():
+    from collections import Counter
+    return Counter()
+
+
+def test_cross_type_candidates_same_kind_cross_dataset_and_exclusions():
+    kind_of = b.field_kinds(KINDS)
+    main_row = {f: None for f in b.MAIN_FIELDS}
+    main_row.update(advertiser="A", agency="B", gross_amount="$5", flight_from="02/01/20", flight_to="03/01/20")
+    line_rows = [
+        {"line_index": 0, "channel": "9", "program_desc": "x", "program_start_date": "02/01/20",
+         "program_end_date": "02/02/20", "sub_amount": "$9"},
+        {"line_index": 1, "channel": "9", "program_desc": "y", "program_start_date": "02/0",  # fragment
+         "program_end_date": "02/03/20", "sub_amount": None},
+    ]
+    truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
+                             [{"document_id": "d", "valid": True, **r} for r in line_rows])["d"]
+    counts = _counts()
+
+    def cands(target):
+        return b.cross_type_candidates(target, KINDS, kind_of, main_row, line_rows, truth, PIVOT, counts)
+
+    # amount: main gross_amount can take the line sub_amount and vice versa.
+    assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("gross_amount")] == [("$9", "line", "sub_amount", 0)]
+    assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("sub_amount")] == [("$5", "main", "gross_amount", None)]
+    # name: advertiser <- agency "B" (null fields skipped); channel "9" is not valid for advertiser.
+    assert sorted(v for v, _ in cands("advertiser")) == ["9", "9", "B"]
+    # a value already valid for the target is excluded: channel "9" is valid for channel.
+    assert "9" not in [v for v, _ in cands("channel")]
+    # date: the line fragment is dropped; flight_from may take flight_to and the parseable line dates,
+    # but not its own valid value.
+    got = sorted(v for v, _ in cands("flight_from"))
+    assert got == ["02/02/20", "02/03/20", "03/01/20"]
+    assert counts["excluded_unparseable_date"] >= 1 and counts["excluded_valid_for_target"] >= 1
+    # contract_num / program_desc have no kind
+    assert "contract_num" not in b.field_kinds(KINDS) and "program_desc" not in b.field_kinds(KINDS)
+
+
+def test_cross_type_value_valid_for_target_elsewhere_in_document_is_excluded():
+    # flight_from's valid value 01/01/20 also appears as a line start date, so a line program_start_date
+    # of 01/01/20 must NOT be a cross_type candidate for flight_from.
+    kind_of = b.field_kinds(KINDS)
+    main_row = {f: None for f in b.MAIN_FIELDS}
+    main_row.update(flight_from="01/01/20", flight_to="02/01/20")
+    line_rows = [{"line_index": 0, "channel": None, "program_desc": None, "program_start_date": "01/01/20",
+                  "program_end_date": "01/05/20", "sub_amount": None}]
+    truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
+                             [{"document_id": "d", "valid": True, **r} for r in line_rows])["d"]
+    got = [(v, s["field"]) for v, s in b.cross_type_candidates(
+        "flight_from", KINDS, kind_of, main_row, line_rows, truth, PIVOT, _counts())]
+    assert ("01/01/20", "program_start_date") not in got
+    assert ("01/05/20", "program_end_date") in got and ("02/01/20", "flight_to") in got
+
+
+def _src(dataset, field, line_index=None):
+    return {"scope": "same_document", "dataset": dataset, "field": field, "line_index": line_index}
+
+
+def test_mark_exchanges_only_for_mutual_pulls_within_the_record():
+    row = {"line_index": 3}
+    # main record: advertiser <-> agency exchanged; property <- advertiser is a one-way pull.
+    sources = {"advertiser": _src("main", "agency"), "agency": _src("main", "advertiser"),
+               "property": _src("main", "advertiser")}
+    b.mark_exchanges(sources, "main", {})
+    assert sources["advertiser"]["exchanged_with"] == "agency"
+    assert sources["agency"]["exchanged_with"] == "advertiser"
+    assert sources["property"]["exchanged_with"] is None
+    # line record: a mutual pull through ANOTHER line item is not an exchange within this record.
+    sources = {"channel": _src("line", "program_desc", 7), "program_desc": _src("line", "channel", 7)}
+    b.mark_exchanges(sources, "line", row)
+    assert all(src["exchanged_with"] is None for src in sources.values())
+    sources = {"channel": _src("line", "program_desc", 3), "program_desc": _src("line", "channel", 3)}
+    b.mark_exchanges(sources, "line", row)
+    assert sources["channel"]["exchanged_with"] == "program_desc"
+
+
+def test_cross_type_known_answer_for_main_document_m1(built):
+    # m1: five name fields with distinct same-kind donors (agency is null and may receive one);
+    # the dates can only be filled from each other and from_to would reverse -> at most one date;
+    # gross_amount has no same-kind donor (m1 has no line items). So achievable k = 1..6.
+    rows = [r for r in built["main_train"] if r["document_id"] == "m1" and r["error_type"] == "cross_type"]
+    assert sorted(r["k"] for r in rows) == [1, 2, 3, 4, 5, 6]
+    touched = {f for r in rows for f in r["invalid_fields"]}
+    assert touched <= {"advertiser", "agency", "property", "tv_address", "product", "flight_from", "flight_to"}
+    assert not touched & {"contract_num", "gross_amount"}
+    assert next(r for r in rows if r["k"] == 6)["num_invalid_fields"] == 6
+
+
+def test_every_row_labels_every_entity_explicitly(built):
+    for name, fields in (("main", b.MAIN_FIELDS), ("line", b.LINE_FIELDS)):
+        for split in ("train", "test"):
+            for row in built[f"{name}_{split}"]:
+                assert list(row["field_errors"]) == fields
+                wrong = [f for f in fields if row["field_errors"][f] is not None]
+                assert sorted(wrong) == sorted(row["invalid_fields"])
+                assert (row["error_type"] is None) == row["valid"]
+                for f in wrong:
+                    assert row["field_errors"][f]["error_type"] == row["error_type"]
+
+
+def test_cross_type_rows_exist_in_both_datasets_and_are_real_same_kind_values(built):
+    # (the builder itself re-verifies every row; this pins that the type is actually emitted)
+    for rows, fields in ((built["main_train"], b.MAIN_FIELDS), (built["line_train"], b.LINE_FIELDS)):
+        cross = [r for r in rows if r["error_type"] == "cross_type"]
+        assert cross
+        kind_of = b.field_kinds(KINDS)
+        for r in cross:
+            for f in r["invalid_fields"]:
+                assert kind_of[r["field_errors"][f]["source"]["field"]] == kind_of[f]
+    prov = built["provenance"]["cross_type"]
+    assert prov["fields_without_kind"] == ["contract_num", "program_desc"]
+    assert prov["main"]["train"]["candidate_counts"]["considered"] > 0
+
+
+def test_cross_type_does_not_perturb_other_error_types(built, tmp_path):
+    # Dropping cross_type's k_range to a single value changes only cross_type rows.
+    other = tmp_path / "vrdu_b"
+    shutil.copytree(FIXTURE, other)
+    config = yaml.safe_load(built["cfg_path"].read_text())
+    config["params"]["data_root"] = str(other)
+    config["params"]["cross_type"]["main"]["k_range"] = [1, 1]
+    config["params"]["cross_type"]["line"]["k_range"] = [1, 1]
+    cfg = tmp_path / "cfg_b.yaml"
+    cfg.write_text(yaml.safe_dump(config))
+    b.main(["--config", str(cfg)])
+    for name in ("main/train.json", "main/test.json", "line/train.json", "line/test.json"):
+        old = [r for r in built[name.replace("/", "_").replace(".json", "")] if r["error_type"] != "cross_type"]
+        new = [r for r in json.loads((other / name).read_text()) if r["error_type"] != "cross_type"]
+        assert old == new

@@ -1,0 +1,49 @@
+id: 2026-10-14-vrdu-invalids-03
+project: judge-interp
+description: >-
+  Adds a third invalid-row error type, cross_type, to both datasets: a value that is a
+  genuine value of the same document but belongs to a different field of the same kind
+  (name / date / amount), so the entity is real but filed under the wrong type. Every row
+  now carries error_type and a per-field field_errors map (null = correct entity). The
+  inter_document and intra_document generation is unchanged from 2026-09-15-vrdu-invalids-02.
+seed: 0
+params:
+  data_root: data/vrdu
+
+  main:
+    # Unchanged from -02 (inter_document only): one invalid row per achievable
+    # k in this inclusive range, pools compiled per split.
+    k_range: [1, 9]
+    pool_scope: per_split
+
+  line:
+    # Unchanged from -02 (inter_document, intra_document).
+    k_range: [1, 5]
+
+  # A field whose base value is null MAY be chosen for invalidation and given a
+  # non-null value; a non-null base value is NEVER replaced with null.
+  corrupt_from_null: true
+  corrupt_to_null: false
+
+  dates:
+    # Ordering enforced on every generated row of every error type (cross_type
+    # included): parsed(from) <= parsed(to) whenever both are non-null.
+    main_fields: [flight_from, flight_to]
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+    main_sentinels: ["01/01/00", "12/31/49"]
+
+  cross_type:
+    # A cross_type field takes a value from another field of the same kind in the
+    # same document (main or line). Fields in no kind (contract_num, program_desc)
+    # are never touched. tv_address and channel are grouped with names loosely.
+    kinds:
+      name: [advertiser, agency, property, tv_address, product, channel]
+      date: [flight_from, flight_to, program_start_date, program_end_date]
+      amount: [gross_amount, sub_amount]
+    # One cross_type row per achievable k in this range (k = number of kinded
+    # fields at most: 8 main, 4 line).
+    main:
+      k_range: [1, 8]
+    line:
+      k_range: [1, 4]

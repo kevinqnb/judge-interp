@@ -12,7 +12,43 @@ An invalid row keeps the ``document_id`` (and ``line_index``) of the valid row i
 was derived from, and differs from it in exactly ``num_invalid_fields`` fields,
 named in ``invalid_fields``. ``k`` always equals ``num_invalid_fields`` -- there is
 no "requested but uncapped" value that a row falls short of; a row's identity is
-``(*id_keys, k)`` for main, ``(document_id, line_index, error_type, k)`` for line.
+``(document_id, error_type, k)`` for main, ``(document_id, line_index, error_type,
+k)`` for line.
+
+Every row (valid or not, both datasets) carries two explicit label fields:
+
+  error_type    ``null`` on a valid row; otherwise the one error type the whole row
+                was built with (rows are single-error-type, so each type can be
+                studied on its own).
+  field_errors  one entry per data field. ``null`` = that entity is correct (it may
+                be correct on an invalid row); otherwise ``{"error_type": ...,
+                "source": {...}}`` saying how the wrong value got there. Sources:
+                  {"scope": "other_document"}       drawn from another document
+                  {"scope": "sentinel"}             main date sentinel
+                  {"scope": "same_document", "dataset", "field", "line_index",
+                   ["exchanged_with"]}              a value taken from this document
+                                                    (``line_index`` null for main;
+                                                    ``exchanged_with`` is cross_type
+                                                    only -- see below)
+                ``invalid_fields`` is exactly the set of non-null ``field_errors``.
+
+Error types (main: inter_document, cross_type; line: all three):
+
+  inter_document  values come from other documents (below).
+  intra_document  line only: values come from the row's other line items.
+  cross_type      the value is a genuine value of THIS document, but of a different
+                  field of the same *kind* (``params.cross_type.kinds``: name, date,
+                  amount), so the entity is real but filed under the wrong type.
+                  Each corrupted field independently pulls a value from a same-kind
+                  field of the same document -- in either dataset (a main
+                  ``gross_amount`` can take a line ``sub_amount`` and vice versa).
+                  Two fields that happen to pull each other's values are a direct
+                  exchange, recorded as ``exchanged_with`` in both sources. A value
+                  is eligible for field ``t`` only if it is NOT already a valid value
+                  of ``t`` anywhere in the document (otherwise the "wrong type" row
+                  would actually be correct). Dates must parse; fields with no kind
+                  are never touched. Uses its own RNG stream, so adding it does not
+                  perturb inter_document / intra_document rows.
 
   main   pool = every non-null value for the field within the split being written.
          Date fields also carry two synthetic sentinels so an ordered pair always
@@ -40,14 +76,13 @@ no "requested but uncapped" value that a row falls short of; a row's identity is
                             reproducing another valid row in the document
                             verbatim.
 
-         Every invalid line row carries ``error_type``: "inter_document" or
-         "intra_document" (``null`` on valid rows).
-
 Field selection is uniform over the fields invalidatable for that row. The two
-date fields are coupled: a value must keep ``from <= to``, so whether a date field
-can be corrupted depends on whether its partner is corrupted too (and, for the
-intra-document chain, on the partner's *current* -- possibly already-corrupted --
-value).
+date fields are coupled: a value must keep ``from <= to`` (for every error type,
+cross_type included), so whether a date field can be corrupted depends on whether
+its partner is corrupted too (and, for the intra-document chain, on the partner's
+*current* -- possibly already-corrupted -- value). A consequence for cross_type:
+two date fields of one record cannot be directly exchanged (that would reverse
+their order) unless they hold equal dates, which the eligibility rule excludes.
 
 No cluster job: this is local data preparation. Run it directly:
 
@@ -79,7 +114,10 @@ MAIN_FIELDS = base_builder.MAIN_FIELDS
 LINE_FIELDS = base_builder.LINE_FIELDS
 LINE_CARRIED_FIELDS = base_builder.LINE_CARRIED_FIELDS  # always [] since 2026-09-15
 
-REQUIRED_PARAM_KEYS = {"data_root", "main", "line", "corrupt_from_null", "corrupt_to_null", "dates"}
+REQUIRED_PARAM_KEYS = {"data_root", "main", "line", "corrupt_from_null", "corrupt_to_null", "dates", "cross_type"}
+INTER_DOCUMENT, INTRA_DOCUMENT, CROSS_TYPE = "inter_document", "intra_document", "cross_type"
+ERROR_TYPES = {"main": (INTER_DOCUMENT, CROSS_TYPE), "line": (INTER_DOCUMENT, INTRA_DOCUMENT, CROSS_TYPE)}
+assert not set(MAIN_FIELDS) & set(LINE_FIELDS), "main/line field names collide"
 REQUIRED_DATE_KEYS = {"main_fields", "line_fields", "year_pivot", "main_sentinels"}
 
 
@@ -332,21 +370,44 @@ def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot,
 # --- Row emission: main --------------------------------------------------
 
 
-def tag_row(row, fields, id_keys, k, valid, invalid_fields):
-    """Ordered output row: identity keys, validity tags, then the data fields."""
+def build_field_errors(fields, error_type, sources):
+    """``field_errors`` for one row: ``{field: None | {"error_type", "source"}}`` for every field.
+
+    ``sources`` maps each corrupted field to its source dict; ``{}`` for a valid row.
+    """
+    assert set(sources) <= set(fields), sorted(set(sources) - set(fields))
+    return {
+        f: (None if f not in sources else {"error_type": error_type, "source": sources[f]})
+        for f in fields
+    }
+
+
+def tag_row(row, fields, id_keys, k, valid, invalid_fields, error_type, sources):
+    """Ordered output row: identity keys, label tags, then the data fields.
+
+    ``error_type`` is None on a valid row; ``sources`` maps each of
+    ``invalid_fields`` to its source dict (see the module docstring).
+    """
+    assert set(sources) == set(invalid_fields), (sorted(sources), sorted(invalid_fields))
+    assert (error_type is None) == valid
     tagged = {key: row[key] for key in id_keys}
     tagged["valid"] = valid
+    tagged["error_type"] = error_type
     tagged["k"] = k
     tagged["num_invalid_fields"] = len(invalid_fields)
     tagged["invalid_fields"] = list(invalid_fields)
+    tagged["field_errors"] = build_field_errors(fields, error_type, sources)
     for field in fields:
         tagged[field] = row[field]
     return tagged
 
 
 def generate_split(base_rows, fields, target_fields, id_keys, k_range,
-                   pool_for_row, date_fields, year_pivot, rng):
+                   pool_for_row, date_fields, year_pivot, rng, source_for):
     """Return ``(output_rows, skipped, capped)`` for one main-dataset split.
+
+    All emitted invalid rows are ``inter_document``; ``source_for(field, value)``
+    gives each corrupted field's source dict.
 
     Unchanged main-dataset generation: for each k in ``k_range``, one invalid
     row per valid base row, capped (recorded) when the row does not support k
@@ -355,7 +416,7 @@ def generate_split(base_rows, fields, target_fields, id_keys, k_range,
     k_lo, k_hi = k_range
     assert 1 <= k_lo <= k_hi <= len(target_fields), f"k_range {k_range} outside 1..{len(target_fields)}"
 
-    out = [tag_row(row, fields, id_keys, 0, True, []) for row in base_rows]
+    out = [tag_row(row, fields, id_keys, 0, True, [], None, {}) for row in base_rows]
     skipped, capped = [], []
     for base_row in base_rows:
         pools = pool_for_row(base_row)
@@ -370,7 +431,8 @@ def generate_split(base_rows, fields, target_fields, id_keys, k_range,
             produced += 1
             if len(invalid_fields) < k:
                 row_caps.append({**row_id, "k": k, "realized": len(invalid_fields)})
-            out.append(tag_row(new_row, fields, id_keys, k, False, invalid_fields))
+            out.append(tag_row(new_row, fields, id_keys, k, False, invalid_fields, INTER_DOCUMENT,
+                               {f: source_for(f, new_row[f]) for f in invalid_fields}))
         if produced:
             capped.extend(row_caps)  # a row that produced nothing at all is skipped, not capped
         else:
@@ -388,10 +450,12 @@ def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, da
     for row in valid_rows:
         key = tuple(row[k] for k in id_keys)
         assert row["k"] == 0 and row["num_invalid_fields"] == 0 and row["invalid_fields"] == []
+        assert row["error_type"] is None
         assert {f: row[f] for f in fields} == {f: base_by_id[key][f] for f in fields}
 
-    identity = [(*[row[k] for k in id_keys], row["k"]) for row in out_rows]
-    assert len(identity) == len(set(identity)), "output rows not uniquely keyed by (*id, k)"
+    identity = [(*[row[k] for k in id_keys], row["error_type"], row["k"]) for row in out_rows]
+    assert len(identity) == len(set(identity)), "output rows not uniquely keyed by (*id, error_type, k)"
+    verify_field_errors(out_rows, fields, ERROR_TYPES["main"])
 
     for row in invalid_rows:
         key = tuple(row[k] for k in id_keys)
@@ -419,20 +483,22 @@ def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, da
         assert parsed_start <= parsed_end, (key, start, end)
 
 
+def verify_field_errors(rows, fields, allowed_error_types):
+    """``error_type`` / ``field_errors`` / ``invalid_fields`` agree on every row."""
+    for row in rows:
+        assert list(row["field_errors"]) == list(fields), row["field_errors"].keys()
+        wrong = [f for f in fields if row["field_errors"][f] is not None]
+        assert sorted(wrong) == sorted(row["invalid_fields"]), (wrong, row["invalid_fields"])
+        if row["valid"]:
+            assert row["error_type"] is None and not wrong
+            continue
+        assert row["error_type"] in allowed_error_types, row["error_type"]
+        for f in wrong:
+            assert row["field_errors"][f]["error_type"] == row["error_type"], (f, row["field_errors"][f])
+            assert isinstance(row["field_errors"][f]["source"], dict)
+
+
 # --- Row emission: line ---------------------------------------------------
-
-
-def tag_line_row(row, fields, id_keys, k, valid, invalid_fields, error_type):
-    """Ordered output row for the line dataset: adds ``error_type`` to ``tag_row``."""
-    tagged = {key: row[key] for key in id_keys}
-    tagged["valid"] = valid
-    tagged["error_type"] = error_type
-    tagged["k"] = k
-    tagged["num_invalid_fields"] = len(invalid_fields)
-    tagged["invalid_fields"] = list(invalid_fields)
-    for field in fields:
-        tagged[field] = row[field]
-    return tagged
 
 
 def _intra_feasible(base_row, current_row, other_rows, other_tuples, target_fields, date_fields,
@@ -495,13 +561,15 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
     pair is eligible -- the returned list's length is the row's actual
     achievable count, never assumed to be ``k_hi``.
 
-    Returns ``[(row_dict, invalid_fields), ...]`` for num_invalid_fields
-    1, 2, ..., achieved (empty list if the row has no usable donor at all).
+    Returns ``[(row_dict, invalid_fields, donors), ...]`` for num_invalid_fields
+    1, 2, ..., achieved (empty list if the row has no usable donor at all);
+    ``donors`` maps each corrupted field to its donor's ``line_index``.
     """
     other_tuples = {tuple(r[f] for f in target_fields) for r in other_rows}
     current = dict(base_row)
     corrupted = []
     used_donors = set()
+    donors = {}
     results = []
     while len(corrupted) < k_hi:
         feasible = _intra_feasible(base_row, current, other_rows, other_tuples, target_fields,
@@ -515,6 +583,7 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
         current[field] = other_rows[donor_idx][field]
         corrupted.append(field)
         used_donors.add(donor_idx)
+        donors[field] = other_rows[donor_idx]["line_index"]
 
         snapshot = dict(current)
         full_tuple = tuple(snapshot[f] for f in target_fields)
@@ -523,7 +592,7 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
             f"{base_row.get('line_index')} reproduced another valid row verbatim "
             "(should have been excluded by _intra_feasible -- logic error)"
         )
-        results.append((snapshot, sorted(corrupted)))
+        results.append((snapshot, sorted(corrupted), dict(donors)))
     return results
 
 
@@ -544,11 +613,12 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
     """Build inter- and intra-document invalid line rows for one split.
 
     Returns ``(output_rows, skipped, capped)`` where ``skipped``/``capped`` are
-    dicts keyed by ``"inter_document"``/``"intra_document"``.
+    dicts keyed by ``"inter_document"``/``"intra_document"`` (cross_type is built
+    separately, see ``generate_cross_type_rows``).
     """
     k_lo, k_hi = k_range
     id_keys = ["document_id", "line_index"]
-    out = [tag_line_row(row, LINE_FIELDS, id_keys, 0, True, [], None) for row in line_base]
+    out = [tag_row(row, LINE_FIELDS, id_keys, 0, True, [], None, {}) for row in line_base]
 
     by_doc = {}
     for row in line_base:
@@ -558,8 +628,8 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
 
     inter_pools = line_inter_pools_by_doc(line_base, date_fields, year_pivot)
 
-    skipped = {"inter_document": [], "intra_document": []}
-    capped = {"inter_document": [], "intra_document": []}
+    skipped = {INTER_DOCUMENT: [], INTRA_DOCUMENT: []}
+    capped = {INTER_DOCUMENT: [], INTRA_DOCUMENT: []}
 
     for doc_id, rows in by_doc.items():
         for row in rows:
@@ -573,20 +643,23 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
                 if len(reached) < k_hi:
                     capped["inter_document"].append({**row_id, "reached": len(reached)})
                 for new_row, invalid_fields in inter_rows:
-                    out.append(tag_line_row(new_row, LINE_FIELDS, id_keys, len(invalid_fields), False,
-                                             invalid_fields, "inter_document"))
+                    out.append(tag_row(new_row, LINE_FIELDS, id_keys, len(invalid_fields), False,
+                                       invalid_fields, INTER_DOCUMENT,
+                                       {f: {"scope": "other_document"} for f in invalid_fields}))
 
             other_rows = [r for r in rows if r is not row]
             chain = build_intra_chain(row, other_rows, LINE_FIELDS, date_fields, year_pivot, k_hi, rng)
-            chain = [(r, fields) for r, fields in chain if len(fields) >= k_lo]
+            chain = [(r, fields, donors) for r, fields, donors in chain if len(fields) >= k_lo]
             if not chain:
                 skipped["intra_document"].append(row_id)
             else:
                 if len(chain[-1][1]) < k_hi:
                     capped["intra_document"].append({**row_id, "reached": len(chain[-1][1])})
-                for new_row, invalid_fields in chain:
-                    out.append(tag_line_row(new_row, LINE_FIELDS, id_keys, len(invalid_fields), False,
-                                             invalid_fields, "intra_document"))
+                for new_row, invalid_fields, donors in chain:
+                    out.append(tag_row(
+                        new_row, LINE_FIELDS, id_keys, len(invalid_fields), False, invalid_fields, INTRA_DOCUMENT,
+                        {f: {"scope": "same_document", "dataset": "line", "field": f, "line_index": donors[f]}
+                         for f in invalid_fields}))
 
     return out, skipped, capped
 
@@ -602,6 +675,7 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         assert row["k"] == 0 and row["num_invalid_fields"] == 0 and row["invalid_fields"] == []
         assert row["error_type"] is None
         assert {f: row[f] for f in LINE_FIELDS} == {f: base_by_id[key][f] for f in LINE_FIELDS}
+    verify_field_errors(out_rows, LINE_FIELDS, ERROR_TYPES["line"])
 
     identity = [(row["document_id"], row["line_index"], row["error_type"], row["k"]) for row in out_rows]
     assert len(identity) == len(set(identity)), (
@@ -614,7 +688,7 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         assert key in base_by_id, f"invalid row for unknown id {key}"
         base = base_by_id[key]
         changed = sorted(f for f in LINE_FIELDS if row[f] != base[f])
-        assert row["error_type"] in ("inter_document", "intra_document"), row["error_type"]
+        assert row["error_type"] in ERROR_TYPES["line"], row["error_type"]
         assert changed == sorted(row["invalid_fields"]), (key, row["error_type"], changed, row["invalid_fields"])
         assert row["k"] == row["num_invalid_fields"] == len(changed) >= 1, (key, row["error_type"], row)
         for field in changed:
@@ -627,7 +701,11 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         # legitimately recur across documents in this corpus, so "the drawn
         # value also happens to occur in this document" is not a bug signal
         # (see provenance's inter_document_coincidental_overlap for the count).
-        if row["error_type"] == "intra_document":
+        if row["error_type"] == INTRA_DOCUMENT:
+            for field in changed:
+                src = row["field_errors"][field]["source"]
+                donor = next(r for r in line_by_doc[row["document_id"]] if r["line_index"] == src["line_index"])
+                assert src["line_index"] != row["line_index"] and row[field] == donor[field], (key, field, src)
             doc_values = {
                 f: {r[f] for r in line_by_doc[row["document_id"]] if r[f] is not None}
                 for f in LINE_FIELDS
@@ -656,6 +734,171 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         assert full not in others, f"{key}: intra-document row duplicates another valid row verbatim"
 
 
+# --- cross_type ----------------------------------------------------------
+
+
+def field_kinds(kinds):
+    """``{field: kind}`` from ``{kind: [fields]}``. A field in two kinds is an error."""
+    out = {}
+    for kind, members in kinds.items():
+        for f in members:
+            assert f not in out, f"field {f!r} is in kinds {out[f]!r} and {kind!r}"
+            assert f in MAIN_FIELDS or f in LINE_FIELDS, f"kinds: unknown field {f!r}"
+            out[f] = kind
+    return out
+
+
+def document_truth(main_base, line_base):
+    """``{document_id: {field: set of non-null valid values}}`` over main + line fields."""
+    truth = {r["document_id"]: {f: set() for f in [*MAIN_FIELDS, *LINE_FIELDS]} for r in main_base}
+    for r in main_base:
+        for f in MAIN_FIELDS:
+            if r[f] is not None:
+                truth[r["document_id"]][f].add(r[f])
+    for r in line_base:
+        for f in LINE_FIELDS:
+            if r[f] is not None:
+                truth[r["document_id"]][f].add(r[f])
+    return truth
+
+
+def cross_type_candidates(target, kinds, kind_of, main_row, line_rows, truth_doc, year_pivot, counts):
+    """Eligible ``[(value, source)]`` for filing a value under ``target``.
+
+    Every non-null value of every other same-kind field of this document, in
+    either dataset, except (a) unparseable dates and (b) values that are already
+    a valid value of ``target`` in this document. ``counts`` accumulates how many
+    candidates each rule removed.
+    """
+    kind = kind_of[target]
+    out = []
+    for other in kinds[kind]:
+        if other == target:
+            continue
+        if other in MAIN_FIELDS:
+            supplied = [(main_row[other], "main", None)]
+        else:
+            supplied = [(r[other], "line", r["line_index"]) for r in line_rows]
+        for value, dataset, line_index in supplied:
+            if value is None:
+                continue
+            counts["considered"] += 1
+            if kind == "date" and parse_date(value, year_pivot) is None:
+                counts["excluded_unparseable_date"] += 1
+                continue
+            if value in truth_doc[target]:
+                counts["excluded_valid_for_target"] += 1
+                continue
+            out.append((value, {"scope": "same_document", "dataset": dataset,
+                                "field": other, "line_index": line_index}))
+    return out
+
+
+def _same_record(source, dataset, row):
+    return source["dataset"] == dataset and (dataset == "main" or source["line_index"] == row["line_index"])
+
+
+def mark_exchanges(sources, dataset, row):
+    """Set ``exchanged_with`` on each source: the field it was taken from, if that
+    field (in this very record) was in turn filled from this field; else None."""
+    for f, src in sources.items():
+        partner = src["field"]
+        back = sources.get(partner)
+        src["exchanged_with"] = (
+            partner
+            if _same_record(src, dataset, row) and back is not None
+            and _same_record(back, dataset, row) and back["field"] == f
+            else None
+        )
+
+
+def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, line_by_doc, truth,
+                             kinds, date_fields, year_pivot, k_range, rng):
+    """cross_type invalid rows for one dataset/split: one per achievable ``k`` in ``k_range``.
+
+    Returns ``(rows, skipped, capped, stats)``. ``rng`` must be this
+    dataset/split's own stream. Reuses ``achievable_targets`` /
+    ``make_invalid_row`` with per-row pools of eligible same-kind values, so the
+    field choice, ``k`` bookkeeping and date-order handling are those of the
+    other error types; the source of each value is then drawn uniformly among the
+    fields in this document holding it.
+    """
+    kind_of = field_kinds(kinds)
+    targets = [f for f in fields if f in kind_of]
+    assert set(date_fields) <= set(targets), "date fields must be in the date kind"
+    k_lo, k_hi = k_range
+    assert 1 <= k_lo <= k_hi <= len(targets), (k_range, len(targets))
+
+    rows, skipped, capped = [], [], []
+    stats = {"candidate_counts": Counter(), "pair_counts": Counter(),
+             "n_exchanged_fields": 0, "n_rows_with_exchange": 0}
+    for base in base_rows:
+        doc = base["document_id"]
+        row_id = {key: base[key] for key in id_keys}
+        cands = {
+            t: cross_type_candidates(t, kinds, kind_of, main_by_doc[doc], line_by_doc.get(doc, []),
+                                     truth[doc], year_pivot, stats["candidate_counts"])
+            for t in targets
+        }
+        pools = {t: [v for v, _ in cands[t]] for t in targets}
+        sources_by_value = {t: {} for t in targets}
+        for t in targets:
+            for v, src in cands[t]:
+                sources_by_value[t].setdefault(v, []).append(src)
+
+        ks = achievable_targets(base, targets, date_fields, pools, year_pivot, (k_lo, k_hi))
+        if not ks:
+            skipped.append(row_id)
+            continue
+        if ks[-1] < k_hi:
+            capped.append({**row_id, "reached": ks[-1]})
+        for k in ks:
+            result = make_invalid_row(base, k, targets, date_fields, pools, year_pivot, rng)
+            assert result is not None and len(result[1]) == k, "k came from achievable_targets"
+            new_row, invalid_fields = result
+            sources = {f: dict(rng.choice(sources_by_value[f][new_row[f]])) for f in invalid_fields}
+            mark_exchanges(sources, dataset, base)
+            n_ex = sum(src["exchanged_with"] is not None for src in sources.values())
+            stats["n_exchanged_fields"] += n_ex
+            stats["n_rows_with_exchange"] += n_ex > 0
+            for f, src in sources.items():
+                stats["pair_counts"][f"{f}<-{src['field']}"] += 1
+            rows.append(tag_row(new_row, fields, id_keys, k, False, invalid_fields, CROSS_TYPE, sources))
+    return rows, skipped, capped, stats
+
+
+def verify_cross_type_rows(rows, dataset, base_by_id, id_keys, main_by_doc, line_by_doc, truth, kinds,
+                           date_fields, year_pivot):
+    """Every cross_type field is a real, same-kind, parseable-if-date value of its
+    own document that is not already valid for the field it was filed under."""
+    kind_of = field_kinds(kinds)
+    for row in rows:
+        assert row["error_type"] == CROSS_TYPE
+        key = tuple(row[k] for k in id_keys)
+        doc = row["document_id"]
+        base = base_by_id[key]
+        for f in row["invalid_fields"]:
+            src = row["field_errors"][f]["source"]
+            assert src["scope"] == "same_document" and src["field"] != f, (key, f, src)
+            assert kind_of[f] == kind_of[src["field"]], (key, f, src)
+            if src["dataset"] == "main":
+                assert src["line_index"] is None and src["field"] in MAIN_FIELDS
+                taken = main_by_doc[doc][src["field"]]
+            else:
+                assert src["field"] in LINE_FIELDS
+                donor = next(r for r in line_by_doc[doc] if r["line_index"] == src["line_index"])
+                taken = donor[src["field"]]
+            assert taken is not None and row[f] == taken, (key, f, src)
+            assert row[f] not in truth[doc][f], f"{key}: {f} filed a value that is valid for it"
+            if kind_of[f] == "date":
+                assert parse_date(row[f], year_pivot) is not None, (key, f, row[f])
+            ex = src["exchanged_with"]
+            if ex is not None:
+                back = row["field_errors"][ex]["source"]
+                assert back["field"] == f and back["exchanged_with"] == f, (key, f, ex)
+                assert row[f] == base[ex] and row[ex] == base[f], (key, f, ex)
+
+
 # --- Config / IO --------------------------------------------------------------
 
 
@@ -682,6 +925,9 @@ def load_config(path):
     )
     assert set(params["main"]) == {"k_range", "pool_scope"}, "params.main keys"
     assert set(params["line"]) == {"k_range"}, "params.line keys"
+    cross = params["cross_type"]
+    assert set(cross) == {"kinds", "main", "line"}, "params.cross_type keys"
+    assert set(cross["main"]) == {"k_range"} and set(cross["line"]) == {"k_range"}, "params.cross_type.main/line keys"
     return config
 
 
@@ -727,6 +973,20 @@ def main(argv=None):
     assert 1 <= main_k_range[0] <= main_k_range[1] <= len(MAIN_FIELDS), main_k_range
     assert 1 <= line_k_range[0] <= line_k_range[1] <= len(LINE_FIELDS), line_k_range
 
+    cross = params["cross_type"]
+    kinds = {kind: list(members) for kind, members in cross["kinds"].items()}
+    kind_of = field_kinds(kinds)
+    assert set(kinds.get("date", [])) == {*main_date_fields, *line_date_fields}, (
+        "cross_type.kinds.date must be exactly the main + line date fields"
+    )
+    cross_k = {"main": tuple(cross["main"]["k_range"]), "line": tuple(cross["line"]["k_range"])}
+    for ds, fields in (("main", MAIN_FIELDS), ("line", LINE_FIELDS)):
+        n_kinded = sum(f in kind_of for f in fields)
+        assert 1 <= cross_k[ds][0] <= cross_k[ds][1] <= n_kinded, (ds, cross_k[ds], n_kinded)
+    print("cross_type kinds:", {k: v for k, v in kinds.items()})
+    print("fields with no kind (never cross_type):",
+          [f for f in [*MAIN_FIELDS, *LINE_FIELDS] if f not in kind_of])
+
     data_root = Path(params["data_root"])
     assert data_root.is_dir(), f"no such directory: {data_root}"
 
@@ -737,6 +997,8 @@ def main(argv=None):
         "invalid_field_freq": {"main": {}, "line": {}},
         "skipped_rows": {"main": {}, "line": {}},
         "capped_rows": {"main": {}, "line": {}},
+        "cross_type": {"kinds": kinds, "fields_without_kind": [f for f in [*MAIN_FIELDS, *LINE_FIELDS] if f not in kind_of],
+                       "main": {}, "line": {}},
         "main_pool_sizes": {},
         "line_inter_date_pool_sizes": {},
         "line_intra_donor_counts": {},
@@ -752,41 +1014,71 @@ def main(argv=None):
         line_docs = sorted({r["document_id"] for r in line_base})
         assert set(line_docs) <= set(main_by_id), "line documents missing from the main base"
 
-        # --- main dataset (generation unchanged) ---
+        # --- main dataset (inter_document generation unchanged; cross_type appended) ---
         pools_main = main_pools(main_base, sentinels, main_date_fields, year_pivot)
         provenance["main_pool_sizes"][split] = {f: len(p) for f, p in pools_main.items()}
+        real_dates = {r[f] for f in main_date_fields for r in main_base if r[f] is not None}
+        sentinel_only = {sv for sv in sentinels if sv not in real_dates}
+
+        def main_source(field, value, _only=sentinel_only, _dates=main_date_fields):
+            if field in _dates and value in _only:
+                return {"scope": "sentinel"}
+            return {"scope": "other_document"}
 
         out_rows, skipped, capped = generate_split(
             main_base, MAIN_FIELDS, MAIN_FIELDS, ["document_id"], main_k_range,
-            lambda _r, _p=pools_main: _p, main_date_fields, year_pivot, rng,
+            lambda _r, _p=pools_main: _p, main_date_fields, year_pivot, rng, main_source,
         )
+
+        line_by_doc = {}
+        for row in line_base:
+            line_by_doc.setdefault(row["document_id"], []).append(row)
+        for rows_ in line_by_doc.values():
+            rows_.sort(key=lambda r: r["line_index"])
+        truth = document_truth(main_base, line_base)
+
+        cross_rng = random.Random(f"{seed}:{split}:main:{CROSS_TYPE}")
+        cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
+            "main", main_base, MAIN_FIELDS, ["document_id"], main_by_id, line_by_doc, truth, kinds,
+            main_date_fields, year_pivot, cross_k["main"], cross_rng,
+        )
+        out_rows = out_rows + cross_rows
         base_by_id = {(r["document_id"],): r for r in main_base}
         verify_output(out_rows, base_by_id, MAIN_FIELDS, MAIN_FIELDS, ["document_id"],
-                      main_k_range[1], main_date_fields, year_pivot)
+                      max(main_k_range[1], cross_k["main"][1]), main_date_fields, year_pivot)
+        verify_cross_type_rows(cross_rows, "main", base_by_id, ["document_id"], main_by_id, line_by_doc,
+                               truth, kinds, main_date_fields, year_pivot)
         (data_root / "main" / f"{split}.json").write_text(
             json.dumps(out_rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
         n_valid = sum(1 for r in out_rows if r["valid"])
+        n_by_type = {et: sum(1 for r in out_rows if r["error_type"] == et) for et in ERROR_TYPES["main"]}
         provenance["counts"]["main"][split] = {
-            "valid": n_valid, "invalid": len(out_rows) - n_valid, "total": len(out_rows)
+            "valid": n_valid, "invalid": len(out_rows) - n_valid, **n_by_type, "total": len(out_rows)
         }
-        provenance["num_invalid_fields_dist"]["main"][split] = dict(
-            sorted(Counter(r["num_invalid_fields"] for r in out_rows).items())
-        )
-        field_freq = Counter(f for r in out_rows for f in r["invalid_fields"])
-        provenance["invalid_field_freq"]["main"][split] = {f: field_freq[f] for f in MAIN_FIELDS}
-        provenance["skipped_rows"]["main"][split] = skipped
-        provenance["capped_rows"]["main"][split] = capped
+        provenance["num_invalid_fields_dist"]["main"][split] = {
+            et: dict(sorted(Counter(r["num_invalid_fields"] for r in out_rows if r["error_type"] == et).items()))
+            for et in ERROR_TYPES["main"]
+        }
+        provenance["invalid_field_freq"]["main"][split] = {
+            et: {f: sum(1 for r in out_rows if r["error_type"] == et and f in r["invalid_fields"]) for f in MAIN_FIELDS}
+            for et in ERROR_TYPES["main"]
+        }
+        provenance["skipped_rows"]["main"][split] = {INTER_DOCUMENT: skipped, CROSS_TYPE: cross_skipped}
+        provenance["capped_rows"]["main"][split] = {INTER_DOCUMENT: capped, CROSS_TYPE: cross_capped}
+        provenance["cross_type"]["main"][split] = {
+            "candidate_counts": dict(cross_stats["candidate_counts"]),
+            "pair_counts": dict(sorted(cross_stats["pair_counts"].items())),
+            "n_exchanged_fields": cross_stats["n_exchanged_fields"],
+            "n_rows_with_exchange": cross_stats["n_rows_with_exchange"],
+        }
         print(
-            f"main/{split}: {n_valid} valid + {len(out_rows) - n_valid} invalid "
-            f"= {len(out_rows)}  (skipped {len(skipped)}, capped {len(capped)})"
+            f"main/{split}: {n_valid} valid + {n_by_type[INTER_DOCUMENT]} inter-document + "
+            f"{n_by_type[CROSS_TYPE]} cross-type = {len(out_rows)}  (skipped inter {len(skipped)}/cross "
+            f"{len(cross_skipped)}, capped inter {len(capped)}/cross {len(cross_capped)})"
         )
 
-        # --- line dataset (inter- + intra-document) ---
-        line_by_doc = {}
-        for row in line_base:
-            line_by_doc.setdefault(row["document_id"], []).append(row)
-
+        # --- line dataset (inter- + intra-document, then cross_type) ---
         inter_pools = line_inter_pools_by_doc(line_base, line_date_fields, year_pivot)
         inter_sizes = [len(p[line_date_fields[0]]) for p in inter_pools.values()]
         provenance["line_inter_date_pool_sizes"][split] = {
@@ -799,33 +1091,49 @@ def main(argv=None):
         }
 
         out_rows, skipped, capped = generate_line_split(line_base, line_date_fields, year_pivot, line_k_range, rng)
+        cross_rng = random.Random(f"{seed}:{split}:line:{CROSS_TYPE}")
+        cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
+            "line", line_base, LINE_FIELDS, ["document_id", "line_index"], main_by_id, line_by_doc, truth,
+            kinds, line_date_fields, year_pivot, cross_k["line"], cross_rng,
+        )
+        out_rows = out_rows + cross_rows
         base_by_id_line = {(r["document_id"], r["line_index"]): r for r in line_base}
         verify_line_output(out_rows, base_by_id_line, line_date_fields, year_pivot, line_by_doc)
+        verify_cross_type_rows(cross_rows, "line", base_by_id_line, ["document_id", "line_index"], main_by_id,
+                               line_by_doc, truth, kinds, line_date_fields, year_pivot)
         (data_root / "line" / f"{split}.json").write_text(
             json.dumps(out_rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
         n_valid = sum(1 for r in out_rows if r["valid"])
-        n_inter = sum(1 for r in out_rows if r["error_type"] == "inter_document")
-        n_intra = sum(1 for r in out_rows if r["error_type"] == "intra_document")
+        n_inter = sum(1 for r in out_rows if r["error_type"] == INTER_DOCUMENT)
+        n_intra = sum(1 for r in out_rows if r["error_type"] == INTRA_DOCUMENT)
+        n_cross = sum(1 for r in out_rows if r["error_type"] == CROSS_TYPE)
         provenance["counts"]["line"][split] = {
-            "valid": n_valid, "inter_document": n_inter, "intra_document": n_intra, "total": len(out_rows)
+            "valid": n_valid, INTER_DOCUMENT: n_inter, INTRA_DOCUMENT: n_intra, CROSS_TYPE: n_cross,
+            "total": len(out_rows),
         }
         provenance["num_invalid_fields_dist"]["line"][split] = {
             error_type: dict(sorted(Counter(
                 r["num_invalid_fields"] for r in out_rows if r["error_type"] == error_type
             ).items()))
-            for error_type in ("inter_document", "intra_document")
+            for error_type in ERROR_TYPES["line"]
         }
         provenance["invalid_field_freq"]["line"][split] = {
             error_type: {
                 f: sum(1 for r in out_rows if r["error_type"] == error_type and f in r["invalid_fields"])
                 for f in LINE_FIELDS
             }
-            for error_type in ("inter_document", "intra_document")
+            for error_type in ERROR_TYPES["line"]
         }
-        provenance["skipped_rows"]["line"][split] = skipped
-        provenance["capped_rows"]["line"][split] = capped
+        provenance["skipped_rows"]["line"][split] = {**skipped, CROSS_TYPE: cross_skipped}
+        provenance["capped_rows"]["line"][split] = {**capped, CROSS_TYPE: cross_capped}
+        provenance["cross_type"]["line"][split] = {
+            "candidate_counts": dict(cross_stats["candidate_counts"]),
+            "pair_counts": dict(sorted(cross_stats["pair_counts"].items())),
+            "n_exchanged_fields": cross_stats["n_exchanged_fields"],
+            "n_rows_with_exchange": cross_stats["n_rows_with_exchange"],
+        }
 
         # Informational, not asserted: how often an inter-document draw happens
         # to coincide with a value already present in the row's own document
@@ -844,9 +1152,10 @@ def main(argv=None):
             "rows_with_overlap": overlap_count, "total_inter_rows": len(inter_rows),
         }
         print(
-            f"line/{split}: {n_valid} valid + {n_inter} inter-document + {n_intra} intra-document "
-            f"= {len(out_rows)}  (skipped inter {len(skipped['inter_document'])}/intra {len(skipped['intra_document'])}, "
-            f"capped inter {len(capped['inter_document'])}/intra {len(capped['intra_document'])})"
+            f"line/{split}: {n_valid} valid + {n_inter} inter-document + {n_intra} intra-document + "
+            f"{n_cross} cross-type = {len(out_rows)}  (skipped inter {len(skipped['inter_document'])}/intra "
+            f"{len(skipped['intra_document'])}/cross {len(cross_skipped)}, capped inter "
+            f"{len(capped['inter_document'])}/intra {len(capped['intra_document'])}/cross {len(cross_capped)})"
         )
 
     sha, dirty = git_state()
