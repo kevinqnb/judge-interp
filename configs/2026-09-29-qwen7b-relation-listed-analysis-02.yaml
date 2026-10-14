@@ -5,7 +5,7 @@ description: >-
   Analysis of the listed relation-detection runs (Qwen2.5-7B-Instruct): X = last-layer minus layer-0
   content-span representations, per-document then per-entity-type mean-centering (train type means);
   train PCA colored by source tuple (grey = multi-source) for example documents; synthetic valid/invalid
-  partial-tuple datasets Z; logistic regression on the 10-dim relation-type cosine vector (cos(X[e], X[o]) per relation type, 0 if absent) (train -> test) with
+  partial-tuple datasets Z; logistic regression on the 10-dim relation-type cosine vector (cos(X[e], X[o]) per relation type, absent_fill if absent) (train -> test) with
   accuracy/precision/recall/F1/AUROC and smooth ECE + reliability diagram. Positive class = valid.
 seed: 0
 params:

@@ -38,7 +38,7 @@ entry = one row per distinct ``(entity_type, value)`` of a document) and does, i
    of the 5 entity types, ``RELATION_TYPES``; the fixed type count, not the per-tuple ``m``, so
    a slot means the same relation in every sample). For each other entity ``o`` in ``z`` the
    cosine similarity of ``X[e]`` and ``X[o]`` goes in the slot of ``(type(e), type(o))``;
-   relations not present in ``z`` stay 0. (Only pairs involving ``e`` are filled.) A valid ``z``
+   relations not present in ``z`` are set to ``absent_fill`` (a config key). (Only pairs involving ``e`` are filled.) A valid ``z``
    and its ``z'`` have the same types, so the set of filled slots carries no label information.
    Logistic regression on the vector (train -> test), **positive class = valid**.
    Accuracy/precision/recall/F1/AUROC, smooth ECE + reliability diagram (the functions in
