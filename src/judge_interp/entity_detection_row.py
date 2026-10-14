@@ -2,11 +2,20 @@
 
 A *row* is one row of ``data/vrdu/{main,line}/<split>.json`` -- valid, or invalid
 with one of the dataset's error types. The prompt is the document's OCR text plus
-that single row, rendered by ``prompts.render_query`` (one ``field: <json>`` line
-per field; line rows carry no main fields). Every non-null string value is
-therefore wrapped in double quotes, and the representation of each entity is read
-at its **closing quote**, the first position at which a causal model has seen the
-whole value delimited.
+that single row, rendered like ``prompts.render_query`` (one ``field: <json>`` line
+per field; line rows carry no main fields) with two tokenization-driven changes:
+each non-null value is padded with one space before its closing quote
+(``"value "``), and the query ends with a newline. Every non-null string value is
+wrapped in double quotes, and the representation of each entity is read at its
+**closing quote**, the first position at which a causal model has seen the whole
+value delimited.
+
+The two changes exist because byte-level BPE (Qwen2.5) otherwise tokenizes the
+closing quote differently by position -- a bare ``"`` only on the last non-null
+line (followed by ``<|im_end|>``), ``"\n`` elsewhere -- and merges the value's
+last character into the quote token (``)"\n``), leaking entity text into the
+read position. The newline makes the last line like the others; the pad space
+keeps the value's last character out of the quote token.
 
 Labels are per entity, not per row: ``field_errors[field]`` is null for a correct
 entity and ``{"error_type", "source"}`` for a corrupted one, so one row can carry
@@ -51,6 +60,7 @@ DATASETS = ("main", "line")
 assert LINE_CARRIED_FIELDS == [], "line rows must not carry main fields in this task"
 ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type")
 _SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
+_PAD = " "  # inserted before each closing quote; see the module docstring
 
 # Shown to the judge so it can apply the type-correspondence criterion.
 TYPE_DESCRIPTIONS: dict[str, str] = {
@@ -83,7 +93,7 @@ _HEADER = """You are validating a record extracted from a document by an informa
 
 You are given:
 1) In ## CONTEXT: the full OCR text of the source document.
-2) In ## QUERY: the extracted record, which is {noun}. It has one line per field, in the form `field: value`. A value is a JSON string in double quotes, or `null` when the field was not extracted.
+2) In ## QUERY: the extracted record, which is {noun}. It has one line per field, in the form `field: value`. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value.
 
 The fields are:
 {types}
@@ -187,10 +197,11 @@ def _source_columns(entry: dict | None) -> dict:
 def render_row(row: dict, dataset: str) -> dict:
     """Render a row and locate each entity's closing quote.
 
-    Returns ``{"text", "spans"}`` where ``text == prompts.render_query(row,
-    dataset)`` (asserted) and ``spans`` is a list of ``(field, char_start,
-    char_end)`` -- one per non-null field, canonical order -- covering exactly the
-    closing ``"`` character (offsets into ``text``, exclusive end).
+    The text is ``prompts.render_query``'s with each non-null value's closing
+    quote preceded by one space, and a trailing newline (asserted line by line).
+    ``spans`` is a list of ``(field, char_start, char_end)`` -- one per non-null
+    field, canonical order -- covering exactly the closing ``"`` character
+    (offsets into ``text``, exclusive end).
     """
     lines: list[str] = []
     spans: list[tuple[str, int, int]] = []
@@ -199,14 +210,21 @@ def render_row(row: dict, dataset: str) -> dict:
         v = row[f]
         prefix = f"{f}: "
         encoded = json.dumps(v)
-        lines.append(prefix + encoded)
         if v is not None:
             assert isinstance(v, str), f"{f}: non-str value {v!r}"
+            encoded = encoded[:-1] + _PAD + '"'
+        lines.append(prefix + encoded)
+        if v is not None:
             close = offset + len(prefix) + len(encoded) - 1
             spans.append((f, close, close + 1))
         offset += len(lines[-1]) + 1
-    text = "\n".join(lines)
-    assert text == render_query(row, dataset), "render_row diverged from prompts.render_query"
+    text = "\n".join(lines) + "\n"
+
+    base = render_query(row, dataset).split("\n")
+    assert len(base) == len(lines), "render_row diverged from prompts.render_query"
+    for f, b, mine in zip(QUERY_FIELDS[dataset], base, lines):
+        expected = b if row[f] is None else b[:-1] + _PAD + '"'
+        assert mine == expected, f"{f}: render_row diverged from prompts.render_query"
     for f, a, b in spans:
         assert text[a:b] == '"', f"{f}: span does not cover a closing quote"
     return {"text": text, "spans": spans}

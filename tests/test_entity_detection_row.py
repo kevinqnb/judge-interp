@@ -49,9 +49,9 @@ def test_render_row_hand_worked():
     r = _rows("main")[0]  # M1
     out = er.render_row(r, "main")
     assert out["text"] == (
-        'advertiser: "Acme"\nagency: null\nproperty: "WAAA"\ntv_address: "1 Main St\\nBoston"\n'
-        'product: "Race 1"\ncontract_num: "111"\nflight_from: "01/01/20"\nflight_to: "01/31/20"\n'
-        'gross_amount: "$500.00"'
+        'advertiser: "Acme "\nagency: null\nproperty: "WAAA "\ntv_address: "1 Main St\\nBoston "\n'
+        'product: "Race 1 "\ncontract_num: "111 "\nflight_from: "01/01/20 "\nflight_to: "01/31/20 "\n'
+        'gross_amount: "$500.00 "\n'
     )
     assert [f for f, _, _ in out["spans"]] == [
         "advertiser", "property", "tv_address", "product", "contract_num",
@@ -59,11 +59,11 @@ def test_render_row_hand_worked():
     ]  # agency is null: no span
     for _, a, b in out["spans"]:
         assert out["text"][a:b] == '"'
-    # `advertiser: "Acme"`: name 0-9, ': ' 10-11, open quote 12, Acme 13-16, close quote 17
-    assert out["spans"][0] == ("advertiser", 17, 18)
-    # the closing quote is followed by a newline, except on the last line
-    assert out["text"][out["spans"][0][2]] == "\n"
-    assert out["spans"][-1][2] == len(out["text"])
+        assert out["text"][a - 1] == " " and out["text"][b] == "\n"  # pad before, newline after
+    # `advertiser: "Acme "`: name 0-9, ': ' 10-11, open quote 12, Acme 13-16, pad 17, close quote 18
+    assert out["spans"][0] == ("advertiser", 18, 19)
+    # the last line is terminated like the others
+    assert out["spans"][-1][2] == len(out["text"]) - 1
 
 
 def test_render_row_escaped_inner_quote():
@@ -72,8 +72,17 @@ def test_render_row_escaped_inner_quote():
     out = er.render_row(r, "line")
     f, a, b = out["spans"][1]
     assert f == "program_desc"
-    assert out["text"].splitlines()[1] == 'program_desc: "Say \\"hi\\""'
-    assert out["text"][a - 2:b] == '\\""'  # the span is the final, closing quote
+    assert out["text"].splitlines()[1] == 'program_desc: "Say \\"hi\\" "'
+    assert out["text"][a - 3:b] == '\\" "'  # escaped quote, pad space, then the closing quote
+
+
+def test_render_row_differs_from_render_query_only_by_padding():
+    for ds in ("main", "line"):
+        for r in _rows(ds):
+            text = er.render_row(r, ds)["text"]
+            assert text.endswith("\n") and not text.endswith("\n\n")
+            plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
+            assert "\n".join(plain) == render_query(r, ds)
 
 
 def test_line_prompt_has_no_main_fields():
