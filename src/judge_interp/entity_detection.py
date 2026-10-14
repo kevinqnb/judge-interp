@@ -94,7 +94,7 @@ TYPE_DESCRIPTIONS: dict[str, str] = {
 assert list(TYPE_DESCRIPTIONS) == TYPE_NAMES, "TYPE_DESCRIPTIONS keys must match TYPE_NAMES in order"
 
 # Second criterion, specific to this task: presence in the text is not validity.
-_TYPE_CRITERION = """({n}) Type correspondence. The value must be what the stated field type denotes in this document, as described in the list of field types above, not merely text that appears somewhere in the context. A value that is present in the context but is the value of a different field (for example a date or a dollar amount that belongs to another field or to another part of the document) fails this criterion."""
+_TYPE_CRITERION = """({n}) Type correspondence. The bracketed field type is a claim about what the value is, and it must hold in this document: the value must be what that field type denotes here, as described in the list of field types above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field type fails this criterion, even though it is a genuine entity of the document. For example, a candidate listed under [advertiser] whose text is really the name of the agency, the TV station, or a product description is invalid, as is a date or a dollar amount that belongs to another field or to another part of the document. Check each candidate against the role its stated type requires, not merely against the text."""
 
 # Span metadata columns, in shard order. All values are str / int / bool.
 SPAN_META_KEYS = (
