@@ -21,7 +21,7 @@ permutations ~ 0.5, asserted) and, for relation runs, parameter-free structure b
 score must beat to mean anything: AUROC of ``-subset size`` (a larger subset is likelier to contain
 an invalid field, so size alone carries label information) and AUROC within each subset size.
 
-Figures go to ``analysis/figures/<id>/<label>/``; ``metrics.json`` and ``config.snapshot.yaml`` to
+Figures go to ``analysis/figures/<id>/<label>/`` (``metrics.json`` copy in ``analysis/figures/<id>/``); ``metrics.json`` and ``config.snapshot.yaml`` to
 ``$RUNS_ROOT/<id>/``. Metric keys are prefixed with the run's ``label``.
 """
 from __future__ import annotations
@@ -108,6 +108,7 @@ def analyse_run(label: str, run: dict, spec: dict, p: dict, fig_dir: Path, seed:
     m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     (fig_dir / label).mkdir(parents=True, exist_ok=True)
     er.plot_calibration(d, fig_dir / label)
+    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
 
     types = sorted(set(run["invalid_type"][~y].tolist()))
     for k, v in er.error_type_report(y, probs, thr, run["invalid_type"], run["row_error_type"], types).items():
@@ -150,7 +151,9 @@ def run(cfg: dict, runs_root: Path) -> dict:
         metrics[f"{spec['label']}_context_is_other_document"] = int(r["params"]["context_control"] == "other_document")
         for k, v in analyse_run(spec["label"], r, spec, p, fig_dir, seed).items():
             metrics[f"{spec['label']}_{k}"] = v
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    metrics_text = json.dumps(metrics, indent=2) + "\n"
+    (out / "metrics.json").write_text(metrics_text)
+    (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
     print(json.dumps(metrics, indent=2))
     return metrics
 

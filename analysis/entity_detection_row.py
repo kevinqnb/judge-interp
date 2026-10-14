@@ -30,7 +30,7 @@ activation per non-null field, read at the field's closing quote) and does, in o
    ``n_shuffles`` shuffled-train-label fits ~ 0.5 (a single permutation is too noisy to assert,
    see ``shuffled_label_auroc``); same-seed refit gives identical probabilities.
 
-Figures go to ``analysis/figures/<id>/``; ``metrics.json``, ``config.snapshot.yaml`` and
+Figures go to ``analysis/figures/<id>/`` (with a copy of ``metrics.json``); ``metrics.json``, ``config.snapshot.yaml`` and
 ``artifacts/test_predictions.npz`` go to ``$RUNS_ROOT/<id>/``.
 """
 from __future__ import annotations
@@ -215,6 +215,17 @@ def plot_calibration(d: dict, out_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_prob_histogram(probs: np.ndarray, n_bins: int, out_dir: Path) -> None:
+    """Histogram of ``P(valid)`` over [0, 1] (``n_bins`` equal-width bins) -> ``prob_histogram.png``."""
+    assert probs.ndim == 1 and len(probs) > 0 and np.isfinite(probs).all() and ((0.0 <= probs) & (probs <= 1.0)).all()
+    assert isinstance(n_bins, int) and n_bins > 0, n_bins
+    fig, ax = plt.subplots(figsize=(4.4, 3.2), constrained_layout=True)
+    ax.hist(probs, bins=n_bins, range=(0.0, 1.0), color=ed.VALID_COLOR)
+    ax.set(xlabel="P(valid)", ylabel="count", xlim=(0.0, 1.0), title=f"Test probabilities (n = {len(probs)})")
+    fig.savefig(out_dir / "prob_histogram.png", dpi=200)
+    plt.close(fig)
+
+
 # ----------------------------------------------------------------------------- main
 def run(cfg: dict, runs_root: Path) -> dict:
     p, seed = cfg["params"], cfg["seed"]
@@ -263,6 +274,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     d = ed.smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     plot_calibration(d, fig_dir)
+    plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
 
     for k_, v in error_type_report(y_te, probs, thr, te["field_error_type"], te["row_error_type"], types).items():
         metrics[f"test_{k_}"] = v
@@ -289,7 +301,9 @@ def run(cfg: dict, runs_root: Path) -> dict:
         prob_valid=probs, label_valid=y_te, doc_ids=te["doc_ids"], row_ordinal=te["row_ordinal"],
         field=te["field"], field_error_type=te["field_error_type"], row_error_type=te["row_error_type"],
     )
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    metrics_text = json.dumps(metrics, indent=2) + "\n"
+    (out / "metrics.json").write_text(metrics_text)
+    (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
     print(json.dumps(metrics, indent=2))
     return metrics
 

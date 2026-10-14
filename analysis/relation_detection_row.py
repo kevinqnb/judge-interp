@@ -26,7 +26,7 @@ activation per non-null field, read at the field's closing quote) and does, in o
    mean test AUROC over ``n_shuffles`` shuffled-train-label fits ~ 0.5 (asserted); same-seed refit
    gives identical probabilities (asserted).
 
-Figures go to ``analysis/figures/<id>/``; ``metrics.json``, ``config.snapshot.yaml`` and
+Figures go to ``analysis/figures/<id>/`` (with a copy of ``metrics.json``); ``metrics.json``, ``config.snapshot.yaml`` and
 ``artifacts/test_predictions.npz`` go to ``$RUNS_ROOT/<id>/``.
 """
 from __future__ import annotations
@@ -164,6 +164,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     d = ed.smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     er.plot_calibration(d, fig_dir)
+    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
 
     for k_, v in er.error_type_report(y_te, probs, thr, z_te["error_type"], z_te["error_type"], types).items():
         metrics[f"test_{k_}"] = v
@@ -190,7 +191,9 @@ def run(cfg: dict, runs_root: Path) -> dict:
         prob_valid=probs, label_valid=y_te, doc_ids=z_te["doc"], row_ordinal=z_te["ordinal"],
         pair=pair_ids[z_te["pair"]], error_type=z_te["error_type"], span_i=z_te["i"], span_j=z_te["j"],
     )
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    metrics_text = json.dumps(metrics, indent=2) + "\n"
+    (out / "metrics.json").write_text(metrics_text)
+    (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
     print(json.dumps(metrics, indent=2))
     return metrics
 
