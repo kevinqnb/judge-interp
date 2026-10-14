@@ -1,0 +1,5 @@
+CONTRACT
+Advertiser: Acme
+Property: WAAA
+Ch. 7 Movie 01/05/20 - 01/10/20 $100.00
+Ch. 8 01/11/20 - 01/20/20 $250.00
