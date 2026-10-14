@@ -1,0 +1,16 @@
+id: 2026-10-14-clef-tiny-analysis-01
+project: judge-interp
+description: >-
+  Analysis of the tiny end-to-end Clef relation pair (own-document context vs other-document context ablation)
+  on the real line test split. Plumbing and prediction check only: the sets are 40 subsets each.
+seed: 0
+params:
+  runs:
+    - {label: relation_tiny, kind: relation, run_id: 2026-10-14-clef-relation-tiny-01, bss_ref_rate: evaluation_set_rate}
+    - {label: relation_tiny_ablation, kind: relation, run_id: 2026-10-14-clef-relation-tiny-ablation-01, bss_ref_rate: evaluation_set_rate}
+  decision_threshold: 0.5
+  ece_n_boot: 200
+  n_shuffles: 200
+  permutation_auroc_tolerance: 0.03
+  omp: 8
+  walltime: "00:30:00"

@@ -1,0 +1,37 @@
+id: 2026-10-14-clef-relation-tiny-ablation-01
+project: judge-interp
+task: clef_relation_row
+description: >-
+  Context-ablation partner of 2026-10-14-clef-relation-tiny-01: identical subsets and labels, but each
+  document's OCR text is replaced by a different document's. Prediction (stated before the run): AUROC falls
+  toward 0.5; if it does not, something other than the document is carrying the label.
+seed: 0
+params:
+  data_root: data
+  model: Cloudflare/clef-flash
+  revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
+  dataset: line
+  split: test
+  device: cuda
+  dtype: bfloat16
+  max_length: 16384
+  overlong_docs: exclude
+  context_control: other_document
+  determinism_check_n: 3
+  known_answer_check: true
+  error_types: [inter_document, intra_document]
+  rows_per_stratum:
+    valid: 30
+    inter_document: 30
+    intra_document: 30
+  samples_per_row: 8
+  min_subset_size: 2
+  n_per_class: 20
+  subset_rng_stream: 1
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"
