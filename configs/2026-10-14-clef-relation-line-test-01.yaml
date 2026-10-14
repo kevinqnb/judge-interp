@@ -1,0 +1,41 @@
+id: 2026-10-14-clef-relation-line-test-01
+project: judge-interp
+task: clef_relation_row
+description: >-
+  Clef-flash relation detection, line dataset, test split: random subsets of each line-item row, drawn and
+  balanced exactly as analysis/relation_detection_row.py does; one record and one noul question per subset,
+  P(true) stored. Rows as the Qwen relrow line test run. samples_per_row / n_per_class are placeholders
+  pending the model-free dry run; the question wording is a first draft.
+seed: 0
+params:
+  data_root: data
+  model: Cloudflare/clef-flash
+  revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
+  dataset: line
+  split: test
+  device: cuda
+  dtype: bfloat16
+  max_length: 16384
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  error_types: [inter_document, intra_document]
+  rows_per_stratum:
+    valid: 250
+    inter_document: 250
+    intra_document: 250
+  # Subsets: per source row, samples_per_row distinct subsets of size >= min_subset_size; then the set is cut to
+  # exactly n_per_class valid and n_per_class invalid. rng = default_rng([seed, subset_rng_stream]); stream 1 is
+  # the probe analysis's test split, so the subsets equal the probe's (before over-length exclusion).
+  samples_per_row: 8
+  min_subset_size: 2
+  n_per_class: 400
+  subset_rng_stream: 1
+
+  # -- scripts/submit.sh resources (placeholders pending a GPU timing pilot) --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "02:00:00"

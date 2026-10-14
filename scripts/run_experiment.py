@@ -134,6 +134,19 @@ _TASK_PARAMS: dict[str, tuple[str, ...]] = {
         "data_root", "model", "dataset", "split", "layers", "dtype", "device",
         "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
     ),
+    # Cloudflare/clef-flash as a direct judge (calibrated P(true), no probe) -- see
+    # judge_interp/clef.py. No representations are collected and RepresentationLM is not built.
+    "clef_entity_row": (
+        "data_root", "model", "revision", "dataset", "split", "device", "dtype", "max_length",
+        "overlong_docs", "context_control", "determinism_check_n", "known_answer_check",
+        "error_types", "rows_per_stratum",
+    ),
+    "clef_relation_row": (
+        "data_root", "model", "revision", "dataset", "split", "device", "dtype", "max_length",
+        "overlong_docs", "context_control", "determinism_check_n", "known_answer_check",
+        "error_types", "rows_per_stratum",
+        "samples_per_row", "min_subset_size", "n_per_class", "subset_rng_stream",
+    ),
     # Line-field relation detection, entities read in their prompted lists --
     # see judge_interp/relation_detection.py. layers must be [0, "last"].
     "relation_detection_listed": (
@@ -183,9 +196,9 @@ def load_config(path: Path) -> dict:
     if extra:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
-    if task in ("record_judge", "entity_detection", "entity_detection_row") and params["dataset"] not in ("main", "line"):
+    if task in ("record_judge", "entity_detection", "entity_detection_row", "clef_entity_row") and params["dataset"] not in ("main", "line"):
         raise ValueError(f"params.dataset must be 'main' or 'line', got {params['dataset']!r}")
-    if task == "relation_detection_row" and params["dataset"] != "line":
+    if task in ("relation_detection_row", "clef_relation_row") and params["dataset"] != "line":
         raise ValueError(f"params.dataset must be 'line' for {task!r}, got {params['dataset']!r}")
     return cfg
 
@@ -494,6 +507,18 @@ def main(argv=None) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+    if task in ("clef_entity_row", "clef_relation_row"):
+        from judge_interp import clef
+
+        metrics = clef.run(cfg, run_dir, REPO_ROOT)
+        (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        print("metrics:", json.dumps(metrics, indent=2))
+        manifest["finished_at"] = _now()
+        manifest["status"] = "success"
+        (run_dir / "run.json").write_text(json.dumps(manifest, indent=2))
+        print(f"wrote {run_dir}")
+        return
 
     from judge_interp.representationlm import RepresentationLM
 

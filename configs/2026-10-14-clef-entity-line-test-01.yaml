@@ -1,0 +1,34 @@
+id: 2026-10-14-clef-entity-line-test-01
+project: judge-interp
+task: clef_entity_row
+description: >-
+  Clef-flash entity detection, line dataset, test split: one record per line-item row, one noul question per
+  non-null field, P(true) stored per question. Same row draw as the Qwen entityrow line test run (250 per
+  stratum). Over-length documents are excluded and recorded.
+seed: 0
+params:
+  data_root: data
+  model: Cloudflare/clef-flash
+  revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
+  dataset: line
+  split: test
+  device: cuda
+  dtype: bfloat16
+  max_length: 16384
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  error_types: [inter_document, intra_document, cross_type]
+  rows_per_stratum:
+    valid: 250
+    inter_document: 250
+    intra_document: 250
+    cross_type: 250
+
+  # -- scripts/submit.sh resources (placeholders pending a GPU timing pilot) --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "02:00:00"

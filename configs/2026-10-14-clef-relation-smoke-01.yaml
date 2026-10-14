@@ -1,0 +1,37 @@
+id: 2026-10-14-clef-relation-smoke-01
+project: judge-interp
+task: clef_relation_row
+description: >-
+  Smoke for the clef_relation_row task over the hand-built tests/fixtures/relation_row_mini (line, every row).
+  Confirms model load, encoding, scoring and bookkeeping only; no result is interpreted.
+seed: 0
+params:
+  data_root: tests/fixtures/relation_row_mini
+  model: Cloudflare/clef-flash
+  revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
+  dataset: line
+  split: train
+  device: cuda
+  dtype: bfloat16
+  max_length: 16384
+  overlong_docs: error
+  context_control: none
+  determinism_check_n: 2
+  known_answer_check: true
+  error_types: [inter_document, intra_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    intra_document: null
+    cross_type: null
+  samples_per_row: 2
+  min_subset_size: 2
+  n_per_class: 3
+  subset_rng_stream: 1
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"
