@@ -116,19 +116,6 @@ def test_load_split_missing_file():
         prompts.load_split(FIXTURE / "nope", "main", "train", [])
 
 
-# --- row_key ----------------------------------------------------------
-
-
-def test_row_key_shapes():
-    assert prompts.row_key({"document_id": "d", "error_type": "cross_type", "k": 3}, "main") == ("d", "cross_type", 3)
-    # inter_document and cross_type rows with the same k no longer collide
-    a = prompts.row_key({"document_id": "d", "error_type": "inter_document", "k": 2}, "main")
-    b = prompts.row_key({"document_id": "d", "error_type": "cross_type", "k": 2}, "main")
-    assert a != b
-    row = {"document_id": "d", "line_index": 2, "error_type": "intra_document", "k": 3}
-    assert prompts.row_key(row, "line") == ("d", 2, "intra_document", 3)
-
-
 # --- resolve_layers -------------------------------------------------------
 
 

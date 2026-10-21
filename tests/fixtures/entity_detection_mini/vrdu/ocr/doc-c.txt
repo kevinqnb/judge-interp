@@ -1,5 +1,0 @@
-CONTRACT
-Advertiser: Acme
-Property: WCCC
-Contract #: 333
-Ch. 7 Sports

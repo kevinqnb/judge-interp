@@ -1,192 +1,61 @@
-"""Unit tests for scripts/run_experiment.py's pure eval code (compute_metrics)
-and its context_token_limit gate in build_items."""
-import json
+"""Unit tests for scripts/run_experiment.py's config loading (required keys, task set)."""
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import run_experiment as run  # noqa: E402
 
 
-def _result(labels, verdict_true, verdict_recognised, p_true):
-    return {
-        "labels": np.asarray(labels, dtype=bool),
-        "verdict_true": np.asarray(verdict_true, dtype=bool),
-        "verdict_recognised": np.asarray(verdict_recognised, dtype=bool),
-        "p_true": np.asarray(p_true, dtype=np.float64),
-    }
-
-
-def test_compute_metrics_hand_countable():
-    # 2 valid rows (verdict correct, then wrong), 2 invalid rows (wrong, then correct).
-    result = _result(
-        labels=[True, True, False, False],
-        verdict_true=[True, False, True, False],
-        verdict_recognised=[True, True, True, True],
-        p_true=[0.9, 0.4, 0.8, 0.1],
-    )
-    m = run.compute_metrics(result)
-    assert m["n_rows"] == 4 and m["n_valid"] == 2 and m["n_invalid"] == 2
-    assert m["verdict_recognised_rate"] == 1.0
-    assert m["judge_accuracy"] == 0.5
-    assert m["judge_acc_valid"] == 0.5
-    assert m["judge_acc_invalid"] == 0.5
-    assert m["mean_p_true_valid"] == 0.65
-    assert m["mean_p_true_invalid"] == 0.45
-
-
-def test_compute_metrics_all_unrecognised_gives_null_not_nan():
-    result = _result(
-        labels=[True, False],
-        verdict_true=[True, False],
-        verdict_recognised=[False, False],
-        p_true=[0.6, 0.2],
-    )
-    m = run.compute_metrics(result)
-    assert m["verdict_recognised_rate"] == 0.0
-    assert m["judge_accuracy"] is None
-    assert m["judge_acc_valid"] is None
-    assert m["judge_acc_invalid"] is None
-    # p_true-based means don't depend on recognition and are still computed.
-    assert m["mean_p_true_valid"] == 0.6
-    assert m["mean_p_true_invalid"] == 0.2
-
-    # metrics.json must stay valid JSON -- json.dumps(float('nan')) writes bare
-    # NaN, which json.loads then rejects. None -> "null" round-trips cleanly.
-    text = json.dumps(m)
-    assert "NaN" not in text
-    assert json.loads(text)["judge_accuracy"] is None
-
-
-def test_compute_metrics_empty_class_mask():
-    # No invalid rows at all -- judge_acc_invalid / mean_p_true_invalid undefined.
-    result = _result(
-        labels=[True, True],
-        verdict_true=[True, True],
-        verdict_recognised=[True, True],
-        p_true=[0.7, 0.8],
-    )
-    m = run.compute_metrics(result)
-    assert m["n_invalid"] == 0
-    assert m["judge_acc_invalid"] is None
-    assert m["mean_p_true_invalid"] is None
-    assert m["judge_acc_valid"] == 1.0
-
-
-# tests/fixtures/judge_interp_mini/vrdu/main/train.json: 3 rows over 2 docs.
-# Measured with the real Qwen2.5-0.5B-Instruct tokenizer (add_special_tokens=False):
-# doc-alpha.txt is 99 tokens, doc-beta.txt is 58 tokens.
-_MINI_PARAMS = {
-    "data_root": "tests/fixtures/judge_interp_mini",
-    "model": "Qwen/Qwen2.5-0.5B-Instruct",
-    "dataset": "main",
-    "split": "train",
-    "row_subset": None,
-    "error_types": ["inter_document"],
-}
-
-
-def test_build_items_context_token_limit_null_skips_check():
-    params = {**_MINI_PARAMS, "context_token_limit": None}
-    items = run.build_items(params)
-    assert len(items) == 3
-    assert {it["document_id"] for it in items} == {"doc-alpha", "doc-beta"}
-
-
-def test_build_items_context_token_limit_above_max_passes():
-    params = {**_MINI_PARAMS, "context_token_limit": 200}  # > 99-token doc-alpha
-    items = run.build_items(params)
-    assert len(items) == 3
-
-
-def test_build_items_context_token_limit_enforced():
-    params = {**_MINI_PARAMS, "context_token_limit": 90}  # < 99-token doc-alpha
-    with pytest.raises(ValueError, match=r"'doc-alpha' is 99 tokens > context_token_limit 90"):
-        run.build_items(params)
-
-
-def test_build_items_context_token_limit_counts_tokens_not_chars():
-    # doc-alpha.txt is 217 chars / 99 tokens. 150 sits between the two: a
-    # chars-based check would wrongly raise (217 > 150); the real, token-based
-    # check must not, since 99 < 150.
-    params = {**_MINI_PARAMS, "context_token_limit": 150}
-    items = run.build_items(params)
-    assert len(items) == 3
-
-
-# tests/fixtures/judge_interp_mini/vrdu/line/train.json: 3 rows, one doc
-# (doc-beta), covering the 2026-09-15 collision case: line_index=0, k=1 has
-# both an inter_document and an intra_document invalid variant, disambiguated
-# only by error_type (see prompts.row_key and RepresentationLM._aggregate).
-def test_build_items_line_dataset_carries_error_type():
-    params = {**_MINI_PARAMS, "dataset": "line", "context_token_limit": None,
-              "error_types": ["inter_document", "intra_document"]}
-    items = run.build_items(params)
-    assert len(items) == 3
-    keys = {(it["line_index"], it["error_type"], it["k"]) for it in items}
-    assert keys == {(0, None, 0), (0, "intra_document", 1), (0, "inter_document", 1)}
-
-
-def test_build_items_main_dataset_carries_error_type_and_honours_the_filter():
-    params = {**_MINI_PARAMS, "context_token_limit": None}
-    items = run.build_items(params)
-    assert len(items) == 3
-    assert sorted(str(it["error_type"]) for it in items) == ["None", "None", "inter_document"]
-    both = run.build_items({**params, "error_types": ["inter_document", "cross_type"]})
-    assert len(both) == 4 and sum(it["error_type"] == "cross_type" for it in both) == 1
-    valid_only = run.build_items({**params, "error_types": []})
-    assert len(valid_only) == 2 and all(it["label"] for it in valid_only)
-
-
-@pytest.mark.parametrize("kind", ["smoke", "train", "test"])
-def test_relation_listed_configs_load(kind):
-    cfg = run.load_config(
-        Path(__file__).resolve().parent.parent / "configs" / f"2026-09-28-qwen7b-relation-listed-{kind}-01.yaml"
-    )
-    assert cfg["task"] == "relation_detection_listed"
-    assert cfg["params"]["layers"] == [0, "last"]
-
-
-def test_entity_row_fixture_config_loads_and_requires_every_key(tmp_path):
+def test_entity_detection_fixture_config_loads_and_requires_every_key(tmp_path):
     import yaml
 
-    path = Path(__file__).resolve().parent / "fixtures" / "entity_row_tiny_e2e.yaml"
+    path = Path(__file__).resolve().parent / "fixtures" / "entity_detection_tiny_e2e.yaml"
     cfg = run.load_config(path)
-    assert cfg["task"] == "entity_detection_row"
+    assert cfg["task"] == "entity_detection"
     for key in ("rows_per_stratum", "error_types", "layers"):
         broken = {**cfg, "params": {k: v for k, v in cfg["params"].items() if k != key}}
-        p = tmp_path / "entity_row_tiny_e2e.yaml"
+        p = tmp_path / "entity_detection_tiny_e2e.yaml"
         p.write_text(yaml.safe_dump(broken))
         with pytest.raises(KeyError, match=key):
             run.load_config(p)
     bad = {**cfg, "params": {**cfg["params"], "row_subset": None}}
-    p = tmp_path / "entity_row_tiny_e2e.yaml"
+    p = tmp_path / "entity_detection_tiny_e2e.yaml"
     p.write_text(yaml.safe_dump(bad))
     with pytest.raises(KeyError, match="row_subset"):
         run.load_config(p)
 
 
-def test_relation_row_fixture_config_loads_and_requires_every_key(tmp_path):
+def test_relation_detection_fixture_config_loads_and_requires_every_key(tmp_path):
     import yaml
 
-    path = Path(__file__).resolve().parent / "fixtures" / "relation_row_tiny_e2e.yaml"
+    path = Path(__file__).resolve().parent / "fixtures" / "relation_detection_tiny_e2e.yaml"
     cfg = run.load_config(path)
-    assert cfg["task"] == "relation_detection_row"
+    assert cfg["task"] == "relation_detection"
     for key in ("rows_per_stratum", "error_types", "layers"):
         broken = {**cfg, "params": {k: v for k, v in cfg["params"].items() if k != key}}
-        p = tmp_path / "relation_row_tiny_e2e.yaml"
+        p = tmp_path / "relation_detection_tiny_e2e.yaml"
         p.write_text(yaml.safe_dump(broken))
         with pytest.raises(KeyError, match=key):
             run.load_config(p)
     bad = {**cfg, "params": {**cfg["params"], "row_subset": None}}
-    p = tmp_path / "relation_row_tiny_e2e.yaml"
+    p = tmp_path / "relation_detection_tiny_e2e.yaml"
     p.write_text(yaml.safe_dump(bad))
     with pytest.raises(KeyError, match="row_subset"):
         run.load_config(p)
     main = {**cfg, "params": {**cfg["params"], "dataset": "main"}}
     p.write_text(yaml.safe_dump(main))
     with pytest.raises(ValueError, match="'line'"):
+        run.load_config(p)
+
+
+@pytest.mark.parametrize("task", ["record_judge", "entity_detection_mixed", "relation_detection_listed", "entity_detection_row"])
+def test_removed_tasks_are_rejected(tmp_path, task):
+    import yaml
+
+    cfg = run.load_config(Path(__file__).resolve().parent / "fixtures" / "entity_detection_tiny_e2e.yaml")
+    p = tmp_path / "entity_detection_tiny_e2e.yaml"
+    p.write_text(yaml.safe_dump({**cfg, "task": task}))
+    with pytest.raises(ValueError, match="task must be one of"):
         run.load_config(p)

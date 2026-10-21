@@ -1,150 +1,204 @@
 """Unit tests for judge_interp.relation_detection's model-free parts.
 
-Fixture: tests/fixtures/entity_relation_mini (see test_relation_prompts.py).
-Hand-worked-out for train / min_valid_per_type=1: doc-x has channel{7, 13},
-program_desc{Evening News, Late Movie}, sub_amount{$500.00} (plus dates);
-doc-y has one value per type. All five LINE_FIELDS render for both documents.
+Fixture: tests/fixtures/relation_detection_mini (hand-built, line only). Rows:
+
+    doc-a  line 0: valid; intra_document k=2 (program_end_date, sub_amount <- line 1);
+                   cross_type k=1 (program_end_date <- program_start_date)
+           line 1: valid (program_desc null); inter_document k=1 (channel from another document)
+    doc-b  line 0: valid
 """
 from __future__ import annotations
 
-import json
+import copy
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from judge_interp import relation_detection as rd
-from judge_interp.prompts import LINE_FIELDS
+from judge_interp import relation_detection as rr
+from judge_interp.prompts import LINE_FIELDS, load_split, render_query
 
-FIXTURE = "tests/fixtures/entity_relation_mini"
+FIXTURE = "tests/fixtures/relation_detection_mini"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PARAMS = {"data_root": FIXTURE, "split": "train", "min_valid_per_type": 1, "min_types_per_doc": 2,
-          "context_token_limit": None, "doc_subset": None}
+ALL_LINE = ["inter_document", "intra_document", "cross_type"]
+ALL_STRATA = {"valid": None, "inter_document": None, "intra_document": None, "cross_type": None}
 
 
-def test_instructions_describe_every_type_and_have_no_cue():
-    text = rd.build_instructions(LINE_FIELDS)
-    for f in LINE_FIELDS:
-        assert f"- {f}: {rd.TYPE_DESCRIPTIONS[f]}" in text
-    assert "valid?" not in text
-    assert "(<type 1 index>, <type 2 index>, <type 3 index>, <type 4 index>, <type 5 index>)" in text
-    sub = rd.build_instructions(["channel", "sub_amount"])
-    assert "program_desc" not in sub and "(<type 1 index>, <type 2 index>)" in sub
+def _rows():
+    return load_split(REPO_ROOT / FIXTURE, "line", "train", ALL_LINE)
 
 
-@pytest.mark.parametrize("bad", [["channel"], ["channel", "channel"], ["channel", "nope"]])
-def test_instructions_reject_bad_types(bad):
-    with pytest.raises(ValueError):
-        rd.build_instructions(bad)
-
-
-def test_render_hand_worked_example():
-    r = rd.render_lists({"program_desc": ["Late Movie", "News"], "channel": ["7"]})
-    assert r["text"] == (
-        'TYPE 1 ENTITIES (channel):\n1. "7"\n\n'
-        'TYPE 2 ENTITIES (program_desc):\n1. "Late Movie"\n2. "News"'
+def _params(**kw):
+    p = dict(
+        data_root=FIXTURE, dataset="line", split="train", error_types=ALL_LINE,
+        rows_per_stratum=dict(ALL_STRATA), context_token_limit=None,
     )
-    assert r["entity_types"] == ["channel", "program_desc"]
-    assert "valid?" not in r["text"]
-    got = [(s["type_num"], s["list_position"], r["text"][s["char_start"]:s["char_end"]]) for s in r["spans"]]
-    assert got == [(1, 1, "7"), (2, 1, "Late Movie"), (2, 2, "News")]
+    p.update(kw)
+    return p
 
 
-def test_span_excludes_quotes_and_handles_escapes():
-    r = rd.render_lists({"program_desc": ['a"b\nc', "é"]})
-    s0, s1 = r["spans"]
-    assert r["text"][s0["char_start"]:s0["char_end"]] == 'a\\"b\\nc'  # ends on the real last char
-    assert r["text"][s1["char_start"]:s1["char_end"]] == "\\u00e9"
-    assert r["text"][s0["char_start"] - 1] == '"' and r["text"][s0["char_end"]] == '"'
+def _by(items, doc, error_type, line_index):
+    hit = [it for it in items if it["document_id"] == doc
+           and it["spans"][0]["row_error_type"] == error_type
+           and it["spans"][0]["line_index"] == line_index]
+    assert len(hit) == 1
+    return hit[0]
 
 
-def test_duplicate_values_across_types_get_distinct_spans():
-    r = rd.render_lists({"program_start_date": ["01/02"], "program_end_date": ["01/02"]})
-    a, b = r["spans"]
-    assert r["text"][a["char_start"]:a["char_end"]] == r["text"][b["char_start"]:b["char_end"]]
-    assert a["char_start"] != b["char_start"]
+def test_render_row_hand_worked():
+    r = [x for x in _rows() if x["document_id"] == "doc-a" and x["valid"] and x["line_index"] == 0][0]
+    out = rr.render_row(r)
+    assert out["text"] == (
+        'channel: "7 "\nprogram_desc: "Movie "\nprogram_start_date: "01/05/20 "\n'
+        'program_end_date: "01/10/20 "\nsub_amount: "$100.00 "\n'
+    )
+    assert [f for f, _, _ in out["spans"]] == LINE_FIELDS
+    # `channel: "7 "`: name 0-6, ': ' 7-8, open quote 9, '7' 10, pad 11, close quote 12
+    assert out["spans"][0] == ("channel", 12, 13)
+    for _, a, b in out["spans"]:
+        assert out["text"][a:b] == '"'
+        assert out["text"][a - 1] == " " and out["text"][b] == "\n"  # pad before, newline after
+    assert out["spans"][-1][2] == len(out["text"]) - 1  # last line terminated like the others
 
 
-def test_render_errors():
-    with pytest.raises(ValueError):
-        rd.render_lists({})
-    with pytest.raises(ValueError):
-        rd.render_lists({"advertiser": ["x"]})
-    with pytest.raises(ValueError):
-        rd.render_lists({"channel": []})
-    with pytest.raises(AssertionError):
-        rd.render_lists({"channel": [""]})
+def test_render_row_null_field_has_no_span_and_escaped_quote():
+    r = copy.deepcopy([x for x in _rows() if x["valid"] and x["program_desc"] is None][0])
+    out = rr.render_row(r)
+    assert out["text"].splitlines()[1] == "program_desc: null"
+    assert "program_desc" not in [f for f, _, _ in out["spans"]]
+    r["channel"] = 'Say "hi"'
+    out = rr.render_row(r)
+    f, a, b = out["spans"][0]
+    assert out["text"].splitlines()[0] == 'channel: "Say \\"hi\\" "'
+    assert out["text"][a - 3:b] == '\\" "'  # escaped quote, pad space, then the closing quote
 
 
-def test_build_items_fixture():
-    items, tuples, skipped = rd.build_items(PARAMS, 0, REPO_ROOT)
-    assert skipped == []
-    assert [it["document_id"] for it in items] == ["doc-x", "doc-y"]
-    assert set(tuples) == {"doc-x", "doc-y"}
-    x = items[0]
-    assert [len(it["spans"]) for it in items] == [7, 5]
-    by_type = {}
-    for s in x["spans"]:
-        by_type.setdefault(s["entity_type"], []).append(x["query"][s["char_start"]:s["char_end"]])
-    assert sorted(by_type["channel"]) == ["13", "7"]
-    assert sorted(by_type["program_desc"]) == ["Evening News", "Late Movie"]
-    assert by_type["sub_amount"] == ["$500.00"]
-    for it in items:  # spans live in the query, never the context
-        assert it["query"].count("TYPE ") == len(set(s["type_num"] for s in it["spans"]))
+def test_render_row_differs_from_render_query_only_by_padding():
+    for r in _rows():
+        text = rr.render_row(r)["text"]
+        assert text.endswith("\n") and not text.endswith("\n\n")
+        plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
+        assert "\n".join(plain) == render_query(r, "line")
+        assert text.count("\n") == len(LINE_FIELDS)  # only line-item fields, no main fields
+        assert "advertiser" not in text and "gross_amount" not in text
 
 
-def test_build_items_deterministic_and_doc_subset():
-    a, _, _ = rd.build_items(PARAMS, 0, REPO_ROOT)
-    b, _, _ = rd.build_items(PARAMS, 0, REPO_ROOT)
-    assert a == b
-    sub, tuples, _ = rd.build_items({**PARAMS, "doc_subset": {"n": 1, "seed": 0}}, 0, REPO_ROOT)
-    assert len(sub) == 1 and set(tuples) == {sub[0]["document_id"]}
-    with pytest.raises(ValueError):
-        rd.build_items({**PARAMS, "doc_subset": {"n": 5, "seed": 0}}, 0, REPO_ROOT)
+def test_labels_and_items():
+    items = rr.build_items(_params(), 0, REPO_ROOT)
+    assert len(items) == 6
+    assert [(it["document_id"], it["row_ordinal"]) for it in items] == [
+        ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-a", 3), ("doc-a", 4), ("doc-b", 0),
+    ]
+    assert all(it["instructions"] == items[0]["instructions"] for it in items)
+
+    intra = _by(items, "doc-a", "intra_document", 0)
+    got = {s["field"]: (s["label_valid"], s["field_error_type"], s["source_field"], s["source_line_index"])
+           for s in intra["spans"]}
+    assert got["program_end_date"] == (False, "intra_document", "program_end_date", 1)
+    assert got["sub_amount"] == (False, "intra_document", "sub_amount", 1)
+    assert got["channel"] == (True, "", "", -1)
+    assert [s["row_k"] for s in intra["spans"]] == [2] * 5  # a mixed row: 3 correct, 2 wrong
+    assert sum(not s["label_valid"] for s in intra["spans"]) == 2
+
+    cross = _by(items, "doc-a", "cross_type", 0)
+    bad = [s for s in cross["spans"] if not s["label_valid"]]
+    assert [(s["field"], s["source_field"], s["source_line_index"], s["exchanged_with"]) for s in bad] == [
+        ("program_end_date", "program_start_date", 0, "")
+    ]
+
+    inter = _by(items, "doc-a", "inter_document", 1)
+    assert len(inter["spans"]) == 4  # program_desc null
+    bad = [s for s in inter["spans"] if not s["label_valid"]]
+    assert [(s["field"], s["value"], s["source_scope"], s["source_line_index"]) for s in bad] == [
+        ("channel", "9", "other_document", -1)
+    ]
+
+    valid = _by(items, "doc-a", "", 0)
+    assert all(s["label_valid"] and s["row_k"] == 0 and s["dataset"] == "line" for s in valid["spans"])
+
+
+def test_only_line_dataset_is_supported():
+    with pytest.raises(ValueError, match="'line' only"):
+        rr.build_items(_params(dataset="main"), 0, REPO_ROOT)
+
+
+def test_check_row_rejects_inconsistent_labels():
+    good = [r for r in _rows() if r["error_type"] == "intra_document"][0]
+    rr.check_row(good)
+    for mutate in (
+        lambda r: r["field_errors"].update(sub_amount=None),  # drops a label, k disagrees
+        lambda r: r.update(error_type=None),
+        lambda r: r.update(k=1),
+        lambda r: r["field_errors"]["sub_amount"].update(error_type="inter_document"),
+        lambda r: r.update(sub_amount=None),  # corrupted field with null value
+        lambda r: r["field_errors"]["sub_amount"]["source"].pop("line_index"),
+        lambda r: r["field_errors"]["sub_amount"]["source"].update(field="not_a_field"),
+    ):
+        bad = copy.deepcopy(good)
+        mutate(bad)
+        with pytest.raises(AssertionError):
+            rr.check_row(bad)
+
+
+def test_stratified_subset_determinism_and_errors():
+    rows = _rows()
+    p = {"valid": 2, "inter_document": 1, "intra_document": 1, "cross_type": 1}
+    a = rr.select_rows(rows, "train", p, 0)
+    assert a == rr.select_rows(rows, "train", p, 0)
+    assert len(a) == 5 and sum(not r["valid"] for r in a) == 3
+    with pytest.raises(ValueError, match="requested but only"):
+        rr.select_rows(rows, "train", {**p, "valid": 4}, 0)
+    with pytest.raises(ValueError, match="strata present"):
+        rr.select_rows(rows, "train", {"valid": 1}, 0)
+    with pytest.raises(ValueError, match="int >= 1"):
+        rr.select_rows(rows, "train", {**p, "valid": 0}, 0)
+
+
+def test_instructions_are_relational_and_name_only_line_fields():
+    text = rr.build_instructions()
+    for f in LINE_FIELDS:
+        assert f"- {f}:" in text
+    for f in ("advertiser", "agency", "gross_amount", "flight_from"):
+        assert f"- {f}:" not in text
+    assert "same line item" in text
+    assert "padding space" in text and "closing quote" in text and "newline" in text
+    assert "{" not in text and "}" not in text  # no format placeholder left unfilled
 
 
 def test_context_token_limit_needs_tokenizer():
-    with pytest.raises(ValueError):
-        rd.build_items({**PARAMS, "context_token_limit": 100}, 0, REPO_ROOT)
+    with pytest.raises(ValueError, match="tokenizer"):
+        rr.build_items(_params(context_token_limit=10), 0, REPO_ROOT)
 
 
-def _result(doc_ids, types, nums, pos):
-    return {"doc_ids": np.array(doc_ids), "entity_type": np.array(types),
-            "type_num": np.array(nums), "list_position": np.array(pos)}
+def _fake_result():
+    """Two prompts: valid (3 spans) and intra_document k=2 (3 spans)."""
+    return {
+        "doc_ids": np.array(["d"] * 6),
+        "row_ordinal": np.array([0, 0, 0, 1, 1, 1]),
+        "row_k": np.array([0, 0, 0, 2, 2, 2]),
+        "row_error_type": np.array([""] * 3 + ["intra_document"] * 3),
+        "field_error_type": np.array(["", "", "", "intra_document", "intra_document", ""]),
+        "label_valid": np.array([True, True, True, False, False, True]),
+        "field_position": np.array([1, 2, 3, 1, 2, 3]),
+        "exact_end_alignment": np.array([True, True, False, True, True, True]),
+        "token_id": np.array([1, 1, 2, 1, 1, 2]),
+        "prompt_n_tokens": np.array([10] * 3 + [12] * 3),
+    }
 
 
-def test_invariants_accept_good_reject_bad():
-    good = _result(["d"] * 4, ["channel", "channel", "sub_amount", "sub_amount"], [1, 1, 2, 2], [1, 2, 1, 2])
-    rd.check_list_invariants(good)
-    with pytest.raises(AssertionError):
-        rd.check_list_invariants(_result(["d"] * 2, ["channel"] * 2, [1, 1], [1, 3]))
-    with pytest.raises(AssertionError):
-        rd.check_list_invariants(_result(["d"] * 2, ["channel", "sub_amount"], [1, 3], [1, 1]))
-
-
-def test_span_last_token_is_entity_not_closing_quote():
-    """Real Qwen tokenizer: the token read for each entry ends the value, not the quote."""
-    from transformers import AutoTokenizer
-
-    from judge_interp.representationlm import RepresentationLM
-
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    r = rd.render_lists({"channel": ["7", "13"], "program_desc": ["Late Movie", "News"], "sub_amount": ["$500.00"]})
-    enc = tok(r["text"], add_special_tokens=False, return_offsets_mapping=True)
-    offsets = [tuple(o) for o in enc["offset_mapping"]]
-    idxs = []
-    for s in r["spans"]:
-        i = RepresentationLM._last_token_covering(offsets, s["char_end"] - 1)
-        idxs.append(i)
-        assert offsets[i][0] >= s["char_start"] - 1  # token begins at or after the opening quote
-        assert r["text"][offsets[i][0]:s["char_end"]].strip('"').endswith(str(s["value"])[-1])
-    assert len(set(idxs)) == len(idxs)
-
-
-def test_min_types_per_doc_gate():
-    items, _, skipped = rd.build_items({**PARAMS, "min_types_per_doc": 5}, 0, REPO_ROOT)
-    assert len(items) == 2 and skipped == []  # both fixture docs render all 5 types
-    with pytest.raises(ValueError, match="no document"):
-        rd.build_items({**PARAMS, "min_types_per_doc": 6}, 0, REPO_ROOT)
-    with pytest.raises(ValueError, match="min_types_per_doc"):
-        rd.build_items({**PARAMS, "min_types_per_doc": 1}, 0, REPO_ROOT)
+def test_invariants_accept_good_and_reject_bad():
+    r = _fake_result()
+    rr.check_row_invariants(r)
+    m = rr.compute_metrics(r)
+    assert (m["n_spans"], m["n_prompts"], m["n_invalid_spans"], m["n_spans_intra_document"]) == (6, 2, 2, 2)
+    assert m["n_rows_with_mixed_entities"] == 1
+    assert m["n_distinct_quote_token_ids"] == 2
+    for key, val in (
+        ("row_k", np.array([0, 0, 0, 1, 1, 1])),
+        ("field_error_type", np.array(["", "", "", "intra_document", "", ""])),
+        ("label_valid", np.array([True, True, True, False, True, True])),
+        ("field_position", np.array([1, 2, 3, 1, 3, 2])),
+    ):
+        bad = {**r, key: val}
+        with pytest.raises(AssertionError):
+            rr.check_row_invariants(bad)

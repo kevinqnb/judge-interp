@@ -1,6 +1,6 @@
 id: 2026-10-14-qwen7b-entityrow-line-train-01
 project: judge-interp
-task: entity_detection_row
+task: entity_detection
 description: >-
   Row-based entity detection, line dataset, train split, Qwen2.5-7B-Instruct: one prompt per
   (document, row), representations read at each non-null entity's closing quote at layers

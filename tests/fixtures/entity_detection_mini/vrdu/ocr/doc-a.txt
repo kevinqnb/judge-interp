@@ -1,7 +1,10 @@
 CONTRACT
 Advertiser: Acme
 Property: WAAA
+1 Main St
+Boston
+Race 1
 Contract #: 111
-Ch. 7 News
-Ch. 7 Movie
-See also Sports schedule.
+Flight 01/01/20 - 01/31/20 Total $500.00
+Ch. 7 Movie 01/05/20 - 01/10/20 $100.00
+Ch. 7 01/11/20 - 01/20/20 $250.00

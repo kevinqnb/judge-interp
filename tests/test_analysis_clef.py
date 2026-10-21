@@ -18,7 +18,8 @@ spec = importlib.util.spec_from_file_location("analysis_clef", Path(__file__).re
 ac = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ac)
 
-P = dict(decision_threshold=0.5, ece_n_boot=20, n_shuffles=50, permutation_auroc_tolerance=0.2)
+P = dict(decision_threshold=0.5, ece_n_boot=20, n_shuffles=50, permutation_auroc_tolerance=0.2,
+         hist_n_bins=10)
 
 
 def _write_run(root: Path, run_id: str, kind: str, cols: dict, **over) -> None:

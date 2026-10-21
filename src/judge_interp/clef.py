@@ -1,37 +1,28 @@
-"""Clef-flash as a direct judge: entity detection and relation detection, no probe.
+"""Clef-flash as a direct judge for entity and relation detection; no layer representations.
 
-``Cloudflare/clef-flash`` is a decision model: given a ``state`` and typed questions it
-returns one logit per allowed option per question, so ``P(true)`` of a ``noul`` question is
-a calibrated probability read straight from the model. Nothing is trained here and no layer
-representation is collected.
+``Cloudflare/clef-flash`` takes a ``state`` and typed questions and returns one logit per
+allowed option per question, so ``P(true)`` of a ``noul`` question is a probability read
+straight from the model. The model runs through its own release code
+(``joint_schema_model.py``, pinned by ``revision``).
 
-The model is served through its own release code (``joint_schema_model.py``, pinned by
-``revision``), with transformers; the model card documents probability output only for that
-path. Facts about that code that the design rests on (read from the pinned revision):
+Tasks:
+- ``clef_entity_row``: one record per row selected by ``entity_detection.build_items``
+  (state = OCR text + the row), one ``noul`` question per non-null field.
+- ``clef_relation_row``: rows selected by ``relation_detection.build_items``; from each row,
+  random subsets of its non-null fields are drawn (``draw_samples``) and class-balanced
+  (``balance``) with one ``default_rng([seed, subset_rng_stream])``. One record per subset
+  (state = OCR text + only the subset's fields), one ``noul`` question; a subset is valid
+  iff every field in it is valid.
 
-- a ``noul`` question has exactly the options ``("true", "false")``; P(true) is selected by
-  option id and the option set is asserted for every question;
-- ``encode_record`` **silently truncates the state** to fit ``max_length``; ``encode`` here
-  counts the tokens first and raises instead, so a truncated record can never be scored;
-- the head's decoder layers self-attend across all questions of one record, so questions of
-  one record are *not* independent (matters for the entity task, one record per row);
-- records are scored one at a time (batch size 1): no padding is ever involved.
+Pipeline: ``entity_units`` / ``relation_units`` build records, ``filter_overlong`` handles
+records that do not fit ``max_length`` (``overlong_docs``: ``"exclude"`` drops and records
+them, ``"error"`` raises), ``ClefScorer`` scores records one at a time, and ``run`` writes
+``artifacts/clef_predictions.npz`` and returns flat metrics. ``context_control`` can swap
+each document's OCR text for another document's as a control.
 
-Entity task (``clef_entity_row``): the rows are exactly those of
-``entity_detection_row.build_items`` (same stratified draw). One record per row; the state is
-the document's OCR text plus the row; one ``noul`` question per non-null field.
-
-Relation task (``clef_relation_row``): rows as ``relation_detection_row.build_items``; from each
-row random subsets of its non-null fields are drawn and balanced exactly as
-``analysis/relation_detection_row.py`` does (``draw_samples`` then ``balance`` on one
-``default_rng([seed, subset_rng_stream])``; stream 1 = the probe's test split, so the subsets
-equal the probe's -- asserted by tests). One record per subset (state = OCR text plus only the
-subset's fields), one ``noul`` question. A subset is valid iff every field in it is valid.
-
-Documents whose record does not fit ``max_length`` are handled per ``overlong_docs``
-(``"exclude"`` drops them and records them; ``"error"`` raises). For the relation task the
-exclusion is applied *after* drawing and balancing, so every surviving subset is the same
-subset the probe sees.
+Guards: the question option set must be exactly ``("true", "false")``; ``encode_checked``
+raises instead of letting ``encode_record`` silently truncate the state. Questions of one
+record share attention in the model, so they are not independent.
 """
 from __future__ import annotations
 
@@ -44,9 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
-from judge_interp import entity_detection_row as edr
-from judge_interp import relation_detection_row as rdr
-from judge_interp.instruction_prompts import _EXPLICIT_CRITERION
+from judge_interp import entity_detection as edr
+from judge_interp import relation_detection as rdr
 from judge_interp.prompts import LINE_FIELDS, QUERY_FIELDS
 
 OPTION_IDS = ("true", "false")  # joint_schema_model.question_options order for a noul question
@@ -76,17 +66,43 @@ Judge only against the CONTEXT; unclear evidence means false."""
 
 
 def render_record_text(values: dict[str, str | None], fields: list[str]) -> str:
-    """``field: <json>`` per field in ``fields`` order (``null`` for a missing value)."""
+    """Render a record as one ``field: <json>`` line per field.
+
+    Args:
+        values: field -> value (``None`` is rendered as ``null``).
+        fields: the fields to render, in output order.
+
+    Returns:
+        The newline-joined record text.
+    """
     return "\n".join(f"{f}: {json.dumps(values[f])}" for f in fields)
 
 
 def build_state(context: str, record_text: str) -> str:
+    """Assemble the Clef ``state`` string.
+
+    Args:
+        context: OCR text of the document.
+        record_text: rendered record (see ``render_record_text``).
+
+    Returns:
+        The state with a ``## CONTEXT`` and a ``## EXTRACTED RECORD`` section.
+    """
     return f"## CONTEXT\n{context}\n\n## EXTRACTED RECORD\n{record_text}"
 
 
 def entity_question(field: str, dataset: str) -> dict:
+    """Build the ``noul`` question asking whether one field's value is valid.
+
+    Args:
+        field: the field whose value is judged.
+        dataset: ``"main"`` or ``"line"``; selects the record description.
+
+    Returns:
+        A ``{"type": "noul", "instructions": str}`` question.
+    """
     criteria = "\n".join([
-        _EXPLICIT_CRITERION.format(n=1),
+        edr.EXPLICIT_CRITERION.format(n=1),
         edr._TYPE_CRITERION.format(n=2, other_place=edr._OTHER_PLACE[dataset]),
     ])
     return {
@@ -98,13 +114,29 @@ def entity_question(field: str, dataset: str) -> dict:
 
 
 def relation_question(fields: list[str]) -> dict:
+    """Build the ``noul`` question asking whether a subset of line fields belongs together.
+
+    Args:
+        fields: at least two distinct line-item fields present in the record.
+
+    Returns:
+        A ``{"type": "noul", "instructions": str}`` question.
+    """
     assert set(fields) <= set(LINE_FIELDS) and len(set(fields)) == len(fields) >= 2, fields
     types = "\n".join(f"- {f}: {rdr.TYPE_DESCRIPTIONS[f]}" for f in fields)
     return {"type": "noul", "instructions": _RELATION_QUESTION.format(types=types)}
 
 
 def item_values(item: dict, dataset: str) -> dict[str, str | None]:
-    """Field -> value of an item's row (``None`` for a null field), canonical fields only."""
+    """Recover a row's field values from an item's spans.
+
+    Args:
+        item: an item from ``entity_detection.build_items`` or ``relation_detection.build_items``.
+        dataset: ``"main"`` or ``"line"``.
+
+    Returns:
+        Field -> value for every field of ``dataset`` (``None`` for a null field).
+    """
     vals = {sp["field"]: sp["value"] for sp in item["spans"]}
     assert len(vals) == len(item["spans"]), "two spans for one field"
     assert set(vals) <= set(QUERY_FIELDS[dataset]), sorted(vals)
@@ -112,10 +144,17 @@ def item_values(item: dict, dataset: str) -> dict[str, str | None]:
 
 
 def entity_units(items: list[dict], dataset: str, contexts: dict[str, str]) -> list[dict]:
-    """One unit per row: ``record`` (for Clef), the span metadata and ``context_doc``.
+    """Build one Clef unit per row.
 
-    ``contexts[doc_id]`` is the OCR text shown for that document's rows (the document's own
-    unless the context control swapped it).
+    Args:
+        items: items from ``entity_detection.build_items``.
+        dataset: ``"main"`` or ``"line"``.
+        contexts: document_id -> the OCR text shown for that document's rows (its own
+            unless the context control swapped it).
+
+    Returns:
+        One dict per row with ``doc_id``, ``row_ordinal``, ``spans`` and ``record`` (the
+        Clef record: ``id``, ``state``, and one question per non-null field).
     """
     units = []
     for it in items:
@@ -137,11 +176,21 @@ def entity_units(items: list[dict], dataset: str, contexts: dict[str, str]) -> l
 
 
 # ----------------------------------------------------------------------
-# Relation subsets (must equal analysis/relation_detection_row.py's draw_samples / balance)
+# Relation subsets
 
 
 def flatten_items(items: list[dict]) -> dict[str, np.ndarray]:
-    """Flat span arrays in ``RelationRowLM.collect_rows`` order (sorted doc, row_ordinal, position)."""
+    """Flatten items' spans into parallel arrays.
+
+    Args:
+        items: items from ``relation_detection.build_items``, sorted by
+            ``(document_id, row_ordinal)``.
+
+    Returns:
+        Arrays, one entry per span, in ``(document, row_ordinal, field_position)`` order:
+        ``doc_ids``, ``row_ordinal``, ``field``, ``field_position``, ``label_valid``,
+        ``row_error_type``, ``field_error_type``, ``value``, ``line_index``, ``row_k``.
+    """
     cols: dict[str, list] = defaultdict(list)
     keys = []
     for it in items:
@@ -157,6 +206,15 @@ def flatten_items(items: list[dict]) -> dict[str, np.ndarray]:
 
 
 def group_rows(split: dict) -> list[dict]:
+    """Group span indices by row.
+
+    Args:
+        split: flat arrays from ``flatten_items``.
+
+    Returns:
+        One dict per ``(document, row_ordinal)`` with ``doc``, ``ordinal``, ``rows`` (span
+        indices in ``field_position`` order), ``fields`` and ``error_type``.
+    """
     by_key: dict[tuple[str, int], list[int]] = defaultdict(list)
     for i, (d, o) in enumerate(zip(split["doc_ids"].tolist(), split["row_ordinal"].tolist())):
         by_key[(d, o)].append(i)
@@ -173,7 +231,20 @@ def group_rows(split: dict) -> list[dict]:
 
 def draw_samples(groups: list[dict], label_valid: np.ndarray, samples_per_row: int, min_subset_size: int,
                  rng: np.random.Generator) -> dict:
-    """Same algorithm as ``analysis/relation_detection_row.draw_samples`` (tests assert equality)."""
+    """Draw random subsets of each row's non-null fields.
+
+    Args:
+        groups: output of ``group_rows``.
+        label_valid: per-span validity, indexed by the span indices in ``groups``.
+        samples_per_row: subsets drawn per row (fewer if the row has fewer subsets).
+        min_subset_size: smallest subset size, at least 2.
+        rng: generator used for all draws.
+
+    Returns:
+        Arrays, one entry per sample: ``rows`` (span indices padded with -1 to the number
+        of line fields), ``label`` (all fields valid), ``size``, ``doc``, ``ordinal``,
+        ``error_type``; plus ``stats`` (counts of rows skipped or short of subsets).
+    """
     max_fields = len(LINE_FIELDS)
     assert min_subset_size >= 2, "a subset needs at least two fields"
     out: dict[str, list] = defaultdict(list)
@@ -204,7 +275,19 @@ def draw_samples(groups: list[dict], label_valid: np.ndarray, samples_per_row: i
 
 
 def balance(samples: dict, n_per_class: int, rng: np.random.Generator) -> dict:
-    """Same algorithm as ``analysis/relation_detection_row.balance``."""
+    """Subsample to ``n_per_class`` valid and ``n_per_class`` invalid samples.
+
+    Args:
+        samples: output of ``draw_samples``.
+        n_per_class: samples kept per class.
+        rng: generator used for the draws.
+
+    Returns:
+        ``samples`` restricted to the kept samples (original order), with ``stats`` kept.
+
+    Raises:
+        ValueError: a class has fewer than ``n_per_class`` samples.
+    """
     assert isinstance(n_per_class, int) and n_per_class >= 1
     label = samples["label"]
     keep = []
@@ -221,14 +304,35 @@ def balance(samples: dict, n_per_class: int, rng: np.random.Generator) -> dict:
 
 
 def draw_relation_samples(flat: dict, p: dict, seed: int) -> dict:
-    """Subsets of every row, balanced to ``n_per_class`` valid + invalid (one rng, as the probe does)."""
+    """Draw and class-balance relation samples with one generator.
+
+    Args:
+        flat: output of ``flatten_items``.
+        p: config params with ``subset_rng_stream``, ``samples_per_row``, ``min_subset_size``
+            and ``n_per_class``.
+        seed: run seed; the generator is ``default_rng([seed, subset_rng_stream])``.
+
+    Returns:
+        The balanced samples (see ``draw_samples``).
+    """
     rng = np.random.default_rng([seed, p["subset_rng_stream"]])
     s = draw_samples(group_rows(flat), flat["label_valid"], p["samples_per_row"], p["min_subset_size"], rng)
     return balance(s, p["n_per_class"], rng)
 
 
 def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[dict]:
-    """One unit per sample: ``record`` plus sample metadata (fields in ``field_position`` order)."""
+    """Build one Clef unit per relation sample.
+
+    Args:
+        flat: output of ``flatten_items``.
+        samples: balanced samples from ``draw_relation_samples``.
+        contexts: document_id -> the OCR text shown for that document.
+
+    Returns:
+        One dict per sample with ``doc_id``, ``row_ordinal``, ``sample_index``, ``rows``,
+        ``fields``, ``invalid_fields``, ``label_valid``, ``row_error_type``, ``line_index``
+        and ``record`` (one ``related`` question over the subset's fields).
+    """
     units = []
     for i in range(len(samples["label"])):
         rows = [int(r) for r in samples["rows"][i] if r >= 0]
@@ -263,7 +367,15 @@ def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[
 
 
 def swap_contexts(contexts: dict[str, str], seed: int) -> dict[str, str]:
-    """Map every document to a *different* document's OCR text (a seeded cyclic shift: no fixed point)."""
+    """Pair every document with a different document's OCR text.
+
+    Args:
+        contexts: document_id -> OCR text; needs at least two documents.
+        seed: seeds the permutation; the pairing is a cyclic shift, so no document maps to itself.
+
+    Returns:
+        document_id -> the OCR text of its partner document.
+    """
     docs = sorted(contexts)
     assert len(docs) >= 2, "the other_document context control needs at least two documents"
     order = np.random.default_rng([seed, 99]).permutation(len(docs))
@@ -277,7 +389,15 @@ def swap_contexts(contexts: dict[str, str], seed: int) -> dict[str, str]:
 
 
 def load_release_code(model: str, revision: str):
-    """Import the pinned revision's ``joint_schema_model.py`` (code only; no weights)."""
+    """Import the release code ``joint_schema_model.py`` at a pinned revision (no weights).
+
+    Args:
+        model: HF repo id.
+        revision: HF revision to download the file from.
+
+    Returns:
+        The imported module.
+    """
     from huggingface_hub import hf_hub_download
 
     path = hf_hub_download(model, "joint_schema_model.py", revision=revision)
@@ -289,14 +409,37 @@ def load_release_code(model: str, revision: str):
 
 
 def count_tokens(jsm, tokenizer, record: dict) -> tuple[int, int]:
-    """``(fixed, total)``: tokens of the record without its state, and with it (untruncated)."""
+    """Count a record's tokens without truncation.
+
+    Args:
+        jsm: the release module from ``load_release_code``.
+        tokenizer: the model's tokenizer.
+        record: a Clef record.
+
+    Returns:
+        ``(fixed, total)``: tokens of the record with an empty state, and with its full state.
+    """
     empty = jsm.encode_record(tokenizer, {**record, "state": ""}, max_length=10**9)
     state_n = len(tokenizer(jsm.render(record["state"]), add_special_tokens=False).input_ids)
     return len(empty.input_ids), len(empty.input_ids) + state_n
 
 
 def encode_checked(jsm, tokenizer, record: dict, max_length: int):
-    """``encode_record`` that refuses to truncate; also asserts each question is a 2-option noul."""
+    """Encode a record, refusing to truncate it.
+
+    Args:
+        jsm: the release module from ``load_release_code``.
+        tokenizer: the model's tokenizer.
+        record: a Clef record.
+        max_length: token budget for the encoded record.
+
+    Returns:
+        The encoded record.
+
+    Raises:
+        ValueError: the record needs more than ``max_length`` tokens.
+        AssertionError: a question's options are not ``OPTION_IDS``.
+    """
     _, total = count_tokens(jsm, tokenizer, record)
     if total > max_length:
         raise ValueError(f"record {record['id']!r}: {total} tokens > max_length {max_length} (would be truncated)")
@@ -309,7 +452,21 @@ def encode_checked(jsm, tokenizer, record: dict, max_length: int):
 
 
 def filter_overlong(units: list[dict], jsm, tokenizer, max_length: int, mode: str) -> tuple[list[dict], list[dict]]:
-    """Attach ``n_tokens`` to each unit; return ``(kept, excluded)`` (or raise if ``mode == "error"``)."""
+    """Set ``n_tokens`` on each unit and split off units longer than ``max_length``.
+
+    Args:
+        units: units with a ``record``; ``n_tokens`` is added in place.
+        jsm: the release module from ``load_release_code``.
+        tokenizer: the model's tokenizer.
+        max_length: token budget per record.
+        mode: ``"exclude"`` or ``"error"``.
+
+    Returns:
+        ``(kept, excluded)``.
+
+    Raises:
+        ValueError: ``mode == "error"`` and at least one unit is too long.
+    """
     assert mode in OVERLONG_MODES, mode
     kept, excluded = [], []
     for u in units:
@@ -322,7 +479,16 @@ def filter_overlong(units: list[dict], jsm, tokenizer, max_length: int, mode: st
 
 
 class ClefScorer:
-    """Loads the pinned release and scores one record at a time."""
+    """Loads the pinned Clef release and scores one record at a time.
+
+    Args:
+        jsm: the release module from ``load_release_code``.
+        model: HF repo id.
+        revision: HF revision to load.
+        device: torch device string; a CUDA device must be available if requested.
+        dtype: ``"bfloat16"``, ``"float16"`` or ``"float32"``.
+        max_length: token budget per record; longer records raise.
+    """
 
     def __init__(self, jsm, model: str, revision: str, device: str, dtype: str, max_length: int):
         import torch
@@ -338,7 +504,15 @@ class ClefScorer:
         self.tokenizer = self.processor.tokenizer
 
     def score(self, record: dict) -> dict:
-        """``logits`` ``[n_questions, 2]`` in ``OPTION_IDS`` order, ``p_true`` ``[n_questions]``, ``n_tokens``."""
+        """Score one record.
+
+        Args:
+            record: a Clef record.
+
+        Returns:
+            ``logits`` (``float32 [n_questions, 2]`` in ``OPTION_IDS`` order), ``p_true``
+            (``float64 [n_questions]``) and ``n_tokens``.
+        """
         torch = self.torch
         enc = encode_checked(self.jsm, self.tokenizer, record, self.max_length)
         batch = self.jsm.collate_records([enc], self.tokenizer.pad_token_id, torch.device(self.device))
@@ -356,7 +530,14 @@ class ClefScorer:
         return {"logits": logits, "p_true": p_true, "n_tokens": len(enc.input_ids)}
 
     def known_answer_check(self) -> dict:
-        """Hand-built case with a stated answer: a total of 1250 is above 1000, and not above 2000."""
+        """Score a hand-built record whose answers are known: a total of 1250 is above 1000, not above 2000.
+
+        Returns:
+            ``known_answer_p_yes`` and ``known_answer_p_no`` (``P(true)`` of each question).
+
+        Raises:
+            AssertionError: the model does not answer the two questions yes and no.
+        """
         rec = {"id": "known-answer", "state": {"invoice": {"vendor": "Acme", "total": 1250.0, "currency": "USD"}},
                "questions": {"above_1000": {"type": "noul", "instructions": "Is the total above 1000 USD?"},
                              "above_2000": {"type": "noul", "instructions": "Is the total above 2000 USD?"}}}
@@ -370,6 +551,17 @@ class ClefScorer:
 
 
 def _score_units(scorer: ClefScorer, units: list[dict], determinism_check_n: int, verbose: bool = True) -> list[dict]:
+    """Score every unit, then rescore the first ``determinism_check_n`` and require identical logits.
+
+    Args:
+        scorer: a loaded ``ClefScorer``.
+        units: units with ``record`` and ``n_tokens``.
+        determinism_check_n: number of leading units to rescore.
+        verbose: print progress every 50 units.
+
+    Returns:
+        ``ClefScorer.score`` output per unit, in order.
+    """
     results = []
     for i, u in enumerate(units):
         r = scorer.score(u["record"])
@@ -385,6 +577,16 @@ def _score_units(scorer: ClefScorer, units: list[dict], determinism_check_n: int
 
 
 def _entity_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndarray]:
+    """Flatten entity units and scores to one array entry per span.
+
+    Args:
+        units: output of ``entity_units`` after ``filter_overlong``, with ``context_doc``.
+        results: ``_score_units`` output, parallel to ``units``.
+
+    Returns:
+        Arrays ``doc_ids``, every ``entity_detection.SPAN_META_KEYS`` column,
+        ``context_doc``, ``p_true``, ``logit_true``, ``logit_false`` and ``n_tokens``.
+    """
     cols: dict[str, list] = defaultdict(list)
     for u, r in zip(units, results):
         for qi, sp in enumerate(u["spans"]):
@@ -403,6 +605,18 @@ def _entity_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
 
 
 def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndarray]:
+    """Flatten relation units and scores to one array entry per sample.
+
+    Args:
+        units: output of ``relation_units`` after ``filter_overlong``, with ``context_doc``.
+        results: ``_score_units`` output, parallel to ``units``.
+
+    Returns:
+        Arrays ``doc_ids``, ``row_ordinal``, ``sample_index``, ``line_index``, ``rows``,
+        ``size``, ``fields``, ``invalid_fields``, ``n_invalid_fields``, ``label_valid``,
+        ``row_error_type``, ``context_doc``, ``p_true``, ``logit_true``, ``logit_false``
+        and ``n_tokens``.
+    """
     cols: dict[str, list] = defaultdict(list)
     for u, r in zip(units, results):
         cols["doc_ids"].append(u["doc_id"])
@@ -425,7 +639,17 @@ def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.nd
 
 
 def run(cfg: dict, run_dir: Path, repo_root: Path) -> dict:
-    """Build records, score them with Clef, write ``artifacts/clef_predictions.npz``; return flat metrics."""
+    """Build records, score them with Clef and write ``artifacts/clef_predictions.npz``.
+
+    Args:
+        cfg: the config (``task``, ``seed`` and ``params`` for the Clef tasks).
+        run_dir: run output directory; ``artifacts/`` is created inside it.
+        repo_root: directory that ``params["data_root"]`` is relative to.
+
+    Returns:
+        Flat scalar metrics: item, unit and exclusion counts, class counts, max token
+        count and mean ``P(true)`` per class, plus the known-answer probabilities if enabled.
+    """
     task, p, seed = cfg["task"], cfg["params"], int(cfg["seed"])
     assert task in ("clef_entity_row", "clef_relation_row"), task
     if p["overlong_docs"] not in OVERLONG_MODES:

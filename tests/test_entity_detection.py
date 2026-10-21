@@ -1,231 +1,208 @@
 """Unit tests for judge_interp.entity_detection's model-free parts.
 
-Fixture: tests/fixtures/entity_detection_mini (3 documents), hand-worked-out:
+Fixture: tests/fixtures/entity_detection_mini (hand-built). Rows:
 
-    doc-a  advertiser{Acme} property{WAAA} contract_num{111}
-           channel{7}  (same value on both line items -> counted once)
-           program_desc{Movie, News}                              m = 6
-    doc-b  advertiser{Bravo} property{WBBB} contract_num{222}
-           channel{9} program_desc{Weather}                       m = 5
-    doc-c  advertiser{Acme} property{WCCC} contract_num{333}
-           channel{7} program_desc{Sports}                        m = 5
-
-The fixture also holds invalid rows (property WZZZ, channel 99) that must never
-appear as ground truth. doc-a's OCR contains the word "Sports".
+    main  doc-a  M1 valid (agency null)
+                 M2 cross_type k=2: advertiser<-product, product<-advertiser (exchanged)
+                 M3 inter_document k=1: property = WZZZ
+          doc-b  valid
+    line  doc-a  L0 valid; L1 valid (program_desc null);
+                 L0 cross_type k=1: program_end_date <- program_start_date
+          doc-b  valid
 """
 from __future__ import annotations
 
-import json
+import copy
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from judge_interp import entity_detection as ed
+from judge_interp import entity_detection as er
+from judge_interp.prompts import load_split, render_query
 
 FIXTURE = "tests/fixtures/entity_detection_mini"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-M_BY_DOC = {"doc-a": 6, "doc-b": 5, "doc-c": 5}
+ALL_MAIN = ["inter_document", "cross_type"]
+ALL_LINE = ["inter_document", "intra_document", "cross_type"]
 
 
-@pytest.fixture(scope="module")
-def truth():
-    return ed.load_ground_truth(FIXTURE, "train")
+def _rows(dataset):
+    return load_split(REPO_ROOT / FIXTURE, dataset, "train", ["inter_document", "cross_type"])
 
 
-@pytest.fixture(scope="module")
-def pools(truth):
-    return ed.build_decoy_pools(truth)
+def _params(dataset, **kw):
+    p = dict(
+        data_root=FIXTURE, dataset=dataset, split="train",
+        error_types=["inter_document", "cross_type"],
+        rows_per_stratum={"valid": None, "inter_document": None, "cross_type": None},
+        context_token_limit=None,
+    )
+    if dataset == "line":
+        p["rows_per_stratum"] = {"valid": None, "cross_type": None}
+    p.update(kw)
+    return p
 
 
-def test_entity_types_are_main_plus_line():
-    assert len(ed.TYPE_NAMES) == 14
-    assert ed.TYPE_NAMES[0] == "advertiser" and ed.TYPE_NAMES[-1] == "sub_amount"
+def test_render_row_hand_worked():
+    r = _rows("main")[0]  # M1
+    out = er.render_row(r, "main")
+    assert out["text"] == (
+        'advertiser: "Acme "\nagency: null\nproperty: "WAAA "\ntv_address: "1 Main St\\nBoston "\n'
+        'product: "Race 1 "\ncontract_num: "111 "\nflight_from: "01/01/20 "\nflight_to: "01/31/20 "\n'
+        'gross_amount: "$500.00 "\n'
+    )
+    assert [f for f, _, _ in out["spans"]] == [
+        "advertiser", "property", "tv_address", "product", "contract_num",
+        "flight_from", "flight_to", "gross_amount",
+    ]  # agency is null: no span
+    for _, a, b in out["spans"]:
+        assert out["text"][a:b] == '"'
+        assert out["text"][a - 1] == " " and out["text"][b] == "\n"  # pad before, newline after
+    # `advertiser: "Acme "`: name 0-9, ': ' 10-11, open quote 12, Acme 13-16, pad 17, close quote 18
+    assert out["spans"][0] == ("advertiser", 18, 19)
+    # the last line is terminated like the others
+    assert out["spans"][-1][2] == len(out["text"]) - 1
 
 
-def test_ground_truth_hand_counts(truth):
-    assert set(truth) == set(M_BY_DOC)
-    for doc, m in M_BY_DOC.items():
-        assert sum(len(v) for v in truth[doc].values()) == m
-        assert set(truth[doc]) == set(ed.TYPE_NAMES)
-    assert truth["doc-a"]["channel"] == ["7"]
-    assert truth["doc-a"]["program_desc"] == ["Movie", "News"]
-    assert truth["doc-a"]["property"] == ["WAAA"]  # not the invalid row's WZZZ
-    assert truth["doc-a"]["agency"] == []
+def test_render_row_escaped_inner_quote():
+    r = copy.deepcopy(_rows("line")[0])
+    r["program_desc"] = 'Say "hi"'
+    out = er.render_row(r, "line")
+    f, a, b = out["spans"][1]
+    assert f == "program_desc"
+    assert out["text"].splitlines()[1] == 'program_desc: "Say \\"hi\\" "'
+    assert out["text"][a - 3:b] == '\\" "'  # escaped quote, pad space, then the closing quote
 
 
-def test_decoy_pools(pools):
-    assert pools["channel"] == {"7": ["doc-a", "doc-c"], "9": ["doc-b"]}
-    assert "99" not in pools["channel"] and "WZZZ" not in pools["property"]
+def test_render_row_differs_from_render_query_only_by_padding():
+    for ds in ("main", "line"):
+        for r in _rows(ds):
+            text = er.render_row(r, ds)["text"]
+            assert text.endswith("\n") and not text.endswith("\n\n")
+            plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
+            assert "\n".join(plain) == render_query(r, ds)
 
 
-def _draw(truth, pools, doc, j, seed=0, k_min=0):
-    return ed.sample_prompt_entries(doc, truth[doc], pools, j, seed, k_min)
+def test_line_prompt_has_no_main_fields():
+    for r in _rows("line"):
+        text = render_query(r, "line")
+        assert text.count("\n") == 4
+        assert "advertiser" not in text and "gross_amount" not in text
 
 
-def test_sample_invariants_over_many_draws(truth, pools):
-    ks = set()
-    for doc, m in M_BY_DOC.items():
-        for j in range(60):
-            d = _draw(truth, pools, doc, j)
-            assert d["m"] == m and len(d["entries"]) == m and 0 <= d["k"] <= m
-            ks.add(d["k"])
-            assert sum(not e["label_valid"] for e in d["entries"]) == d["k"]
-            for t in ed.TYPE_NAMES:
-                own = truth[doc][t]
-                of_type = [e for e in d["entries"] if e["entity_type"] == t]
-                assert len(of_type) == len(own)  # decoys replace same-type slots
-                kept = {e["value"] for e in of_type if e["label_valid"]}
-                assert kept <= set(own)
-                decoys = [e for e in of_type if not e["label_valid"]]
-                assert len({e["value"] for e in decoys}) == len(decoys)
-                for e in decoys:
-                    assert e["value"] not in own
-                    assert doc not in pools[t][e["value"]]
-                    assert e["decoy_source_doc"] in pools[t][e["value"]]
-    assert 0 in ks and 6 in ks  # both endpoints of [0, m] reachable
-
-
-def test_k_zero_reproduces_ground_truth(truth, pools):
-    hits = [d for j in range(200) if (d := _draw(truth, pools, "doc-b", j))["k"] == 0]
-    assert hits
-    got = sorted((e["entity_type"], e["value"]) for e in hits[0]["entries"])
-    want = sorted((t, v) for t in ed.TYPE_NAMES for v in truth["doc-b"][t])
-    assert got == want and all(e["label_valid"] for e in hits[0]["entries"])
-
-
-def test_k_equals_m_leaves_no_own_value(truth, pools):
-    for doc, m in M_BY_DOC.items():
-        d = _draw(truth, pools, doc, 0, k_min=m)
-        assert d["k"] == m
-        assert not any(e["label_valid"] for e in d["entries"])
-        for e in d["entries"]:
-            assert e["value"] not in truth[doc][e["entity_type"]]
-
-
-def test_seed_determinism_and_sensitivity(truth, pools):
-    a = [_draw(truth, pools, "doc-a", j, seed=3) for j in range(10)]
-    assert a == [_draw(truth, pools, "doc-a", j, seed=3) for j in range(10)]
-    assert a != [_draw(truth, pools, "doc-a", j, seed=4) for j in range(10)]
-
-
-def test_shuffled_not_in_canonical_order(truth, pools):
-    orders = {tuple(e["entity_type"] for e in _draw(truth, pools, "doc-a", j)["entries"]) for j in range(20)}
-    assert len(orders) > 1
-
-
-def test_k_min_above_m_raises(truth, pools):
-    with pytest.raises(ValueError, match="k_min"):
-        _draw(truth, pools, "doc-a", 0, k_min=7)
-
-
-def test_empty_decoy_pool_raises():
-    solo = {"d": {t: [] for t in ed.TYPE_NAMES}}
-    solo["d"]["channel"] = ["7"]
-    with pytest.raises(ValueError, match="eligible"):
-        ed.sample_prompt_entries("d", solo["d"], ed.build_decoy_pools(solo), 0, 0, k_min=1)
-
-
-def test_render_entities_hand_worked():
-    entries = [
-        {"entity_type": "advertiser", "value": "Acme"},
-        {"entity_type": "tv_address", "value": "63 Chestnut\nBoston"},
+def test_labels_from_field_errors():
+    items = er.build_items(_params("main"), 0, REPO_ROOT)
+    assert [(it["document_id"], it["row_ordinal"]) for it in items] == [
+        ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-b", 0),
     ]
-    r = ed.render_entities(entries)
-    assert r["text"] == '1. [advertiser] "Acme"\n2. [tv_address] "63 Chestnut\\nBoston"'
-    assert r["text"][slice(*r["spans"][0])] == "Acme"
-    assert r["text"][slice(*r["spans"][1])] == "63 Chestnut\\nBoston"
-    with pytest.raises(ValueError):
-        ed.render_entities([])
+    # doc-a rows sorted by (stratum, k): cross_type, inter_document, valid
+    by = {(it["document_id"], it["spans"][0]["row_error_type"]): it for it in items}
+    cross = by[("doc-a", "cross_type")]
+    got = {s["field"]: (s["label_valid"], s["field_error_type"], s["source_field"], s["exchanged_with"])
+           for s in cross["spans"]}
+    assert got["advertiser"] == (False, "cross_type", "product", "product")
+    assert got["product"] == (False, "cross_type", "advertiser", "advertiser")
+    assert got["property"] == (True, "", "", "")
+    assert [s["row_k"] for s in cross["spans"]] == [2] * 8
+    assert sum(not s["label_valid"] for s in cross["spans"]) == 2
 
-
-_PARAMS = dict(
-    data_root=FIXTURE, split="train", samples_per_doc=4, k_min=0,
-    context_token_limit=None, doc_subset=None,
-)
-
-
-def test_build_items_shape_and_span_text():
-    items = ed.build_items(_PARAMS, 0, REPO_ROOT)
-    assert [(it["document_id"], it["sample_index"]) for it in items] == [
-        (d, j) for d in sorted(M_BY_DOC) for j in range(4)
+    inter = by[("doc-a", "inter_document")]
+    bad = [s for s in inter["spans"] if not s["label_valid"]]
+    assert [(s["field"], s["value"], s["source_scope"], s["source_line_index"]) for s in bad] == [
+        ("property", "WZZZ", "other_document", -1)
     ]
-    for it in items:
-        m = M_BY_DOC[it["document_id"]]
-        assert len(it["spans"]) == m
-        k = it["spans"][0]["k"]
-        assert all(sp["m"] == m and sp["k"] == k for sp in it["spans"])
-        assert sum(not sp["label_valid"] for sp in it["spans"]) == k
-        for sp in it["spans"]:
-            assert set(sp) == {"char_start", "char_end", *ed.SPAN_META_KEYS}
-            assert it["query"][sp["char_start"]:sp["char_end"]] == json.dumps(sp["value"])[1:-1]
-            assert it["query"].splitlines()[sp["list_position"] - 1].startswith(
-                f"{sp['list_position']}. [{sp['entity_type']}] "
-            )
+    valid = by[("doc-a", "")]
+    assert all(s["label_valid"] and s["row_error_type"] == "" for s in valid["spans"])
+    assert len(valid["spans"]) == 8  # agency is null
 
 
-def test_decoy_in_ocr_flag_matches_substring():
-    items = ed.build_items({**_PARAMS, "samples_per_doc": 30}, 0, REPO_ROOT)
-    seen = set()
-    for it in items:
-        for sp in it["spans"]:
-            if sp["label_valid"]:
-                assert sp["decoy_in_ocr"] is False
-            else:
-                assert sp["decoy_in_ocr"] == (sp["value"] in it["context"])
-                seen.add((it["document_id"], sp["decoy_in_ocr"]))
-    assert ("doc-a", True) in seen  # "Sports" drawn as a doc-a decoy at least once
+def test_line_items_and_null_field():
+    items = er.build_items(_params("line"), 0, REPO_ROOT)
+    assert len(items) == 4
+    n_spans = sorted(len(it["spans"]) for it in items)
+    assert n_spans == [4, 5, 5, 5]  # L1 has program_desc null
+    cross = [it for it in items if it["spans"][0]["row_error_type"] == "cross_type"][0]
+    bad = [s for s in cross["spans"] if not s["label_valid"]]
+    assert [(s["field"], s["source_field"], s["source_line_index"], s["exchanged_with"], s["line_index"])
+            for s in bad] == [("program_end_date", "program_start_date", 0, "", 0)]
 
 
-def test_build_items_doc_subset_and_limit_checks():
-    sub = ed.build_items({**_PARAMS, "doc_subset": {"n": 2, "seed": 0}}, 0, REPO_ROOT)
-    assert len({it["document_id"] for it in sub}) == 2
-    with pytest.raises(ValueError, match="doc_subset"):
-        ed.build_items({**_PARAMS, "doc_subset": {"n": 9, "seed": 0}}, 0, REPO_ROOT)
+def test_check_row_rejects_inconsistent_labels():
+    good = _rows("main")[1]  # M2
+    er.check_row(good, "main")
+    for mutate in (
+        lambda r: r["field_errors"].update(property=None, advertiser=None),  # drops labels, k disagrees
+        lambda r: r.update(error_type=None),
+        lambda r: r.update(k=1),
+        lambda r: r["field_errors"]["advertiser"].update(error_type="inter_document"),
+        lambda r: r.update(advertiser=None),  # corrupted field with null value
+        lambda r: r["field_errors"]["advertiser"]["source"].pop("exchanged_with"),
+    ):
+        bad = copy.deepcopy(good)
+        mutate(bad)
+        with pytest.raises(AssertionError):
+            er.check_row(bad, "main")
+
+
+def test_stratified_subset_determinism_and_errors():
+    rows = _rows("line")
+    p = {"valid": 2, "cross_type": 1}
+    a = er.select_rows(rows, "line", "train", p, 0)
+    assert a == er.select_rows(rows, "line", "train", p, 0)
+    assert len(a) == 3 and sum(not r["valid"] for r in a) == 1
+    with pytest.raises(ValueError, match="requested but only"):
+        er.select_rows(rows, "line", "train", {"valid": 4, "cross_type": 1}, 0)
+    with pytest.raises(ValueError, match="strata present"):
+        er.select_rows(rows, "line", "train", {"valid": 1}, 0)
+    with pytest.raises(ValueError, match="int >= 1"):
+        er.select_rows(rows, "line", "train", {"valid": 0, "cross_type": 1}, 0)
+
+
+def test_instructions_name_every_field_of_the_dataset_only():
+    main, line = er.build_instructions("main"), er.build_instructions("line")
+    for f in ("advertiser", "gross_amount"):
+        assert f"- {f}:" in main and f"- {f}:" not in line
+    for f in ("channel", "sub_amount"):
+        assert f"- {f}:" in line and f"- {f}:" not in main
+    assert "Type correspondence" in main
+    assert "{n}" not in main and "{other_place}" not in line
+
+
+def test_context_token_limit_needs_tokenizer():
     with pytest.raises(ValueError, match="tokenizer"):
-        ed.build_items({**_PARAMS, "context_token_limit": 10}, 0, REPO_ROOT)
+        er.build_items(_params("main", context_token_limit=10), 0, REPO_ROOT)
 
 
-def test_instructions_name_every_type():
-    text = ed.build_instructions()
-    for t in ed.TYPE_NAMES:
-        assert f"- {t}: {ed.TYPE_DESCRIPTIONS[t]}" in text
-    assert "(1) Explicit support" in text and "(2) Type correspondence" in text
-    assert "BOTH criteria" in text
-    assert "{" not in text and "}" not in text  # no unfilled format fields
-
-
-def _fake_result(valid, m, k, positions=None):
-    n = len(valid)
+def _fake_result():
+    """Two prompts: valid (3 spans) and cross_type k=2 (3 spans)."""
     return {
-        "doc_ids": np.asarray(["d"] * n),
-        "sample_index": np.zeros(n, dtype=np.int64),
-        "m": np.full(n, m, dtype=np.int64),
-        "k": np.full(n, k, dtype=np.int64),
-        "label_valid": np.asarray(valid, dtype=bool),
-        "list_position": np.asarray(positions or range(1, n + 1), dtype=np.int64),
+        "doc_ids": np.array(["d"] * 6),
+        "row_ordinal": np.array([0, 0, 0, 1, 1, 1]),
+        "row_k": np.array([0, 0, 0, 2, 2, 2]),
+        "row_error_type": np.array(["", "", "", "cross_type"] * 1 + ["cross_type"] * 2),
+        "field_error_type": np.array(["", "", "", "cross_type", "cross_type", ""]),
+        "label_valid": np.array([True, True, True, False, False, True]),
+        "field_position": np.array([1, 2, 3, 1, 2, 3]),
+        "exact_end_alignment": np.array([True, True, False, True, True, True]),
+        "token_id": np.array([1, 1, 2, 1, 1, 2]),
+        "prompt_n_tokens": np.array([10] * 3 + [12] * 3),
     }
 
 
-def test_prompt_invariants_accept_good_and_reject_bad():
-    ed.check_prompt_invariants(_fake_result([True, False, False], m=3, k=2))
-    with pytest.raises(AssertionError, match="invalid count"):
-        ed.check_prompt_invariants(_fake_result([True, False, False], m=3, k=1))
-    with pytest.raises(AssertionError, match="row count"):
-        ed.check_prompt_invariants(_fake_result([True, False, False], m=4, k=2))
-    with pytest.raises(AssertionError, match="positions"):
-        ed.check_prompt_invariants(_fake_result([True, False, False], m=3, k=2, positions=[1, 1, 3]))
-
-
-def test_compute_metrics_hand_countable():
-    r = _fake_result([True, False, False, True], m=4, k=2)
-    r.update(
-        exact_end_alignment=np.asarray([True, False, True, True]),
-        decoy_in_ocr=np.asarray([False, True, False, False]),
-        prompt_n_tokens=np.full(4, 100, dtype=np.int64),
-    )
-    out = ed.compute_metrics(r)
-    assert out["n_spans"] == 4 and out["n_prompts"] == 1
-    assert out["n_valid_spans"] == 2 and out["n_invalid_spans"] == 2
-    assert out["mean_m"] == 4.0 and out["mean_k"] == 2.0 and out["mean_k_over_m"] == 0.5
-    assert out["exact_end_alignment_rate"] == 0.75 and out["decoy_in_ocr_rate"] == 0.5
+def test_invariants_accept_good_and_reject_bad():
+    r = _fake_result()
+    er.check_row_invariants(r)
+    m = er.compute_metrics(r)
+    assert (m["n_spans"], m["n_prompts"], m["n_invalid_spans"], m["n_spans_cross_type"]) == (6, 2, 2, 2)
+    assert m["n_rows_with_mixed_entities"] == 1
+    assert m["n_distinct_quote_token_ids"] == 2
+    for key, val in (
+        ("row_k", np.array([0, 0, 0, 1, 1, 1])),
+        ("field_error_type", np.array(["", "", "", "cross_type", "", ""])),
+        ("label_valid", np.array([True, True, True, False, True, True])),
+        ("field_position", np.array([1, 2, 3, 1, 3, 2])),
+    ):
+        bad = {**r, key: val}
+        with pytest.raises(AssertionError):
+            er.check_row_invariants(bad)

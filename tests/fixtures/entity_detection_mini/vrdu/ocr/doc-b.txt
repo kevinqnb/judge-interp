@@ -1,5 +1,10 @@
 CONTRACT
 Advertiser: Bravo
+Agency: Zed Media
 Property: WBBB
+2 Oak Ave
+Albany
+Race 2
 Contract #: 222
-Ch. 9 Weather
+Flight 02/01/20 - 02/28/20 Total $900.00
+Ch. 9 Weather 02/02/20 - 02/09/20 $300.00

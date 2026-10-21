@@ -1,6 +1,6 @@
 id: 2026-10-14-qwen7b-relrow-smoke-01
 project: judge-interp
-task: relation_detection_row
+task: relation_detection
 description: >-
   GPU smoke for relation_detection_row (Qwen2.5-7B-Instruct, line train, 4 rows per stratum): one prompt per (document, line-item row), relation instructions, representations read at each non-null entity's closing quote at layers 0 (null control), 8, 14, 20, 24 and last, labelled per entity from field_errors. Confirms the GPU plumbing (bf16, 7B, verify_read_point) and the label bookkeeping only; expected 16 prompts, a span count equal to the non-null fields of the drawn rows (16*4 to 16*5), n_distinct_quote_token_ids = 1 and exact_end_alignment_rate = 0.0 (the quote merges with the pad space and newline).
 seed: 0

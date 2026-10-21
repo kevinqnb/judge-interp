@@ -1,15 +1,16 @@
-"""Turn a dataset row into the judge's ``## QUERY:`` block, and helpers around it.
+"""Shared data access and prompt helpers for the judge tasks.
 
-Pure text / list work only — no torch, no nnsight — so the unit tests here run
-on a login node without a GPU. Anything that touches the model lives in
-``representationlm.py``.
+Provides the dataset schema (field lists imported from ``scripts/build_vrdu_dataset.py``),
+``load_split`` / ``load_ocr_context`` readers for ``data/vrdu/``, ``render_query`` for the
+``## QUERY:`` block, per-field descriptions (``TYPE_DESCRIPTIONS``) used in the
+instructions, ``resolve_layers`` for config layer lists, and ``sub_seed`` for
+deterministic per-key seeds.
 
-The canonical field lists are imported from ``scripts/build_vrdu_dataset.py``,
-the same single source of truth ``scripts/build_vrdu_invalids.py`` uses, so the
-query can never drift from the schema the data was built against.
+No torch or nnsight is imported, so this module is testable on a login node.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,8 +31,8 @@ MAIN_FIELDS: list[str] = list(_schema.MAIN_FIELDS)
 LINE_FIELDS: list[str] = list(_schema.LINE_FIELDS)
 LINE_CARRIED_FIELDS: list[str] = list(_schema.LINE_CARRIED_FIELDS)
 
-# The fields shown to the judge, in a fixed order, per dataset. Line rows carry
-# the six document-level fields plus the five line-item fields.
+# The fields shown to the judge, in a fixed order, per dataset: ``LINE_CARRIED_FIELDS``
+# (document-level fields repeated on each line row) followed by the line-item fields.
 QUERY_FIELDS: dict[str, list[str]] = {
     "main": MAIN_FIELDS,
     "line": LINE_CARRIED_FIELDS + LINE_FIELDS,
@@ -53,17 +54,60 @@ ERROR_TYPES: dict[str, tuple[str, ...]] = {
 
 LAST_LAYER_TOKEN = "last"
 
+# What each field denotes, shown to the judge in the instructions.
+TYPE_DESCRIPTIONS: dict[str, str] = {
+    "advertiser": "the political campaign, candidate or committee that the advertising is bought for",
+    "agency": "the advertising agency that placed the buy on the advertiser's behalf",
+    "property": "the TV station (typically its call letters) that sells the airtime and receives the order",
+    "tv_address": "the mailing address of that TV station (street, city, state, ZIP; may span several lines)",
+    "product": "the campaign, candidate, or race description that the buy is booked under",
+    "contract_num": "the contract, order, or estimate identifier of the whole buy",
+    "flight_from": "the start date of the whole buy's flight (its overall air period)",
+    "flight_to": "the end date of the whole buy's flight (its overall air period)",
+    "gross_amount": "the total gross dollar amount of the whole contract",
+    "channel": "the station or channel that this line item (spot) airs on",
+    "program_desc": "the program, time slot, or daypart that this line item airs in",
+    "program_start_date": "the start date of this line item's air period",
+    "program_end_date": "the end date of this line item's air period",
+    "sub_amount": "the dollar amount (subtotal) of this line item",
+}
+assert set(TYPE_DESCRIPTIONS) == set(MAIN_FIELDS) | set(LINE_FIELDS), "type descriptions must cover exactly the main and line fields"
+
+
+def sub_seed(seed: int, *parts: str) -> int:
+    """Derive a deterministic seed from a base seed and string parts.
+
+    Uses SHA-256 rather than ``hash``, which is randomised per process for ``str``.
+
+    Args:
+        seed: base seed.
+        *parts: strings identifying the draw (e.g. dataset, split, stratum).
+
+    Returns:
+        An int in ``[0, 2**63)`` suitable for ``random.Random``.
+    """
+    key = "|".join([str(seed), *parts]).encode()
+    return int(hashlib.sha256(key).hexdigest(), 16) % (2**63)
+
 
 def load_split(data_root: str | Path, dataset: str, split: str, error_types: list[str]) -> list[dict]:
-    """Read ``<data_root>/vrdu/<dataset>/<split>.json``: every valid row plus the
-    invalid rows whose ``error_type`` is in ``error_types``.
+    """Read the rows of one split: every valid row plus the selected invalid rows.
 
-    ``error_types`` is required: the file holds several error types and silently
-    reading all of them would change what a run measures. An empty list selects
-    valid rows only.
+    Args:
+        data_root: directory containing ``vrdu/``.
+        dataset: ``"main"`` or ``"line"``.
+        split: ``"train"`` or ``"test"``.
+        error_types: error types of invalid rows to keep; an empty list keeps valid rows only.
+
+    Returns:
+        The rows of ``<data_root>/vrdu/<dataset>/<split>.json`` that are valid or whose
+        ``error_type`` is in ``error_types``.
 
     Raises:
-        ValueError: unknown dataset / split / error type, or duplicates.
+        ValueError: unknown dataset, split or error type, or duplicate error types.
+        FileNotFoundError: the split file does not exist.
+        AssertionError: the file is empty, has a row with an unrecognised error type, or
+            has no valid row after filtering.
     """
     if dataset not in QUERY_FIELDS:
         raise ValueError(f"dataset must be one of {sorted(QUERY_FIELDS)}, got {dataset!r}")
@@ -91,7 +135,19 @@ def load_split(data_root: str | Path, dataset: str, split: str, error_types: lis
 
 
 def load_ocr_context(data_root: str | Path, document_id: str) -> str:
-    """Read the full OCR text for one document. Raises if missing or empty."""
+    """Read the full OCR text of one document.
+
+    Args:
+        data_root: directory containing ``vrdu/``.
+        document_id: document identifier (file stem under ``vrdu/ocr/``).
+
+    Returns:
+        The OCR text.
+
+    Raises:
+        FileNotFoundError: no OCR file for the document.
+        AssertionError: the text is empty.
+    """
     path = Path(data_root) / "vrdu" / "ocr" / f"{document_id}.txt"
     if not path.is_file():
         raise FileNotFoundError(f"no OCR text for document {document_id!r}: {path}")
@@ -100,30 +156,23 @@ def load_ocr_context(data_root: str | Path, document_id: str) -> str:
     return text
 
 
-def row_key(row: dict, dataset: str) -> tuple:
-    """Identity of a row within a split: (document_id[, line_index], error_type, k).
-
-    Both datasets are keyed on ``error_type``: the same ``(document_id[,
-    line_index], k)`` can carry several invalid variants, so ``k`` alone does
-    not disambiguate (line since 2026-09-15, main since 2026-10-14).
-    """
-    if dataset == "main":
-        return (row["document_id"], row["error_type"], row["k"])
-    return (row["document_id"], row["line_index"], row["error_type"], row["k"])
-
-
 def render_query(row: dict, dataset: str) -> str:
-    """Render a row as the judge's ``## QUERY:`` block.
+    """Render a row as the ``## QUERY:`` block.
 
-    Emits exactly the whitelisted fields for ``dataset``, in canonical order, one
-    ``field: <json>`` line each (``null`` for a missing value). Values are
-    JSON-encoded so a value containing a newline (e.g. ``tv_address``) stays on
-    one line and is unambiguous.
+    Emits only the fields of ``dataset``, in canonical order, one ``field: <json>`` line
+    each (``null`` for a missing value). JSON encoding keeps a value that contains a
+    newline (e.g. ``tv_address``) on one line.
+
+    Args:
+        row: a dataset row; label and identity keys are never emitted.
+        dataset: ``"main"`` or ``"line"``.
+
+    Returns:
+        The newline-joined query text, without a trailing newline.
 
     Raises:
         ValueError: unknown ``dataset``.
-        AssertionError: the row is missing a whitelisted field, or a whitelisted
-            field name collides with a non-field (label/identity) key.
+        AssertionError: the row lacks a field of ``dataset``.
     """
     if dataset not in QUERY_FIELDS:
         raise ValueError(f"dataset must be one of {sorted(QUERY_FIELDS)}, got {dataset!r}")
@@ -139,21 +188,22 @@ def render_query(row: dict, dataset: str) -> str:
 
 
 def resolve_layers(layers: list, n_layers: int) -> list[int]:
-    """Validate a config layer list against model depth; return it sorted ascending.
+    """Validate a config layer list against the model depth.
 
-    Layer convention (matches ``../../coastal/scholarlm``'s representation LM):
-    ``0`` is the token-embedding output, ``1..n_layers-1`` is the residual stream
-    after that many transformer blocks (pre-norm), and ``n_layers`` is the
-    post-final-norm state — the vector the unembedding sees. The string
-    ``"last"`` resolves to ``n_layers``.
+    Layer convention: ``0`` is the token-embedding output, ``1..n_layers-1`` is the
+    residual stream after that many transformer blocks (pre-norm), and ``n_layers`` is
+    the post-final-norm state. Row L2 norms are not comparable across that last boundary.
 
-    Norm-space caveat: layer ``n_layers`` is post-final-norm; every other layer
-    is a raw pre-norm residual. Row L2 norms are not comparable across that
-    boundary.
+    Args:
+        layers: ints and/or the string ``"last"`` (resolved to ``n_layers``).
+        n_layers: number of transformer blocks in the model.
+
+    Returns:
+        The distinct layer indices, sorted ascending.
 
     Raises:
-        ValueError: empty list, an unrecognised entry, an out-of-range entry, or
-            a duplicate (after resolving ``"last"``).
+        ValueError: empty list, unrecognised or out-of-range entry, duplicate (after
+            resolving ``"last"``), or ``n_layers < 1``.
     """
     if not isinstance(layers, list) or not layers:
         raise ValueError(f"layers must be a non-empty list, got {layers!r}")

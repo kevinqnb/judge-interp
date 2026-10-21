@@ -1,6 +1,6 @@
 id: 2026-10-14-qwen7b-relrow-line-test-01
 project: judge-interp
-task: relation_detection_row
+task: relation_detection
 description: >-
   Row-based relation detection, line dataset, test split, Qwen2.5-7B-Instruct: one prompt per (document, line-item row), relation instructions, representations read at each non-null entity's closing quote at layers 0 (null control), 8, 14, 20, 24 and last, labelled per entity from field_errors. Equal-sized strata, a subset of the available rows. rows_per_stratum, gpu_memory and walltime are placeholders pending a GPU timing pilot.
 seed: 0

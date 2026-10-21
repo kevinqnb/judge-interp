@@ -1,11 +1,13 @@
 """Unit tests for analysis/relation_detection.py on a hand-built fixture.
 
-Doc "a": three line items (fields channel, program_desc, program_start_date):
-    line 0: ch=9, desc=6am, date=D1
-    line 1: ch=9, desc=6am, date=D1        (duplicate of line 0 -> collapsed)
-    line 2: ch=9, desc=7am, date=D1
-    line 3: ch=5, desc=noon, date=null      (m=2)
-Sources after collapse: A={9,6am,D1}, B={9,7am,D1}, C={5,noon}.
+LINE_FIELDS = channel (CH), program_desc (DESC), program_start_date (SD), program_end_date (ED), sub_amount (AMT).
+
+Doc "a":
+    row 0 (clean)                 CH, DESC, AMT all valid                          -> spans 0,1,2
+    row 1 (inter_document)        CH valid, DESC invalid, SD valid                 -> spans 3,4,5
+    row 2 (intra_document)        DESC and ED invalid, AMT valid                   -> spans 6,7,8
+    row 3 (intra_document)        DESC and ED invalid (only two fields)            -> spans 9,10
+Doc "b": one row with a single field (no pair)                                     -> span 11
 """
 from __future__ import annotations
 
@@ -20,120 +22,92 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analysis"))
 spec = importlib.util.spec_from_file_location(
     "analysis_relation_detection", Path(__file__).resolve().parents[1] / "analysis" / "relation_detection.py"
 )
-rd = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rd)
+rr = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rr)
 
-CH, DESC, DATE = "channel", "program_desc", "program_start_date"
-
-
-def tup(i, ch, desc, date):
-    return {"row_key": ["a", i, None, 0], "valid": True, "invalid_fields": [],
-            "entity_index": {CH: ch, DESC: desc, DATE: date}}
-
-
-TUPLES = [tup(0, "9", "6am", "D1"), tup(1, "9", "6am", "D1"), tup(2, "9", "7am", "D1"), tup(3, "5", "noon", None),
-          {**tup(4, "9", "junk", "D1"), "valid": False}]
-KEYS = [(CH, "9"), (CH, "5"), (DESC, "6am"), (DESC, "7am"), (DESC, "noon"), (DATE, "D1")]
+CH, DESC, SD, ED, AMT = rr.LINE_FIELDS
+IN, INTRA = "inter_document", "intra_document"
 
 
 def make_split():
-    n = len(KEYS)
-    return {"doc_ids": np.array(["a"] * n), "entity_type": np.array([k[0] for k in KEYS]),
-            "value": np.array([k[1] for k in KEYS]), "docs": ["a"], "tuple_membership": {"a": TUPLES}}
+    # (doc, ordinal, line_index, field, valid, field_error_type, row_error_type, src_scope, src_field, src_line)
+    spans = [
+        ("a", 0, 0, CH, True, "", "", "", "", -1),
+        ("a", 0, 0, DESC, True, "", "", "", "", -1),
+        ("a", 0, 0, AMT, True, "", "", "", "", -1),
+        ("a", 1, 1, CH, True, "", IN, "", "", -1),
+        ("a", 1, 1, DESC, False, IN, IN, "other_document", "", -1),
+        ("a", 1, 1, SD, True, "", IN, "", "", -1),
+        ("a", 2, 2, DESC, False, INTRA, INTRA, "same_document", DESC, 0),
+        ("a", 2, 2, ED, False, INTRA, INTRA, "same_document", ED, 0),
+        ("a", 2, 2, AMT, True, "", INTRA, "", "", -1),
+        ("a", 3, 3, DESC, False, INTRA, INTRA, "same_document", DESC, 0),
+        ("a", 3, 3, ED, False, INTRA, INTRA, "same_document", ED, 1),
+        ("b", 0, 0, CH, True, "", "", "", "", -1),
+    ]
+    c = list(zip(*spans))
+    n = len(spans)
+    return {
+        "doc_ids": np.array(c[0]), "row_ordinal": np.array(c[1]), "line_index": np.array(c[2]), "field": np.array(c[3]),
+        "label_valid": np.array(c[4]), "field_error_type": np.array(c[5]), "row_error_type": np.array(c[6]),
+        "source_scope": np.array(c[7]), "source_field": np.array(c[8]), "source_line_index": np.array(c[9]),
+        "source_dataset": np.array(["line" if s else "" for s in c[7]]),
+        "X": np.arange(2 * n, dtype=np.float32).reshape(n, 2),
+    }
 
 
-def test_collapse_and_items():
-    src = rd.collapse_valid_sources(TUPLES)
-    assert [s["line_indices"] for s in src] == [[0, 1], [2], [3]]
-    assert src[2]["items"] == frozenset({(CH, "5"), (DESC, "noon")})
+def test_pairs_are_the_ten_unordered_field_pairs():
+    assert len(rr.PAIRS) == 10 and all(a != b for a, b in rr.PAIRS)
+    assert rr.PAIRS[0] == (CH, DESC) and rr.PAIRS[-1] == (ED, AMT)
 
 
-def test_join_multi_source_entities():
-    info = rd.build_doc_info(make_split())["a"]
-    matches = dict(zip(info["keys"], info["matches"]))
-    assert matches[(CH, "9")] == [0, 1] and matches[(DATE, "D1")] == [0, 1]  # grey
-    assert matches[(DESC, "6am")] == [0] and matches[(CH, "5")] == [2]
+def test_group_rows():
+    by = {(g["doc"], g["ordinal"]): g for g in rr.group_rows(make_split())}
+    assert set(by) == {("a", 0), ("a", 1), ("a", 2), ("a", 3), ("b", 0)}
+    assert by[("a", 1)]["rows"] == [3, 4, 5] and by[("a", 1)]["error_type"] == IN
+    assert by[("a", 0)]["error_type"] == ""
 
 
-def test_join_detects_unrendered_source_item():
+def test_group_rows_rejects_varying_error_type_and_duplicate_field():
     s = make_split()
-    for k in ("doc_ids", "entity_type", "value"):
-        s[k] = s[k][:-1]  # drop (DATE, D1)
+    s["row_error_type"][4] = "cross_type"
     with pytest.raises(AssertionError):
-        rd.build_doc_info(s)
+        rr.group_rows(s)
+    s = make_split()
+    s["field"][4] = CH
+    with pytest.raises(AssertionError):
+        rr.group_rows(s)
 
 
-def test_6am_to_7am_swap_is_never_labelled_invalid():
-    """Swapping 6am->7am while keeping ch=9,D1 lands on source B: must not be emitted as invalid."""
-    info = rd.build_doc_info(make_split())
-    z = rd.sample_pairs(info, ["a"], 400, np.random.default_rng(0))
-    rows = {k: i for i, k in enumerate(KEYS)}
-    inv = np.flatnonzero(~z["label"])
-    assert len(inv) == 400 and z["label"].sum() == 400 and z["stats"]["swap_still_valid"] > 0
-    sources = [s["items"] for s in info["a"]["sources"]]
-    for i in inv:
-        items = {KEYS[z["e_row"][i]]} | {KEYS[r] for r in z["other_rows"][i] if r >= 0}
-        assert not any(items <= s for s in sources)
-    for i in np.flatnonzero(z["label"]):
-        items = {KEYS[z["e_row"][i]]} | {KEYS[r] for r in z["other_rows"][i] if r >= 0}
-        assert any(items <= s for s in sources)
-    assert z["stats"]["rejected_m_lt_2"] == 0  # all sources here have m>=2
-    assert (z["k"] >= 1).all() and (z["k"] <= z["m"] - 1).all() and (z["q"] <= z["k"]).all()
+def test_pair_labels_drop_both_invalid():
+    s = make_split()
+    pairs = rr.build_pairs(s, rr.group_rows(s))
+    got = {(int(i), int(j)): bool(l) for i, j, l in zip(pairs["i"], pairs["j"], pairs["label"])}
+    # clean row: all valid
+    assert [got[k] for k in ((0, 1), (0, 2), (1, 2))] == [True] * 3
+    # inter_document: the invalid DESC poisons both pairs it is in; the valid-valid pair stays valid
+    assert got[(3, 4)] is False and got[(4, 5)] is False and got[(3, 5)] is True
+    # intra row 2: DESC/ED both invalid -> dropped; each with the valid AMT -> invalid
+    assert (6, 7) not in got and got[(6, 8)] is False and got[(7, 8)] is False
+    # row 3: its only pair is both-invalid -> dropped; singleton row has no pair
+    assert (9, 10) not in got
+    assert pairs["n_dropped"] == 2
+    assert len(got) == 3 + 3 + 2 == len(pairs["i"])
 
 
-def test_m1_tuple_is_rejected_and_counted():
-    t = [tup(0, "9", None, None), tup(1, "5", "noon", "D2")]
-    keys = [(CH, "9"), (CH, "5"), (DESC, "noon"), (DATE, "D2")]
-    split = {"doc_ids": np.array(["a"] * 4), "entity_type": np.array([k[0] for k in keys]),
-             "value": np.array([k[1] for k in keys]), "docs": ["a"], "tuple_membership": {"a": t}}
-    z = rd.sample_pairs(rd.build_doc_info(split), ["a"], 50, np.random.default_rng(1))
-    assert z["stats"]["rejected_m_lt_2"] > 0 and z["label"].sum() == 50
+def test_clean_row_with_invalid_pair_is_rejected():
+    s = make_split()
+    s["label_valid"][0] = False
+    with pytest.raises(AssertionError):
+        rr.build_pairs(s, rr.group_rows(s))
 
 
-def test_relation_features_hand_values():
-    """e=channel (1,0); others: program_desc (0,2) -> cos 0, program_start_date (-3,0) -> cos -1."""
-    x = np.array([[1, 0], [0, 2], [-3, 0], [1, 1]], dtype=np.float32)
-    et = np.array([CH, DESC, DATE, "sub_amount"])
-    f, _ = rd.relation_features(x, et, np.array([0, 3]), np.array([[1, 2, -1, -1], [0, -1, -1, -1]]), absent_fill=0.0)
-    f1, pres = rd.relation_features(x, et, np.array([0]), np.array([[1, -1, -1, -1]]), absent_fill=1.0)
-    assert pres.sum() == 1 and (f1[~pres] == 1.0).all() and f1[pres][0] == 0.0
-    assert f.shape == (2, 10)
-    i_cd, i_cs = rd.RELATION_INDEX[(CH, DESC)], rd.RELATION_INDEX[(CH, DATE)]
-    i_ca = rd.RELATION_INDEX[(CH, "sub_amount")]
-    np.testing.assert_allclose(f[0, i_cd], 0.0, atol=1e-12)
-    np.testing.assert_allclose(f[0, i_cs], -1.0)
-    np.testing.assert_allclose(f[1, i_ca], 1 / np.sqrt(2))  # e=sub_amount (1,1) vs channel (1,0)
-    assert (np.delete(f[0], [i_cd, i_cs]) == 0).all() and np.count_nonzero(f[1]) == 1
-
-
-def test_filled_slots_identical_between_valid_and_invalid():
-    """z and z' share types, so their non-zero patterns must match (no label leak via presence)."""
-    info = rd.build_doc_info(make_split())
-    z = rd.sample_pairs(info, ["a"], 200, np.random.default_rng(3))
-    assert z["stats"]["no_swap_possible"] + z["stats"]["swap_still_valid"] > 0
-    x = np.random.default_rng(0).standard_normal((len(KEYS), 4)).astype(np.float32)
-    et = np.array([k[0] for k in KEYS])
-    f, pres = rd.relation_features(x, et, z["e_row"], z["other_rows"], absent_fill=0.0)
-    for pid in np.unique(z["pair_id"]):
-        idx = np.flatnonzero(z["pair_id"] == pid)
-        assert len(idx) == 2 and z["label"][idx].sum() == 1
-        assert np.array_equal(pres[idx[0]], pres[idx[1]])
-    assert (pres.sum(axis=1) == z["k"]).all()
-
-
-def test_determinism():
-    info = rd.build_doc_info(make_split())
-    a = rd.sample_pairs(info, ["a"], 100, np.random.default_rng([0, 1]))
-    b = rd.sample_pairs(info, ["a"], 100, np.random.default_rng([0, 1]))
-    for k in ("e_row", "other_rows", "label", "k", "q"):
-        assert np.array_equal(a[k], b[k])
-
-
-def test_type_pattern_identical_across_classes():
-    """Paired design: the multiset of filled-slot patterns is the same for valid and invalid."""
-    info = rd.build_doc_info(make_split())
-    z = rd.sample_pairs(info, ["a"], 300, np.random.default_rng(4))
-    et = np.array([k[0] for k in KEYS])
-    _, pres = rd.relation_features(np.eye(len(KEYS), 8, dtype=np.float32) + 1, et, z["e_row"], z["other_rows"], absent_fill=0.0)
-    pv, pi = pres[z["label"]], pres[~z["label"]]
-    assert sorted(map(tuple, pv.tolist())) == sorted(map(tuple, pi.tolist()))
+def test_pair_features_concatenate_in_field_order():
+    s = make_split()
+    pairs = rr.build_pairs(s, rr.group_rows(s))
+    f = rr.pair_features(s["X"], pairs)
+    assert f.shape == (len(pairs["i"]), 4)
+    k = next(n for n, (i, j) in enumerate(zip(pairs["i"], pairs["j"])) if (i, j) == (0, 1))
+    assert f[k].tolist() == [0.0, 1.0, 2.0, 3.0]  # X[0] then X[1]
+    k = next(n for n, (i, j) in enumerate(zip(pairs["i"], pairs["j"])) if (i, j) == (4, 5))
+    assert f[k].tolist() == [8.0, 9.0, 10.0, 11.0]  # DESC before SD

@@ -6,7 +6,7 @@ Usage: ``uv run --python 3.12 --extra analysis python analysis/clef.py configs/<
 
 Reads ``clef_entity_row`` / ``clef_relation_row`` runs (``src/judge_interp/clef.py``; one
 ``artifacts/clef_predictions.npz`` each) named in ``params.runs`` and, per run, reports with the
-metric code of ``analysis/entity_detection_row.py`` *unchanged* (loaded, not copied): smECE
+metric code of ``analysis/entity_detection.py`` *unchanged* (loaded, not copied): smECE
 (+ bootstrap CI half-width) and its smooth reliability diagram, Brier score, Brier skill score,
 AUROC, accuracy, and the per-error-type report (``detect_<T>`` = accuracy on invalid items of
 type T, valid-item accuracy in clean rows / in T-corrupted rows, AUROC of T-invalid vs all valid).
@@ -37,10 +37,9 @@ import numpy as np
 import yaml
 from sklearn.metrics import roc_auc_score
 
-_spec = importlib.util.spec_from_file_location("analysis_entity_detection_row", Path(__file__).parent / "entity_detection_row.py")
+_spec = importlib.util.spec_from_file_location("analysis_entity_detection", Path(__file__).parent / "entity_detection.py")
 er = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(er)  # reused unchanged: probe_metrics, error_type_report, plot_calibration (and, through it, ed.smooth_ece)
-ed = er.ed
+_spec.loader.exec_module(er)  # reused unchanged: probe_metrics, error_type_report, plot_calibration (and, through it, er.smooth_ece)
 
 FIGURES_DIR = Path(__file__).parent / "figures"
 KINDS = {"entity": "clef_entity_row", "relation": "clef_relation_row"}
@@ -104,7 +103,7 @@ def analyse_run(label: str, run: dict, spec: dict, p: dict, fig_dir: Path, seed:
         "max_n_tokens": int(run["n_tokens"].max()), "mean_p_true": float(probs.mean()),
     }
     m.update(er.probe_metrics("test", y, probs, ref_rate, thr))
-    d = ed.smooth_ece(probs, y, p["ece_n_boot"], seed)
+    d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
     m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     (fig_dir / label).mkdir(parents=True, exist_ok=True)
     er.plot_calibration(d, fig_dir / label)

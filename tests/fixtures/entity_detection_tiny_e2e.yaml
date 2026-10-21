@@ -1,10 +1,10 @@
-id: entity_row_tiny_e2e
+id: entity_detection_tiny_e2e
 project: judge-interp
-task: entity_detection_row
+task: entity_detection
 description: >-
-  Tiny end-to-end fixture for scripts/run_experiment.py's entity_detection_row
-  task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/entity_row_mini, main
-  dataset, every row (see tests/test_entity_detection_row.py for the hand-worked
+  Tiny end-to-end fixture for scripts/run_experiment.py's entity_detection
+  task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/entity_detection_mini, main
+  dataset, every row (see tests/test_entity_detection.py for the hand-worked
   rows). Exercises plumbing and determinism only. Expected: n_prompts = 4,
   n_spans = 8 + 8 + 8 + 9 = 33 (doc-b's valid row has all 9 fields non-null,
   each doc-a row has agency null), n_invalid_spans = 2 + 1 = 3
@@ -12,7 +12,7 @@ description: >-
   n_rows_with_mixed_entities = 2.
 seed: 0
 params:
-  data_root: tests/fixtures/entity_row_mini
+  data_root: tests/fixtures/entity_detection_mini
   model: Qwen/Qwen2.5-0.5B-Instruct
   dataset: main
   split: train

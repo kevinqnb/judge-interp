@@ -1,36 +1,26 @@
-"""Mixed-type entity detection with substituted decoys.
+"""Entity detection: hidden states read at each entity's closing quote, one prompt per dataset row.
 
-One prompt per ``(document, sample)``. The prompt lists *every* ground-truth
-field value of the document, across all ``t`` entity types (main + line), in one
-shuffled numbered list; ``k`` of them are replaced by a decoy of the same type
-taken from a different document in the same split.
+Pipeline:
+1. ``build_instructions`` states the judging task: for each non-null field of a row,
+   decide whether the value is explicitly supported by the OCR context and is the
+   right kind of value for that field.
+2. ``build_items`` loads ``data/vrdu/{main,line}/<split>.json``, draws a stratified
+   subset of rows (``select_rows``), renders each row (``render_row``) and attaches a
+   per-entity label from the row's ``field_errors``.
+3. ``EntityDetectionLM.collect_rows`` runs one prefill pass per row and stores, per
+   layer, the hidden state at the token covering each closing quote, in resumable
+   per-document shards.
+4. ``check_row_invariants`` and ``compute_metrics`` check label bookkeeping and
+   summarise span counts. No verdict is read: the model is never asked to answer.
 
-Definitions (fixed here; the numbers recorded per span are ``m`` and ``k``):
+Rendering: every non-null value is a JSON string followed by one pad space before its
+closing quote, and the query ends with a newline. Under byte-level BPE (Qwen2.5) this
+makes the closing quote tokenize the same way on every line and keeps the value's last
+character out of the quote token, so the read position carries no entity text.
 
-- ``F_i`` -- the *set* of distinct non-null ground-truth values of entity type
-  ``i`` in document ``D``, read off ``D``'s ``valid: true`` rows. Line types
-  therefore contribute each distinct value once, not once per line item.
-- ``m = sum_i |F_i|`` -- the number of entries in the prompt's list.
-- ``k`` -- drawn uniformly from ``{k_min, ..., m}`` (inclusive) per sample;
-  ``k`` of the ``m`` slots are replaced by decoys. The list length stays ``m``.
-
-A decoy for a slot of type ``i`` is a value of type ``i`` from another document
-in the *same split*, that is not equal to any value in ``F_i`` (so it is
-genuinely not this document's value). Decoy values are drawn uniformly over
-*distinct* eligible values (not weighted by how often a value recurs across the
-corpus) and never repeat within one type in one prompt. Whether a decoy string
-nevertheless occurs somewhere in ``D``'s OCR text is recorded per span
-(``decoy_in_ocr``) rather than filtered on: a short value such as a channel
-number or a date can coincide with text in ``D``, in which case the "invalid"
-label is only invalid as a value *for that field*.
-
-Every span row carries ``m``, ``k``, ``sample_index`` and its own valid/invalid
-label, so any stored representation maps back to its prompt's ``(m, k)``.
-
-Only the entity-content span (the value text between the JSON quotes, as it appears in the list)
-is read. Layers are pinned to ``[0, "last"]``: the token-embedding output and
-the post-final-norm state. No logits are read, and the forward pass runs with
-``logits_to_keep=1``, so no ``[T, vocab]`` tensor is ever materialised.
+Labels are per entity: ``field_errors[field]`` is null for a correct entity and
+``{"error_type", "source"}`` for a corrupted one. Null fields have no quote and no span.
+Layers are whatever the config lists; no logits are materialised (``logits_to_keep=1``).
 """
 from __future__ import annotations
 
@@ -43,287 +33,324 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from judge_interp.entity_prompts import _sub_seed
-from judge_interp.instruction_prompts import _EXPLICIT_CRITERION
-from judge_interp.prompts import LINE_FIELDS, MAIN_FIELDS, load_ocr_context, load_split
-from judge_interp.representationlm import RepresentationLM, _to_npz_array
+from judge_interp.prompts import (
+    ERROR_TYPES,
+    LINE_CARRIED_FIELDS,
+    QUERY_FIELDS,
+    TYPE_DESCRIPTIONS,
+    load_ocr_context,
+    load_split,
+    render_query,
+    sub_seed,
+)
+from judge_interp.representationlm import RepresentationLM, to_npz_array
 
-# (entity type, source dataset), canonical order. Main types first.
-ENTITY_TYPES: list[tuple[str, str]] = [(f, "main") for f in MAIN_FIELDS] + [
-    (f, "line") for f in LINE_FIELDS
-]
-assert len({t for t, _ in ENTITY_TYPES}) == len(ENTITY_TYPES), "main/line type names collide"
-TYPE_NAMES: list[str] = [t for t, _ in ENTITY_TYPES]
-_SOURCE_OF: dict[str, str] = dict(ENTITY_TYPES)
+DATASETS = ("main", "line")
+assert LINE_CARRIED_FIELDS == [], "line rows must not carry main fields in this task"
+ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type")
+_SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
+_PAD = " "  # inserted before each closing quote; see the module docstring
 
-_HEADER = """You are validating candidate values extracted from a document by an information-extraction pipeline.
+assert set(QUERY_FIELDS["main"]).isdisjoint(QUERY_FIELDS["line"]), "main/line field names collide"
+
+_RECORD_NOUN = {"main": "the document's order (one record per document)", "line": "one line item of the document's order"}
+_OTHER_PLACE = {
+    "main": "to another field of the record or to another part of the document",
+    "line": "to another field of this line item, to another line item, or to the order as a whole",
+}
+
+_HEADER = """You are validating a record extracted from a document by an information-extraction pipeline.
 
 You are given:
 1) In ## CONTEXT: the full OCR text of the source document.
-2) In ## QUERY: a numbered list of candidate values. Each line gives the field type in square brackets, followed by the candidate value as a JSON string.
+2) In ## QUERY: the extracted record, which is {noun}. It has one line per field, in the form `field: value`. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value.
 
-The possible field types are:
+The fields are:
 {types}
 
-For each candidate independently, decide whether it is a VALID value for its stated field type in this document. A candidate is valid only if BOTH criteria below hold:
+For each field whose value is not null, decide independently whether the value is a VALID value for that field in this document. A value is valid only if BOTH criteria below hold:
 
 {criteria}
 
-Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Judge every candidate independently: one candidate's validity has no bearing on another's.
+Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Judge every field independently: one field's validity has no bearing on another's.
 
-For each numbered candidate, answer with exactly one line in the form `<n>: true` or `<n>: false`, in order, one line per candidate."""
+For each field with a value, answer with exactly one line in the form `<field>: true` or `<field>: false`, in the order shown. Do not answer for fields whose value is null."""
 
-# Shown to the judge so it can apply the type-correspondence criterion. One line
-# per type; keys must equal TYPE_NAMES exactly (checked below).
-TYPE_DESCRIPTIONS: dict[str, str] = {
-    "advertiser": "the political campaign, candidate or committee that the advertising is bought for",
-    "agency": "the advertising agency that placed the buy on the advertiser's behalf",
-    "property": "the TV station (typically its call letters) that sells the airtime and receives the order",
-    "tv_address": "the mailing address of that TV station (street, city, state, ZIP; may span several lines)",
-    "product": "the campaign, candidate or race description that the buy is booked under",
-    "contract_num": "the contract, order or estimate identifier of the whole buy",
-    "flight_from": "the start date of the whole buy's flight (its overall air period)",
-    "flight_to": "the end date of the whole buy's flight (its overall air period)",
-    "gross_amount": "the total gross dollar amount of the whole contract",
-    "channel": "the station or channel that one individual line item (spot) airs on",
-    "program_desc": "the program, time slot or daypart that one individual line item airs in",
-    "program_start_date": "the start date of one individual line item's air period",
-    "program_end_date": "the end date of one individual line item's air period",
-    "sub_amount": "the dollar amount (subtotal) of one individual line item",
-}
-assert list(TYPE_DESCRIPTIONS) == TYPE_NAMES, "TYPE_DESCRIPTIONS keys must match TYPE_NAMES in order"
+EXPLICIT_CRITERION = """({n}) Explicit support. Every non-null value must appear explicitly in the context. A value may differ from the context only in trivial surface formatting (whitespace, line breaks, letter case, and equivalent number forms such as 10 vs 10.0 or 1,000 vs 1000). A value produced by paraphrasing, summarising, inferring, rounding, unit conversion, or any other transformation of the text is NOT explicit support. A `null` value always satisfies this criterion."""
 
-# Second criterion, specific to this task: presence in the text is not validity.
-_TYPE_CRITERION = """({n}) Type correspondence. The bracketed field type is a claim about what the value is, and it must hold in this document: the value must be what that field type denotes here, as described in the list of field types above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field type fails this criterion, even though it is a genuine entity of the document. For example, a candidate listed under [advertiser] whose text is really the name of the agency, the TV station, or a product description is invalid, as is a date or a dollar amount that belongs to another field or to another part of the document. Check each candidate against the role its stated type requires, not merely against the text."""
+_TYPE_CRITERION = """({n}) Type correspondence. The field name is a claim about what the value is, and it must hold in this document: the value must be what that field denotes here, as described in the list of fields above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field fails this criterion, even though it is a genuine entity of the document. For example, a value under `advertiser` whose text is really the name of the agency, the TV station, or a product description is invalid, as is a date or a dollar amount that belongs {other_place}. Check each value against the role its field requires, not merely against the text."""
 
 # Span metadata columns, in shard order. All values are str / int / bool.
 SPAN_META_KEYS = (
-    "sample_index", "m", "k", "entity_type", "source_dataset", "value", "label_valid",
-    "list_position", "decoy_source_doc", "decoy_in_ocr",
+    "dataset", "row_ordinal", "line_index", "row_error_type", "row_k", "field", "field_position",
+    "value", "label_valid", "field_error_type", "source_scope", "source_dataset", "source_field",
+    "source_line_index", "exchanged_with",
 )
+# Per-span columns the model side adds.
+_MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "exact_end_alignment", "prompt_n_tokens")
 
 
-def build_instructions() -> str:
-    """The all-types instruction block (fixed for a run)."""
-    types = "\n".join(f"- {t}: {TYPE_DESCRIPTIONS[t]}" for t in TYPE_NAMES)
-    criteria = "\n".join([_EXPLICIT_CRITERION.format(n=1), _TYPE_CRITERION.format(n=2)])
-    return _HEADER.format(types=types, criteria=criteria)
+def build_instructions(dataset: str) -> str:
+    """The instruction block for one dataset (fixed for a run)."""
+    if dataset not in DATASETS:
+        raise ValueError(f"dataset must be one of {DATASETS}, got {dataset!r}")
+    types = "\n".join(f"- {f}: {TYPE_DESCRIPTIONS[f]}" for f in QUERY_FIELDS[dataset])
+    criteria = "\n".join([
+        EXPLICIT_CRITERION.format(n=1),
+        _TYPE_CRITERION.format(n=2, other_place=_OTHER_PLACE[dataset]),
+    ])
+    return _HEADER.format(noun=_RECORD_NOUN[dataset], types=types, criteria=criteria)
 
 
 # ----------------------------------------------------------------------
-# Ground truth and decoy pools
+# Rows: validation and labels
 
 
-def load_ground_truth(data_root: str | Path, split: str) -> dict[str, dict[str, list[str]]]:
-    """``{document_id: {entity_type: sorted distinct non-null values}}``.
+def check_row(row: dict, dataset: str) -> None:
+    """Assert that a row's label fields agree with each other.
 
-    Every document has all ``t`` keys (an empty list for an all-null type).
+    Args:
+        row: a dataset row with ``valid``, ``error_type``, ``k``, ``num_invalid_fields``,
+            ``invalid_fields``, ``field_errors`` and one key per field in ``dataset``.
+        dataset: ``"main"`` or ``"line"``; selects the expected field list.
 
     Raises:
-        AssertionError: a main document without exactly one valid row, a line
-            row for a document with no main row, or a non-``str`` value.
+        AssertionError: the label fields disagree, a corrupted field has a null value,
+            or a ``source`` entry is malformed for its scope.
     """
-    main_rows = load_split(data_root, "main", split, [])  # ground truth reads valid rows only
-    line_rows = load_split(data_root, "line", split, [])
-
-    truth: dict[str, dict[str, set[str]]] = {}
-    for r in main_rows:
-        if not r["valid"]:
-            continue
-        assert r["document_id"] not in truth, f"two valid main rows for {r['document_id']!r}"
-        truth[r["document_id"]] = {t: set() for t in TYPE_NAMES}
-    main_docs = {r["document_id"] for r in main_rows}
-    assert set(truth) == main_docs, "a main document has no valid row"
-
-    for r in main_rows:
-        if r["valid"]:
-            _add_values(truth[r["document_id"]], r, MAIN_FIELDS)
-    for r in line_rows:
-        if not r["valid"]:
-            continue
-        assert r["document_id"] in truth, f"line row for unknown document {r['document_id']!r}"
-        _add_values(truth[r["document_id"]], r, LINE_FIELDS)
-
-    return {d: {t: sorted(vals) for t, vals in per.items()} for d, per in truth.items()}
-
-
-def _add_values(per_type: dict[str, set[str]], row: dict, fields: list[str]) -> None:
+    fields = QUERY_FIELDS[dataset]
+    where = f"{row['document_id']!r}/{row.get('line_index')}"
+    fe = row["field_errors"]
+    assert list(fe) == fields, f"{where}: field_errors keys {list(fe)} != {fields}"
+    bad = [f for f in fields if fe[f] is not None]
+    assert row["valid"] == (row["error_type"] is None), f"{where}: valid vs error_type"
+    assert row["valid"] == (not bad), f"{where}: valid vs field_errors"
+    assert row["k"] == row["num_invalid_fields"] == len(bad) == len(row["invalid_fields"]), where
+    assert set(row["invalid_fields"]) == set(bad), f"{where}: invalid_fields vs field_errors"
+    if not row["valid"]:
+        assert row["error_type"] in ERROR_TYPES[dataset], f"{where}: error_type {row['error_type']!r}"
     for f in fields:
         v = row[f]
-        if v is None:
+        assert v is None or isinstance(v, str), f"{where}/{f}: non-str value {v!r}"
+        e = fe[f]
+        if e is None:
             continue
-        assert isinstance(v, str), f"{row['document_id']!r}/{f!r}: non-str value {v!r}"
-        per_type[f].add(v)
+        assert v is not None, f"{where}/{f}: corrupted field has a null value"
+        assert set(e) == {"error_type", "source"}, f"{where}/{f}: {sorted(e)}"
+        assert e["error_type"] == row["error_type"], f"{where}/{f}: field vs row error_type"
+        src = e["source"]
+        assert src["scope"] in _SOURCE_SCOPES, f"{where}/{f}: scope {src['scope']!r}"
+        if src["scope"] == "same_document":
+            need = {"scope", "dataset", "field", "line_index"}
+            if row["error_type"] == "cross_type":
+                need.add("exchanged_with")
+            assert set(src) == need, f"{where}/{f}: source keys {sorted(src)}"
+            assert src["dataset"] in DATASETS and src["field"] in TYPE_DESCRIPTIONS, f"{where}/{f}"
+        else:
+            assert set(src) == {"scope"}, f"{where}/{f}: source keys {sorted(src)}"
 
 
-def build_decoy_pools(truth: dict[str, dict[str, list[str]]]) -> dict[str, dict[str, list[str]]]:
-    """``{entity_type: {value: sorted documents holding it as ground truth}}``."""
-    pools: dict[str, dict[str, list[str]]] = {t: {} for t in TYPE_NAMES}
-    for doc_id in sorted(truth):
-        for t in TYPE_NAMES:
-            for v in truth[doc_id][t]:
-                pools[t].setdefault(v, []).append(doc_id)
-    return pools
+def _source_columns(entry: dict | None) -> dict:
+    """Flatten a ``field_errors`` entry's ``source`` into span metadata columns.
+
+    Args:
+        entry: ``field_errors[field]`` (``{"error_type", "source"}``), or ``None`` for a
+            correct entity.
+
+    Returns:
+        Dict with ``source_scope``, ``source_dataset``, ``source_field``,
+        ``source_line_index`` and ``exchanged_with``; ``""`` (``-1`` for the index)
+        where the entry has no such value.
+    """
+    out = {"source_scope": "", "source_dataset": "", "source_field": "", "source_line_index": -1,
+           "exchanged_with": ""}
+    if entry is None:
+        return out
+    src = entry["source"]
+    out["source_scope"] = src["scope"]
+    if src["scope"] == "same_document":
+        out["source_dataset"] = src["dataset"]
+        out["source_field"] = src["field"]
+        out["source_line_index"] = -1 if src["line_index"] is None else src["line_index"]
+        if "exchanged_with" in src:
+            out["exchanged_with"] = "" if src["exchanged_with"] is None else src["exchanged_with"]
+    return out
 
 
 # ----------------------------------------------------------------------
-# Sampling and rendering
+# Rendering
 
 
-def sample_prompt_entries(
-    doc_id: str,
-    doc_truth: dict[str, list[str]],
-    pools: dict[str, dict[str, list[str]]],
-    sample_index: int,
-    seed: int,
-    k_min: int,
-) -> dict:
-    """Draw one ``(document, sample)``: ``m``, ``k``, and the shuffled entry list.
+def render_row(row: dict, dataset: str) -> dict:
+    """Render a row as the query text and locate each entity's closing quote.
 
-    Returns ``{"m", "k", "entries": [{"entity_type", "source_dataset", "value",
-    "label_valid", "decoy_source_doc"}, ...]}`` -- ``entries`` in final
-    presentation order (a full seeded shuffle, so neither list position nor
-    sorted order can reveal which entries were substituted).
+    The text equals ``prompts.render_query`` with one pad space before each non-null
+    value's closing quote and a trailing newline (asserted line by line).
+
+    Args:
+        row: a dataset row; every field of ``dataset`` must be a ``str`` or ``None``.
+        dataset: ``"main"`` or ``"line"``.
+
+    Returns:
+        ``{"text": str, "spans": [(field, char_start, char_end), ...]}``: one span per
+        non-null field in canonical order, covering exactly the closing ``"``
+        (offsets into ``text``, exclusive end).
+    """
+    lines: list[str] = []
+    spans: list[tuple[str, int, int]] = []
+    offset = 0
+    for f in QUERY_FIELDS[dataset]:
+        v = row[f]
+        prefix = f"{f}: "
+        encoded = json.dumps(v)
+        if v is not None:
+            assert isinstance(v, str), f"{f}: non-str value {v!r}"
+            encoded = encoded[:-1] + _PAD + '"'
+        lines.append(prefix + encoded)
+        if v is not None:
+            close = offset + len(prefix) + len(encoded) - 1
+            spans.append((f, close, close + 1))
+        offset += len(lines[-1]) + 1
+    text = "\n".join(lines) + "\n"
+
+    base = render_query(row, dataset).split("\n")
+    assert len(base) == len(lines), "render_row diverged from prompts.render_query"
+    for f, b, mine in zip(QUERY_FIELDS[dataset], base, lines):
+        expected = b if row[f] is None else b[:-1] + _PAD + '"'
+        assert mine == expected, f"{f}: render_row diverged from prompts.render_query"
+    for f, a, b in spans:
+        assert text[a:b] == '"', f"{f}: span does not cover a closing quote"
+    return {"text": text, "spans": spans}
+
+
+# ----------------------------------------------------------------------
+# Item building
+
+
+def _stratum(row: dict) -> str:
+    """Stratum name of a row: ``"valid"`` or its error type."""
+    return "valid" if row["valid"] else row["error_type"]
+
+
+def select_rows(rows: list[dict], dataset: str, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
+    """Draw a stratified subset of rows.
+
+    Strata are ``"valid"`` plus each error type present in ``rows``.
+
+    Args:
+        rows: rows from ``prompts.load_split``.
+        dataset: ``"main"`` or ``"line"``; seeds the per-stratum draw.
+        split: ``"train"`` or ``"test"``; seeds the per-stratum draw.
+        rows_per_stratum: stratum name -> number of rows to draw (``None`` takes all);
+            keys must equal the strata present exactly.
+        seed: run seed.
+
+    Returns:
+        The drawn rows, sorted by ``(document_id, line_index, stratum, k)``.
 
     Raises:
-        ValueError: ``m < k_min`` or ``k_min < 0``, or a type has fewer eligible
-            decoys than slots chosen for replacement.
+        ValueError: key mismatch, a count that is not ``None`` or an int >= 1, or a
+            stratum smaller than its requested count.
     """
-    slots = [(t, v) for t in TYPE_NAMES for v in doc_truth[t]]
-    m = len(slots)
-    if k_min < 0 or m < k_min:
-        raise ValueError(f"{doc_id!r}: m={m} but k_min={k_min}")
-
-    rng = random.Random(_sub_seed(seed, doc_id, str(sample_index)))
-    k = rng.randint(k_min, m)
-    replaced = sorted(rng.sample(range(m), k))
-
-    replaced_by_type: dict[str, list[int]] = {}
-    for i in replaced:
-        replaced_by_type.setdefault(slots[i][0], []).append(i)
-
-    entries: list[dict | None] = [
-        {
-            "entity_type": t, "source_dataset": _SOURCE_OF[t], "value": v,
-            "label_valid": True, "decoy_source_doc": "",
-        }
-        for t, v in slots
-    ]
-    for t in TYPE_NAMES:  # fixed type order keeps the RNG stream deterministic
-        idxs = replaced_by_type.get(t, [])
-        if not idxs:
+    strata = sorted({_stratum(r) for r in rows})
+    if sorted(rows_per_stratum) != strata:
+        raise ValueError(f"rows_per_stratum keys {sorted(rows_per_stratum)} != strata present {strata}")
+    chosen: list[dict] = []
+    for s in strata:
+        pool = sorted((r for r in rows if _stratum(r) == s),
+                      key=lambda r: (r["document_id"], r.get("line_index", -1), r["k"]))
+        n = rows_per_stratum[s]
+        if n is None:
+            chosen.extend(pool)
             continue
-        own = set(doc_truth[t])
-        eligible = sorted(v for v in pools[t] if v not in own)
-        if len(eligible) < len(idxs):
-            raise ValueError(
-                f"{doc_id!r}/{t!r}: {len(idxs)} decoy(s) needed but only {len(eligible)} "
-                "eligible value(s) in the split"
-            )
-        for i, v in zip(idxs, rng.sample(eligible, len(idxs))):
-            sources = pools[t][v]
-            assert doc_id not in sources, f"decoy {v!r} for {doc_id!r}/{t!r} is its own value"
-            entries[i] = {
-                "entity_type": t, "source_dataset": _SOURCE_OF[t], "value": v,
-                "label_valid": False, "decoy_source_doc": rng.choice(sources),
-            }
-
-    rng.shuffle(entries)
-    assert sum(not e["label_valid"] for e in entries) == k
-    assert len(entries) == m
-    return {"m": m, "k": k, "entries": entries}
-
-
-def render_entities(entries: list[dict]) -> dict:
-    """Render entries as the ``## QUERY:`` block: ``<n>. [<type>] <json value>``.
-
-    Spans are computed during rendering. ``char_start:char_end`` covers the
-    JSON-encoded value *between* its quotes (exclusive end, offsets into
-    ``text``). The closing quote is deliberately outside the span: byte-level
-    BPE merges it with the following newline (``"\\n``), so a span ending on
-    the quote would resolve to a token that carries nothing of the entity --
-    at layer 0 every entry would read the same embedding.
-    """
-    if not entries:
-        raise ValueError("entries is empty")
-    lines: list[str] = []
-    spans: list[tuple[int, int]] = []
-    offset = 0
-    for i, e in enumerate(entries, start=1):
-        prefix = f"{i}. [{e['entity_type']}] "
-        quoted = json.dumps(e["value"])
-        lines.append(prefix + quoted)
-        assert len(quoted) > 2, "empty value has no span"
-        start = offset + len(prefix)
-        spans.append((start + 1, start + len(quoted) - 1))
-        offset += len(lines[-1]) + 1
-    return {"text": "\n".join(lines), "spans": spans}
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise ValueError(f"rows_per_stratum[{s!r}] must be null or an int >= 1, got {n!r}")
+        if n > len(pool):
+            raise ValueError(f"stratum {s!r}: {n} rows requested but only {len(pool)} available")
+        chosen.extend(random.Random(sub_seed(seed, dataset, split, s)).sample(pool, n))
+    return sorted(chosen, key=lambda r: (r["document_id"], r.get("line_index", -1), _stratum(r), r["k"]))
 
 
 def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
-    """One item per ``(document, sample_index)`` for ``EntityDetectionLM.collect_entities``.
+    """Build one ``EntityDetectionLM.collect_rows`` item per selected row.
 
-    ``params``: ``data_root``, ``split``, ``samples_per_doc`` (``s``),
-    ``k_min``, ``context_token_limit`` (``tokenizer`` required iff not null),
-    ``doc_subset`` (null | ``{n, seed}`` -- sample of documents).
+    Args:
+        params: config ``params`` with ``data_root``, ``dataset``, ``split``,
+            ``error_types``, ``rows_per_stratum`` and ``context_token_limit``.
+        seed: run seed for the stratified draw.
+        repo_root: directory that ``params["data_root"]`` is relative to.
+        tokenizer: HF tokenizer used to enforce ``context_token_limit``; must be given
+            if and only if the limit is not ``None``.
+
+    Returns:
+        Items ordered by ``select_rows``: ``document_id``, ``row_ordinal`` (0-based
+        within the document), ``instructions``, ``context``, ``query`` and ``spans``
+        (one dict per non-null field with ``char_start``, ``char_end`` and every key
+        of ``SPAN_META_KEYS``).
+
+    Raises:
+        ValueError: unknown dataset, tokenizer/limit mismatch, or an OCR context
+            longer than ``context_token_limit`` tokens.
     """
     data_root = repo_root / params["data_root"]
-    split, s, k_min = params["split"], params["samples_per_doc"], params["k_min"]
-    if not isinstance(s, int) or isinstance(s, bool) or s < 1:
-        raise ValueError(f"samples_per_doc must be an int >= 1, got {s!r}")
-
-    truth = load_ground_truth(data_root, split)
-    pools = build_decoy_pools(truth)
-    doc_ids = sorted(truth)
-
-    subset = params["doc_subset"]
-    if subset is not None:
-        n = subset["n"]
-        if n > len(doc_ids):
-            raise ValueError(f"doc_subset.n {n} > available documents {len(doc_ids)}")
-        doc_ids = sorted(random.Random(subset["seed"]).sample(doc_ids, n))
-
+    dataset, split = params["dataset"], params["split"]
+    if dataset not in DATASETS:
+        raise ValueError(f"dataset must be one of {DATASETS}, got {dataset!r}")
     limit = params["context_token_limit"]
     if (limit is None) != (tokenizer is None):
         raise ValueError("tokenizer must be given iff context_token_limit is not null")
 
-    instructions = build_instructions()
+    rows = load_split(data_root, dataset, split, params["error_types"])
+    for r in rows:
+        check_row(r, dataset)
+    selected = select_rows(rows, dataset, split, params["rows_per_stratum"], seed)
+
+    instructions = build_instructions(dataset)
+    contexts: dict[str, str] = {}
     items: list[dict] = []
-    for doc_id in doc_ids:
-        context = load_ocr_context(data_root, doc_id)
-        if limit is not None:
-            n_tokens = len(tokenizer.encode(context, add_special_tokens=False))
-            if n_tokens > limit:
-                raise ValueError(
-                    f"OCR context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
-                )
-        for j in range(s):
-            drawn = sample_prompt_entries(doc_id, truth[doc_id], pools, j, seed, k_min)
-            rendered = render_entities(drawn["entries"])
-            spans = []
-            for pos, (e, (c0, c1)) in enumerate(zip(drawn["entries"], rendered["spans"]), start=1):
-                spans.append({
-                    "char_start": c0,
-                    "char_end": c1,
-                    "sample_index": j,
-                    "m": drawn["m"],
-                    "k": drawn["k"],
-                    "entity_type": e["entity_type"],
-                    "source_dataset": e["source_dataset"],
-                    "value": e["value"],
-                    "label_valid": e["label_valid"],
-                    "list_position": pos,
-                    "decoy_source_doc": e["decoy_source_doc"],
-                    "decoy_in_ocr": (not e["label_valid"]) and (e["value"] in context),
-                })
-            items.append({
-                "document_id": doc_id,
-                "sample_index": j,
-                "instructions": instructions,
-                "context": context,
-                "query": rendered["text"],
-                "spans": spans,
+    ordinal: dict[str, int] = {}
+    for r in selected:
+        doc_id = r["document_id"]
+        if doc_id not in contexts:
+            text = load_ocr_context(data_root, doc_id)
+            if limit is not None:
+                n_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+                if n_tokens > limit:
+                    raise ValueError(
+                        f"OCR context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
+                    )
+            contexts[doc_id] = text
+        j = ordinal.get(doc_id, 0)
+        ordinal[doc_id] = j + 1
+        rendered = render_row(r, dataset)
+        spans = []
+        for pos, (f, c0, c1) in enumerate(rendered["spans"], start=1):
+            entry = r["field_errors"][f]
+            spans.append({
+                "char_start": c0,
+                "char_end": c1,
+                "dataset": dataset,
+                "row_ordinal": j,
+                "line_index": r["line_index"] if dataset == "line" else -1,
+                "row_error_type": "" if r["valid"] else r["error_type"],
+                "row_k": r["k"],
+                "field": f,
+                "field_position": pos,
+                "value": r[f],
+                "label_valid": entry is None,
+                "field_error_type": "" if entry is None else entry["error_type"],
+                **_source_columns(entry),
             })
+        assert spans, f"{doc_id!r}: row with no non-null field"
+        items.append({
+            "document_id": doc_id,
+            "row_ordinal": j,
+            "instructions": instructions,
+            "context": contexts[doc_id],
+            "query": rendered["text"],
+            "spans": spans,
+        })
+    assert len(items) == len(selected), "row count changed while building items"
     return items
 
 
@@ -332,23 +359,28 @@ def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> lis
 
 
 class EntityDetectionLM(RepresentationLM):
-    """``RepresentationLM`` restricted to layers ``[0, n_layers]`` (embedding
-    output and post-final-norm), reading entity-content spans only."""
+    """``RepresentationLM`` that reads hidden states at each entity's closing quote."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.layers != [0, self.n_layers]:
-            raise ValueError(
-                f"entity detection records layers [0, 'last'] only, got {self.layers} "
-                f"(n_layers={self.n_layers})"
-            )
+    def judge_row(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
+        """Run one prefill pass and read the hidden state at each closing quote.
 
-    def judge_entities(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
-        """One prefill pass; hidden states at each span's last covering token.
+        Args:
+            instructions: the ``## INSTRUCTIONS:`` text.
+            context: the ``## CONTEXT:`` text (OCR).
+            query: the ``## QUERY:`` text; ``spans`` offsets are relative to it.
+            spans: dicts with one-character ``char_start`` / ``char_end`` covering a
+                closing quote in ``query``.
 
-        Returns ``representations`` (``{layer: float32 [n_spans, hidden]}``),
-        ``token_index`` / ``exact_end_alignment`` (``[n_spans]``), and
-        ``prompt_n_tokens``.
+        Returns:
+            Dict with ``representations`` (``{layer: float32 [n_spans, hidden]}``),
+            ``token_index``, ``token_id``, ``token_n_chars`` and ``exact_end_alignment``
+            (each ``[n_spans]``), and ``prompt_n_tokens``. ``exact_end_alignment`` is
+            true when the token is exactly the quote; otherwise BPE merged the quote
+            with a neighbouring character.
+
+        Raises:
+            ValueError: ``spans`` is empty or the prompt exceeds
+                ``max_position_embeddings``.
         """
         if not spans:
             raise ValueError("spans is empty")
@@ -362,15 +394,24 @@ class EntityDetectionLM(RepresentationLM):
             )
 
         token_index: list[int] = []
-        exact_end_alignment: list[bool] = []
+        token_id: list[int] = []
+        n_chars: list[int] = []
+        exact: list[bool] = []
         for span in spans:
-            char_end = shift + span["char_end"]
-            idx = self._last_token_covering(offsets, char_end - 1)
+            assert span["char_end"] - span["char_start"] == 1, "a span must be exactly one character"
+            pos = shift + span["char_start"]
+            idx = self._last_token_covering(offsets, pos)
+            s, e = offsets[idx]
+            assert s <= pos < e
+            tid = int(input_ids[idx])
+            assert '"' in self.tokenizer.decode([tid]), (
+                f"token {idx} ({self.tokenizer.decode([tid])!r}) covering a closing quote has no quote"
+            )
             token_index.append(idx)
-            exact_end_alignment.append(offsets[idx][1] == char_end)
-        assert len(set(token_index)) == len(token_index), (
-            "two entities resolved to the same token -- span mapping is broken"
-        )
+            token_id.append(tid)
+            n_chars.append(e - s)
+            exact.append((s, e) == (pos, pos + 1))
+        assert len(set(token_index)) == len(token_index), "two quotes resolved to the same token"
         idx_tensor = torch.tensor(token_index, dtype=torch.long)
 
         saved: dict[int, "torch.Tensor"] = {}
@@ -395,29 +436,46 @@ class EntityDetectionLM(RepresentationLM):
         return {
             "representations": representations,
             "token_index": np.asarray(token_index, dtype=np.int64),
-            "exact_end_alignment": np.asarray(exact_end_alignment, dtype=bool),
+            "token_id": np.asarray(token_id, dtype=np.int64),
+            "token_n_chars": np.asarray(n_chars, dtype=np.int64),
+            "exact_end_alignment": np.asarray(exact, dtype=bool),
             "prompt_n_tokens": prompt_n_tokens,
         }
 
     def _item_fingerprint(self, it: dict) -> str:
-        """Identity of everything that determines an item's stored rows."""
+        """Hash of everything that determines an item's stored rows.
+
+        Args:
+            it: an item from ``build_items``.
+
+        Returns:
+            Hex digest over model name, instructions, context and query.
+        """
         h = hashlib.sha256()
         for part in (self.model_name, it["instructions"], it["context"], it["query"]):
             h.update(part.encode())
             h.update(b"\x00")
         return h.hexdigest()
 
-    def collect_entities(self, items: list[dict], cache_dir: str | Path, verify_read_point: bool) -> dict:
-        """Judge every item; one ``.npz`` shard per document (resumable).
+    def collect_rows(self, items: list[dict], cache_dir: str | Path, verify_read_point: bool) -> dict:
+        """Run every item and aggregate the spans, with one resumable shard per document.
 
-        A shard is reused only if its per-item fingerprints (model, instructions,
-        context, query) and span count match exactly.
+        A cached shard is reused only if its item fingerprints and span count match.
 
-        Returns parallel arrays, one row per span, ordered by ``(sorted
-        document_id, sample_index, list_position)``: ``representations``
-        (``{layer: float32 [n, hidden]}``), ``layers``, ``doc_ids``,
-        ``token_index``, ``exact_end_alignment``, ``prompt_n_tokens``, and every
-        key of ``SPAN_META_KEYS`` (``m`` and ``k`` among them).
+        Args:
+            items: output of ``build_items``; each document's ``row_ordinal`` values
+                must be 0..n-1 in order.
+            cache_dir: directory for the ``<document_id>.npz`` shards (created if missing).
+            verify_read_point: run ``verify_read_point`` on the first item first.
+
+        Returns:
+            Parallel arrays with one entry per span, ordered by ``(document_id,
+            row_ordinal, field_position)``: ``representations`` (``{layer: float32
+            [n, hidden]}``), ``layers``, ``doc_ids``, the model columns, and every key
+            of ``SPAN_META_KEYS``.
+
+        Raises:
+            ValueError: ``items`` is empty.
         """
         if not items:
             raise ValueError("items is empty")
@@ -428,8 +486,8 @@ class EntityDetectionLM(RepresentationLM):
         for it in items:
             by_doc.setdefault(it["document_id"], []).append(it)
         for doc_id, doc_items in by_doc.items():
-            assert [it["sample_index"] for it in doc_items] == list(range(len(doc_items))), (
-                f"{doc_id!r}: items are not sample_index 0..s-1 in order"
+            assert [it["row_ordinal"] for it in doc_items] == list(range(len(doc_items))), (
+                f"{doc_id!r}: items are not row_ordinal 0..n-1 in order"
             )
             for it in doc_items:
                 assert it["spans"], f"{doc_id!r}: item with no spans"
@@ -452,52 +510,63 @@ class EntityDetectionLM(RepresentationLM):
                         continue
                 shard.unlink()  # incomplete / stale -- recompute
             if self.verbose:
-                print(f"[{i + 1}/{len(by_doc)}] {doc_id}: judging {len(fps)} prompt(s), {n_spans} span(s)")
-            self._judge_document_entities(by_doc[doc_id], fps, shard)
+                print(f"[{i + 1}/{len(by_doc)}] {doc_id}: judging {len(fps)} row(s), {n_spans} span(s)")
+            self._judge_document_rows(by_doc[doc_id], fps, shard)
 
-        return self._aggregate_entities(by_doc, cache_dir)
+        return self._aggregate_rows(by_doc, cache_dir)
 
-    def _judge_document_entities(self, doc_items: list[dict], fps: list[str], shard: Path) -> None:
+    def _judge_document_rows(self, doc_items: list[dict], fps: list[str], shard: Path) -> None:
+        """Judge one document's items and write its shard.
+
+        Args:
+            doc_items: the document's items, in ``row_ordinal`` order.
+            fps: ``_item_fingerprint`` of each item.
+            shard: destination ``.npz`` path, written atomically via a temporary file.
+        """
         per_layer: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
-        token_index: list[int] = []
-        exact: list[bool] = []
-        n_tokens: list[int] = []
+        cols: dict[str, list] = {k: [] for k in _MODEL_KEYS}
         meta: dict[str, list] = {k: [] for k in SPAN_META_KEYS}
 
         for it in doc_items:
-            res = self.judge_entities(it["instructions"], it["context"], it["query"], it["spans"])
+            res = self.judge_row(it["instructions"], it["context"], it["query"], it["spans"])
             n = len(it["spans"])
             for L in self.layers:
                 per_layer[L].append(res["representations"][L])
-            token_index.extend(res["token_index"].tolist())
-            exact.extend(res["exact_end_alignment"].tolist())
-            n_tokens.extend([res["prompt_n_tokens"]] * n)
+            for k in ("token_index", "token_id", "token_n_chars", "exact_end_alignment"):
+                cols[k].extend(res[k].tolist())
+            cols["prompt_n_tokens"].extend([res["prompt_n_tokens"]] * n)
             for sp in it["spans"]:
                 for k in SPAN_META_KEYS:
                     meta[k].append(sp[k])
 
         payload = {
-            "n_spans": np.asarray(len(token_index), dtype=np.int64),
+            "n_spans": np.asarray(len(cols["token_index"]), dtype=np.int64),
             "item_fingerprints": np.asarray(fps, dtype=object).astype("U"),
             "layers": np.asarray(self.layers, dtype=np.int64),
-            "token_index": np.asarray(token_index, dtype=np.int64),
-            "exact_end_alignment": np.asarray(exact, dtype=bool),
-            "prompt_n_tokens": np.asarray(n_tokens, dtype=np.int64),
         }
+        for k, v in cols.items():
+            payload[k] = to_npz_array(v)
         for L in self.layers:
             payload[f"rep_{L}"] = np.concatenate(per_layer[L], axis=0).astype(np.float32)
         for k in SPAN_META_KEYS:
-            payload[f"meta_{k}"] = _to_npz_array(meta[k])
+            payload[f"meta_{k}"] = to_npz_array(meta[k])
 
         tmp = shard.with_name(shard.stem + ".tmp.npz")
         np.savez(tmp, **payload)
         tmp.rename(shard)
 
-    def _aggregate_entities(self, by_doc: dict, cache_dir: Path) -> dict:
+    def _aggregate_rows(self, by_doc: dict, cache_dir: Path) -> dict:
+        """Concatenate the per-document shards in sorted document order.
+
+        Args:
+            by_doc: document_id -> its items.
+            cache_dir: directory holding one shard per document.
+
+        Returns:
+            The dict described in ``collect_rows``, after ``check_row_invariants``.
+        """
         rep_blocks: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
-        cols: dict[str, list[np.ndarray]] = {
-            k: [] for k in ("token_index", "exact_end_alignment", "prompt_n_tokens")
-        }
+        cols: dict[str, list[np.ndarray]] = {k: [] for k in _MODEL_KEYS}
         meta: dict[str, list[np.ndarray]] = {k: [] for k in SPAN_META_KEYS}
         doc_id_col: list[np.ndarray] = []
 
@@ -520,10 +589,9 @@ class EntityDetectionLM(RepresentationLM):
             "layers": np.asarray(self.layers, dtype=np.int64),
             "doc_ids": np.concatenate(doc_id_col, axis=0),
         }
-        for k, parts in cols.items():
-            out[k] = np.concatenate(parts, axis=0)
-        for k, parts in meta.items():
-            out[k] = np.concatenate(parts, axis=0)
+        for parts_by_key in (cols, meta):
+            for k, parts in parts_by_key.items():
+                out[k] = np.concatenate(parts, axis=0)
 
         n = len(out["doc_ids"])
         assert n == sum(len(it["spans"]) for v in by_doc.values() for it in v), "row count mismatch"
@@ -533,50 +601,101 @@ class EntityDetectionLM(RepresentationLM):
         for k, v in out.items():
             if k not in ("representations", "layers"):
                 assert len(v) == n, f"{k}: len {len(v)} != n {n}"
-        check_prompt_invariants(out)
+        check_row_invariants(out)
         return out
 
 
-def check_prompt_invariants(result: dict) -> None:
-    """Every ``(document, sample)`` group has exactly ``m`` rows, ``k`` of them
-    invalid, with a single ``(m, k)``, and list positions ``1..m``."""
-    key = np.char.add(np.char.add(result["doc_ids"], "|"), result["sample_index"].astype(str))
+# ----------------------------------------------------------------------
+# Checks and metrics
+
+
+def _prompt_groups(result: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Group spans by prompt, i.e. by ``(document, row_ordinal)``.
+
+    Args:
+        result: aggregated arrays with ``doc_ids`` and ``row_ordinal``.
+
+    Returns:
+        ``(keys, inverse)``: the sorted unique prompt keys and, per span, the index of
+        its prompt in ``keys``.
+    """
+    key = np.char.add(
+        np.char.add(result["doc_ids"], "|"), result["row_ordinal"].astype(str)
+    )
     uniq, inverse = np.unique(key, return_inverse=True)
-    inverse = inverse.reshape(-1)
-    counts = np.bincount(inverse)
-    invalid = np.bincount(inverse, weights=(~result["label_valid"]).astype(np.float64))
-    for name in ("m", "k"):
-        lo = np.full(len(uniq), np.iinfo(np.int64).max)
-        hi = np.full(len(uniq), np.iinfo(np.int64).min)
-        np.minimum.at(lo, inverse, result[name])
-        np.maximum.at(hi, inverse, result[name])
-        assert (lo == hi).all(), f"{name} is not constant within a prompt"
-        if name == "m":
-            assert (lo == counts).all(), "a prompt's row count != its recorded m"
-        else:
-            assert (lo == invalid.astype(np.int64)).all(), "a prompt's invalid count != its recorded k"
-    pos_sum = np.bincount(inverse, weights=result["list_position"].astype(np.float64))
-    assert (pos_sum == counts * (counts + 1) / 2).all(), "list positions are not 1..m"
+    return uniq, inverse.reshape(-1)
+
+
+def check_row_invariants(result: dict) -> None:
+    """Assert per-prompt label consistency on the aggregated arrays.
+
+    Within every ``(document, row_ordinal)`` group: ``row_k`` and ``row_error_type``
+    are constant, the number of invalid spans equals ``row_k``, a valid row has no
+    invalid span and vice versa, each invalid span's ``field_error_type`` equals the
+    row's, valid spans have an empty one, and ``field_position`` increases strictly
+    from 1.
+
+    Args:
+        result: aggregated arrays from ``_aggregate_rows``.
+
+    Raises:
+        AssertionError: any of the conditions above fails.
+    """
+    uniq, inv = _prompt_groups(result)
+    label_valid = result["label_valid"].astype(bool)
+    n_groups = len(uniq)
+    n_invalid = np.bincount(inv, weights=(~label_valid).astype(np.float64), minlength=n_groups)
+
+    row_k = result["row_k"]
+    lo = np.full(n_groups, np.iinfo(np.int64).max)
+    hi = np.full(n_groups, np.iinfo(np.int64).min)
+    np.minimum.at(lo, inv, row_k)
+    np.maximum.at(hi, inv, row_k)
+    assert (lo == hi).all(), "row_k is not constant within a prompt"
+    assert (lo == n_invalid.astype(np.int64)).all(), "a prompt's invalid-span count != its row_k"
+
+    ret, rot = result["row_error_type"], result["field_error_type"]
+    first = np.unique(inv, return_index=True)[1]
+    assert ((ret[first] == "") == (lo == 0)).all(), "row_error_type empty iff row_k == 0"
+    assert (ret == ret[first][inv]).all(), "row_error_type is not constant within a prompt"
+    assert (rot[~label_valid] == ret[~label_valid]).all(), "invalid span's error type != its row's"
+    assert (rot[label_valid] == "").all(), "valid span with a field_error_type"
+
+    pos = result["field_position"]
+    order = np.argsort(inv, kind="stable")
+    sp, si = pos[order], inv[order]
+    same = si[1:] == si[:-1]
+    assert (sp[1:][same] > sp[:-1][same]).all(), "field_position not increasing within a prompt"
+    assert (sp[np.r_[True, ~same]] == 1).all(), "field_position does not start at 1"
 
 
 def compute_metrics(result: dict) -> dict:
-    """Flat scalar counts and composition summaries (no judge verdict is read)."""
+    """Summarise span counts and prompt lengths of a run.
+
+    Args:
+        result: aggregated arrays from ``EntityDetectionLM.collect_rows``.
+
+    Returns:
+        Flat scalar dict: span, prompt, valid/invalid and per-error-type counts,
+        ``n_rows_with_mixed_entities``, ``exact_end_alignment_rate``,
+        ``n_distinct_quote_token_ids`` and min/max prompt length in tokens.
+    """
     label_valid = result["label_valid"].astype(bool)
-    invalid = ~label_valid
-    key = np.char.add(np.char.add(result["doc_ids"], "|"), result["sample_index"].astype(str))
-    _, first = np.unique(key, return_index=True)
-    m, k = result["m"][first], result["k"][first]
-    return {
+    uniq, inv = _prompt_groups(result)
+    n_invalid = np.bincount(inv, weights=(~label_valid).astype(np.float64), minlength=len(uniq))
+    n_spans_per = np.bincount(inv, minlength=len(uniq))
+    out = {
         "n_spans": int(len(label_valid)),
-        "n_prompts": int(len(first)),
+        "n_prompts": int(len(uniq)),
         "n_valid_spans": int(label_valid.sum()),
-        "n_invalid_spans": int(invalid.sum()),
-        "mean_m": float(m.mean()),
-        "max_m": int(m.max()),
-        "mean_k": float(k.mean()),
-        "mean_k_over_m": float((k / m).mean()),
+        "n_invalid_spans": int((~label_valid).sum()),
+        "n_rows_with_mixed_entities": int(((n_invalid > 0) & (n_invalid < n_spans_per)).sum()),
         "exact_end_alignment_rate": float(result["exact_end_alignment"].mean()),
-        "decoy_in_ocr_rate": float(result["decoy_in_ocr"][invalid].mean()) if invalid.any() else None,
+        "n_distinct_quote_token_ids": int(len(np.unique(result["token_id"]))),
         "min_prompt_n_tokens": int(result["prompt_n_tokens"].min()),
         "max_prompt_n_tokens": int(result["prompt_n_tokens"].max()),
     }
+    for et in ALL_ERROR_TYPES:
+        out[f"n_spans_{et}"] = int((result["field_error_type"] == et).sum())
+    assert sum(out[f"n_spans_{et}"] for et in ALL_ERROR_TYPES) == out["n_invalid_spans"]
+    return out
