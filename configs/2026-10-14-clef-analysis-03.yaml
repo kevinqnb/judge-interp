@@ -1,0 +1,25 @@
+id: 2026-10-14-clef-analysis-03
+project: judge-interp
+description: >-
+  2026-10-14-clef-analysis-02 without the entity_line run (that run was not made); every other value unchanged.
+  Analysis of the Clef-flash direct judge (entity detection, main; relation detection, line):
+  smECE with bootstrap CI and smooth reliability diagrams, P(valid) histogram, Brier skill score (reference =
+  the evaluated set's own label rate), AUROC, accuracy, and per-error-type accuracy, computed from the stored
+  P(true). No probe is fit. Needs 2026-10-14-clef-{entity-main,relation-line}-test-01 to have finished.
+seed: 0
+params:
+  # kind: entity | relation. bss_ref_rate: a float in (0, 1), or "evaluation_set_rate" (constant forecast at the
+  # evaluated set's own valid rate). Every run uses its own set's label rate.
+  runs:
+    - {label: entity_main, kind: entity, run_id: 2026-10-14-clef-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
+    - {label: relation_line, kind: relation, run_id: 2026-10-14-clef-relation-line-test-01, bss_ref_rate: evaluation_set_rate}
+  decision_threshold: 0.5
+  # smooth ECE (relplot) + bootstrap for its CI
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  # permutation null of the metrics: mean AUROC over n_shuffles label permutations must be within tolerance of 0.5
+  n_shuffles: 200
+  permutation_auroc_tolerance: 0.03
+  # -- scripts/submit.sh --analysis resources (CPU only; walltime is a placeholder) --
+  omp: 8
+  walltime: "01:00:00"

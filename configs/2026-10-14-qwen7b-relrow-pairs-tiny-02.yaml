@@ -1,0 +1,28 @@
+id: 2026-10-14-qwen7b-relrow-pairs-tiny-02
+project: judge-interp
+description: >-
+  Thread-cap check for the pair-based analysis/relation_detection_row.py, and a first batch run of its P(valid)
+  histogram + figures-dir metrics.json. Same as relrow-pairs-tiny-01 (first 100 documents of each relrow line
+  split, layer 20, controls ON) but with 16 slots, as in the job (8098591) that was SIGKILLed for using ~19.7 cores.
+  PREDICTIONS (stated before the run): (1) metrics identical to tiny-01 (same data/seed; the histogram and thread env
+  vars change no metric); (2) prob_histogram.png and analysis/figures/<id>/metrics.json exist;
+  (3) the log prints threadpool lines (numpy openblas, scipy openblas, sklearn openmp) each with 16 threads;
+  (4) qacct cpu / ru_wallclock <= 16 (the allocated slots), exit_status 0. If (4) fails, the env-var caps are
+  not sufficient: stop and use threadpoolctl.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-relrow-line-train-01
+  test_run_id: 2026-10-14-qwen7b-relrow-line-test-01
+  layer: 20
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 200
+  hist_n_bins: 20
+  run_controls: true
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  omp: 16
+  walltime: "00:30:00"
+  max_docs: 100
