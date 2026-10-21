@@ -29,6 +29,12 @@ export HF_HOME=/projectnb/mcnet/kevin/cache-hf
 # passed by submit.sh, empty for a normal experiment. BLAS threads follow the slots.
 if [ -n "${ANALYSIS_SCRIPT}" ]; then
     export OMP_NUM_THREADS="${NSLOTS:?NSLOTS not set -- not running under SGE}"
+    # numpy and scipy each bundle an OpenBLAS (and others ship MKL/numexpr/Accelerate), and
+    # OMP_NUM_THREADS alone does not cap all of them: jobs overran their slots (CPU/wall ~11-20x
+    # on 8-16 slots; 8098591 was SIGKILLed). Pin every pool to the slot count.
+    export OPENBLAS_NUM_THREADS="$NSLOTS" MKL_NUM_THREADS="$NSLOTS" NUMEXPR_NUM_THREADS="$NSLOTS" VECLIB_MAXIMUM_THREADS="$NSLOTS"
+    # Log which pools exist and their thread counts, to verify the caps took effect.
+    uv run --python 3.12 --extra analysis python -c "import numpy, scipy, sklearn; from threadpoolctl import threadpool_info; [print('threadpool:', d['internal_api'], d['num_threads'], d['filepath']) for d in threadpool_info()]"
     exec uv run --python 3.12 --extra analysis python "${ANALYSIS_SCRIPT}" "configs/${ID}.yaml"
 fi
 
