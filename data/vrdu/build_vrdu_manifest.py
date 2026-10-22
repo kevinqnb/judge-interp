@@ -20,7 +20,7 @@ No cluster job: this is local data preparation. Run it directly, after
 ``build_vrdu_invalids.py``:
 
     uv run --python 3.12 python data/vrdu/build_vrdu_manifest.py \\
-        --config configs/2026-10-21-vrdu-invalids-04.yaml
+        --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml
 """
 
 from __future__ import annotations

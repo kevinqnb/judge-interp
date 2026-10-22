@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data" / "vrdu")
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"
-CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-21-vrdu-invalids-04.yaml"
+CONFIG = Path(__file__).resolve().parent.parent / "data" / "vrdu" / "build-configs" / "2026-10-21-vrdu-invalids-04.yaml"
 PIVOT = 50
 DATE_FIELDS = ["program_start_date", "program_end_date"]
 KIND_OF = {"flight_from": "date", "flight_to": "date", "program_start_date": "date",
