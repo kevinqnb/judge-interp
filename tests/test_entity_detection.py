@@ -186,8 +186,7 @@ def _fake_result():
         "field_error_type": np.array(["", "", "", "cross_type", "cross_type", ""]),
         "label_valid": np.array([True, True, True, False, False, True]),
         "field_position": np.array([1, 2, 3, 1, 2, 3]),
-        "exact_end_alignment": np.array([True, True, False, True, True, True]),
-        "token_id": np.array([1, 1, 2, 1, 1, 2]),
+        "token_id": np.array([1, 1, 1, 1, 1, 1]),
         "prompt_n_tokens": np.array([10] * 3 + [12] * 3),
     }
 
@@ -198,7 +197,9 @@ def test_invariants_accept_good_and_reject_bad():
     m = er.compute_metrics(r, MAIN)
     assert (m["n_spans"], m["n_prompts"], m["n_invalid_spans"], m["n_spans_cross_type"]) == (6, 2, 2, 2)
     assert m["n_rows_with_mixed_entities"] == 1
-    assert m["n_distinct_quote_token_ids"] == 2
+    assert m["read_token_id"] == 1
+    with pytest.raises(AssertionError, match="different tokens"):  # one entity read at another token
+        er.compute_metrics({**r, "token_id": np.array([1, 1, 2, 1, 1, 1])}, MAIN)
     for key, val in (
         ("row_k", np.array([0, 0, 0, 1, 1, 1])),
         ("field_error_type", np.array(["", "", "", "cross_type", "", ""])),

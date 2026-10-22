@@ -13,9 +13,12 @@ that relation needs a dataset with ``supports_relation``); everything else lives
    span counts. No verdict is read: the model is never asked to answer.
 
 Rendering: only non-null fields are shown (a null field has no line). Every value is a JSON
-string followed by one pad space before its closing quote, and the query ends with a newline. Under byte-level BPE (Qwen2.5) this
-makes the closing quote tokenize the same way on every line and keeps the value's last
-character out of the quote token, so the read position carries no entity text.
+string followed by one pad space before its closing quote, and the query ends with a newline.
+The tokenizers (Qwen2.5, Llama-3.1) pre-tokenize punctuation plus following newlines as one unit,
+so the pad, the closing quote and the newline become one token, ``READ_TOKEN`` (' "\\n'). The pad is
+what keeps the value's last character out of it (without it, a value ending in ``)`` or ``.``
+would be read at ``)"\\n`` etc.), so the read position carries no entity text. Every entity of every
+prompt must be read at exactly this token; ``judge_row`` and ``compute_metrics`` assert it.
 
 Labels are per entity: ``field_errors[field]`` is null for a correct entity and
 ``{"error_type", "source"}`` for a corrupted one. Null fields have no quote and no span.
@@ -40,6 +43,7 @@ from judge_interp.representationlm import RepresentationLM, to_npz_array
 
 _SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
 _PAD = " "  # inserted before each closing quote; see the module docstring
+READ_TOKEN = _PAD + '"\n'  # the one token every entity is read at: pad, closing quote and newline merged
 
 
 # Span metadata columns, in shard order. All values are str / int / bool.
@@ -49,7 +53,7 @@ SPAN_META_KEYS = (
     "source_line_index", "exchanged_with",
 )
 # Per-span columns the model side adds.
-_MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "exact_end_alignment", "prompt_n_tokens")
+_MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "prompt_n_tokens")
 
 
 def row_index(row: dict, spec: DatasetSpec) -> int | None:
@@ -333,10 +337,8 @@ class RowDetectionLM(RepresentationLM):
 
         Returns:
             Dict with ``representations`` (``{layer: float32 [n_spans, hidden]}``),
-            ``token_index``, ``token_id``, ``token_n_chars`` and ``exact_end_alignment``
-            (each ``[n_spans]``), and ``prompt_n_tokens``. ``exact_end_alignment`` is
-            true when the token is exactly the quote; otherwise BPE merged the quote
-            with a neighbouring character.
+            ``token_index``, ``token_id`` and ``token_n_chars`` (each ``[n_spans]``), and
+            ``prompt_n_tokens``. Every ``token_id`` is that of ``READ_TOKEN``.
 
         Raises:
             ValueError: ``spans`` is empty or the prompt exceeds
@@ -356,7 +358,6 @@ class RowDetectionLM(RepresentationLM):
         token_index: list[int] = []
         token_id: list[int] = []
         n_chars: list[int] = []
-        exact: list[bool] = []
         for span in spans:
             assert span["char_end"] - span["char_start"] == 1, "a span must be exactly one character"
             pos = shift + span["char_start"]
@@ -368,13 +369,12 @@ class RowDetectionLM(RepresentationLM):
                 f"{span['field']!r}: token {idx} starts outside the EXTRACTED RECORD block"
             )
             tid = int(input_ids[idx])
-            assert '"' in self.tokenizer.decode([tid]), (
-                f"token {idx} ({self.tokenizer.decode([tid])!r}) covering a closing quote has no quote"
+            assert self.tokenizer.decode([tid]) == READ_TOKEN, (
+                f"{span['field']!r}: read token {idx} is {self.tokenizer.decode([tid])!r}, expected {READ_TOKEN!r}"
             )
             token_index.append(idx)
             token_id.append(tid)
             n_chars.append(e - s)
-            exact.append((s, e) == (pos, pos + 1))
         assert len(set(token_index)) == len(token_index), "two quotes resolved to the same token"
         idx_tensor = torch.tensor(token_index, dtype=torch.long)
 
@@ -402,7 +402,6 @@ class RowDetectionLM(RepresentationLM):
             "token_index": np.asarray(token_index, dtype=np.int64),
             "token_id": np.asarray(token_id, dtype=np.int64),
             "token_n_chars": np.asarray(n_chars, dtype=np.int64),
-            "exact_end_alignment": np.asarray(exact, dtype=bool),
             "prompt_n_tokens": prompt_n_tokens,
         }
 
@@ -496,7 +495,7 @@ class RowDetectionLM(RepresentationLM):
             n = len(it["spans"])
             for L in self.layers:
                 per_layer[L].append(res["representations"][L])
-            for k in ("token_index", "token_id", "token_n_chars", "exact_end_alignment"):
+            for k in ("token_index", "token_id", "token_n_chars"):
                 cols[k].extend(res[k].tolist())
             cols["prompt_n_tokens"].extend([res["prompt_n_tokens"]] * n)
             for sp in it["spans"]:
@@ -643,10 +642,15 @@ def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
 
     Returns:
         Flat scalar dict: span, prompt, valid/invalid and per-error-type counts,
-        ``n_rows_with_mixed_entities``, ``exact_end_alignment_rate``,
-        ``n_distinct_quote_token_ids`` and min/max prompt length in tokens.
+        ``n_rows_with_mixed_entities``, ``read_token_id`` and min/max prompt length in tokens.
+
+    Raises:
+        AssertionError: the entities were not all read at one token id (``READ_TOKEN``).
     """
     label_valid = result["label_valid"].astype(bool)
+    read_ids = np.unique(result["token_id"])
+    assert len(read_ids) == 1, f"entities were read at {len(read_ids)} different tokens: {read_ids.tolist()}"
+    read_token_id = int(read_ids[0])
     uniq, inv = _prompt_groups(result)
     n_invalid = np.bincount(inv, weights=(~label_valid).astype(np.float64), minlength=len(uniq))
     n_spans_per = np.bincount(inv, minlength=len(uniq))
@@ -656,8 +660,7 @@ def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
         "n_valid_spans": int(label_valid.sum()),
         "n_invalid_spans": int((~label_valid).sum()),
         "n_rows_with_mixed_entities": int(((n_invalid > 0) & (n_invalid < n_spans_per)).sum()),
-        "exact_end_alignment_rate": float(result["exact_end_alignment"].mean()),
-        "n_distinct_quote_token_ids": int(len(np.unique(result["token_id"]))),
+        "read_token_id": read_token_id,
         "min_prompt_n_tokens": int(result["prompt_n_tokens"].min()),
         "max_prompt_n_tokens": int(result["prompt_n_tokens"].max()),
     }
