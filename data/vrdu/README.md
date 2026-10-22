@@ -2,13 +2,14 @@
 
 VRDU ad-buy-form corpus (641 documents) turned into extraction-validation rows for the judge:
 every row is one extraction, either **valid** (copied from the annotations) or **invalid**
-(valid values deliberately corrupted). Three scripts build everything, in this order:
+(valid values deliberately corrupted). Four scripts build everything, in this order:
 
 | script | writes | config |
 |---|---|---|
 | `build_vrdu_dataset.py` | `main/`, `line/` `*_base.json` (valid rows only), `ocr/`, `directory.json` | CLI args (split ratio, seed 0) |
 | `build_vrdu_invalids.py` | `main/`, `line/` `{train,test}.json`, `invalids.json` | `data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml` |
 | `build_vrdu_manifest.py` | `manifest.json` (matched evaluation subset) | `params.manifest` in the same config |
+| `build_vrdu_subsets.py` | `subsets.json` (shared random field subsets, line only) | `params.subsets` in the same config |
 
 Build configs live in `build-configs/` (one per invalids version, `-01` to `-04`; only the newest
 describes the data on disk). Run each script directly (local data prep, no cluster job), e.g.
@@ -112,6 +113,37 @@ same exact `k`. `k_values`: main 1-6 (507 / 126 base rows), line 1-3 (2,509 / 42
 The manifest records the invalids config id and sha256 of each split file, and
 `load_manifest_split` refuses one that is stale. `data/vrdu/build_vrdu_manifest.py` documents the
 selection; it is not yet wired into `row_detection`.
+
+## Random field subsets (`subsets.json`, line only)
+
+The shared samples for comparing Clef and the probe, and for averaging over random subsets.
+A **sample** is an ordered subset of one line row's non-null fields: `fields` is f1..fn in a random
+order, for the chain-rule factorisation P(f1..fn) = P(fn|f1..fn-1)...P(f2|f1)P(f1). It is **valid iff none
+of its fields is in the row's `invalid_fields`**, so a subset of an invalid row that avoids every
+corrupted field is a valid sample. Per source row, `samples_per_row` distinct *unordered* subsets of size
+>= `min_subset_size` are drawn uniformly, then each gets a uniformly random permutation (ordered tuples
+are not enumerated; that would weight a subset by n!). Each replicate is cut to exactly `n_per_class`
+valid and invalid samples. Replicate r of a split uses `default_rng([seed, split index, r])`, so replicates
+are independent and raising `n_replicates` leaves the earlier ones unchanged. The source rows are
+`manifest.json`'s rows (`source: manifest`) or all rows (`all_rows`); `params.subsets` in the config holds
+every value (currently 5 replicates, 4 subsets per row, size >= 2, 3,800 / 950 per class train / test).
+
+The file stores `sample_id` strings, `doc|line_index|error_type or valid|k|f1+f2+...` (the order is part
+of the id), plus the sha256 of every input. Read it only through `subsets.load_subsets(data_root, split,
+replicate)`: it refuses a stale file, re-derives each sample's row, fields and label, and checks the class
+balance. Run it from the repo root, after the manifest:
+`uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
+
+Caveats:
+- **Subset size leaks the label.** A larger subset is more likely to contain a corrupted field. In
+  replicate 0 (train) 58% of valid samples have 2 fields against 39% of invalid ones. Report per-size
+  results or a size-only baseline.
+- **Most valid samples come from corrupted rows** (e.g. 1,420 of 3,800 train valid samples in replicate 0
+  are from valid rows), so "valid" mixes clean rows with the clean parts of corrupted ones.
+- Source rows from the manifest carry its selection bias (see Known limitations); `n_rows_too_small`
+  and `n_rows_fewer_subsets_than_requested` per replicate are in the file's `stats`.
+- Replicates overlap very little (pairwise Jaccard of ids ~0.005), partly because the order is part of the id.
+- A row's samples, and the rows of one base row, are not independent; resample by document.
 
 ## Known limitations
 

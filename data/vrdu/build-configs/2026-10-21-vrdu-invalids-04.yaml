@@ -65,3 +65,19 @@ params:
     line:
       k_values: [1, 2, 3]
       n_base_rows: {train: null, test: null}
+
+  # Read only by build_vrdu_subsets.py (line dataset only; like `manifest`, it does not affect the
+  # generated rows). Random ordered field subsets of a line row, the shared samples for Clef and the
+  # probe: per source row, samples_per_row distinct unordered subsets (>= min_subset_size non-null
+  # fields), each given a uniformly random field order; a sample is valid iff none of its fields is in
+  # the row's invalid_fields. Each replicate is then cut to exactly n_per_class valid and n_per_class
+  # invalid samples. Replicate r of split s uses rng [seed, split index, r].
+  # source: `manifest` = the rows of manifest.json (equal cells per error type and k);
+  #         `all_rows` = every row of {train,test}.json.
+  subsets:
+    seed: 0
+    source: manifest
+    n_replicates: 5
+    samples_per_row: 4
+    min_subset_size: 2
+    n_per_class: {train: 3800, test: 950}
