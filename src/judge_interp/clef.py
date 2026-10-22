@@ -109,7 +109,7 @@ def entity_question(field: str, spec: DatasetSpec) -> dict:
         "type": "noul",
         "instructions": _ENTITY_QUESTION.format(
             record_description=spec.record_description, context_description=spec.context_description,
-            field=field, desc=spec.field_descriptions[field], criteria=edr.build_criteria(spec),
+            field=field, desc=spec.field_descriptions[field], criteria=edr.build_criteria(spec, "as this field is described"),
         ),
     }
 

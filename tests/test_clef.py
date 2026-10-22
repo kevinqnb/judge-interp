@@ -111,6 +111,13 @@ def test_relation_question_matches_the_qwen_framing():
     assert "serves as the field" not in text and "not what its field denotes" not in text
 
 
+def test_criterion_two_points_at_the_field_list_only_where_there_is_one():
+    clef_q = clef.entity_question("property", SPECS["main"])["instructions"]
+    assert "as this field is described" in clef_q and "list of fields" not in clef_q
+    qwen = edr.build_instructions(SPECS["main"])
+    assert "as described in the list of fields above" in qwen and "as this field is described" not in qwen
+
+
 def test_entity_question_forbids_outside_knowledge_and_state_has_no_null_line():
     items = _entity_items("main")
     contexts = {it["document_id"]: it["context"] for it in items}

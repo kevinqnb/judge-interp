@@ -48,15 +48,24 @@ For each field in the record, answer with exactly one line in the form `<field>:
 
 EXPLICIT_CRITERION = """({n}) Explicit support. Every value must appear explicitly in the context. A value may differ from the context only in trivial surface formatting (whitespace, line breaks, letter case, and equivalent number forms such as 10 vs 10.0 or 1,000 vs 1000). A value produced by paraphrasing, summarising, inferring, rounding, unit conversion, or any other transformation of the text is NOT explicit support."""
 
-_TYPE_CRITERION = """({n}) Type correspondence. The field name is a claim about what the value is, and it must hold in this document: the value must be what that field denotes here, as described in the list of fields above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field fails this criterion, even though it is a genuine entity of the document. So does a value that belongs to a different part of the document than the record being judged.{hint} Check each value against the role its field requires, not merely against the text."""
+_TYPE_CRITERION = """({n}) Type correspondence. The field name is a claim about what the value is, and it must hold in this document: the value must be what that field denotes here, {described}. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field fails this criterion, even though it is a genuine entity of the document. So does a value that belongs to a different part of the document than the record being judged.{hint} Check each value against the role its field requires, not merely against the text."""
 
 
-def build_criteria(spec: DatasetSpec) -> str:
-    """The numbered validity criteria of the instructions (also used by ``clef``)."""
+QWEN_DESCRIBED = "as described in the list of fields above"
+
+
+def build_criteria(spec: DatasetSpec, described: str) -> str:
+    """The numbered validity criteria of the instructions (also used by ``clef``).
+
+    Args:
+        spec: the dataset.
+        described: how criterion 2 points at the field's description; it depends on whether
+            the prompt has a field list (``QWEN_DESCRIBED``) or not (Clef).
+    """
     return "\n".join([
         EXPLICIT_CRITERION.format(n=1),
         _TYPE_CRITERION.format(
-            n=2, hint="" if spec.type_confusion_hint is None else f" For example, {spec.type_confusion_hint}."
+            n=2, described=described, hint="" if spec.type_confusion_hint is None else f" For example, {spec.type_confusion_hint}."
         ),
     ])
 
@@ -66,7 +75,7 @@ def build_instructions(spec: DatasetSpec) -> str:
     types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in spec.fields)
     return _HEADER.format(
         record_description=spec.record_description, context_description=spec.context_description, types=types,
-        criteria=build_criteria(spec),
+        criteria=build_criteria(spec, QWEN_DESCRIBED),
     )
 
 
