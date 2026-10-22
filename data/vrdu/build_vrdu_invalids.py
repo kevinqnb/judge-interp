@@ -96,8 +96,9 @@ date fields are coupled: a value must keep ``from <= to`` (for every error type,
 cross_type included; see above), so whether a date field can be corrupted depends on whether
 its partner is corrupted too (and, for the intra-document chain, on the partner's
 *current* -- possibly already-corrupted -- value). A consequence for cross_type:
-two date fields of one record cannot be directly exchanged (that would reverse
-their order) unless they hold equal dates, which the eligibility rule excludes.
+two PARSEABLE date fields of one record cannot be directly exchanged (that would
+reverse their order; equal dates are excluded by the eligibility rule), but a pair
+with an OCR-fragment side can, since a fragment has no position in time.
 
 No cluster job: this is local data preparation. Run it directly:
 
