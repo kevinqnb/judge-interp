@@ -22,3 +22,18 @@ Plan changes (summary): do not change Clef or the probe, only the data structure
 ### Commits
 
 1231eca VRDU line: shared random ordered field subsets (subsets.json) and loader
+
+## Session 2026-10-22 (balancing and close-out)
+
+### Prompts
+
+Summary: asked about label leakage in the random subsets and whether stratified balancing was feasible at 3,800 / 950; chose field-set matching ("I think field set is the more defensible choice") with the per-set target taken from the real (valid) rows rather than from the draw; asked whether error types would stay equal and approved a tolerance check ("Good plan, yes go ahead with this"); then asked for a concise README description of the subset composition, including the total number of randomized sets to average over, and a closed-out devlog.
+
+### Implemented
+
+Subset size and field presence predicted the label (test AUROC 0.63 / 0.65 for a logistic regression on either alone). `data/vrdu/build_vrdu_subsets.py` now has `balance_by: field_set`, which gives both classes the same number of samples for every set of fields, with each set's share taken from all subsets of the source valid rows; those baselines drop to 0.50. The invalid class must keep every error type within `max_error_type_share_deviation` of an equal share, asserted by the builder and by `data/vrdu/subsets.py`. Both keys are in `params.subsets` of `data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`. `subsets.json` was regenerated (5 replicates per split) and `data/vrdu/README.md` has an at-a-glance summary. Clef and the probe are still not wired to it.
+
+### Commits
+
+50b850f VRDU subsets: balance classes per field set, check error-type shares
+88a154f data/vrdu/README: at-a-glance summary of the random subset sets
