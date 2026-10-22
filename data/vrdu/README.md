@@ -116,76 +116,43 @@ selection; it is not yet wired into `row_detection`.
 
 ## Random field subsets (`subsets.json`, line only)
 
-**At a glance.** `subsets.json` holds **5 replicates** per split, each an independent random evaluation set;
-averaging is over those 5 (mean and spread of any metric). Per replicate:
+The shared evaluation samples for Clef and the probe. `subsets.json` holds **5 replicates** per split, each an
+independent random evaluation set; metrics are averaged over the 5.
 
-| | train | test |
+| per replicate | train | test |
 |---|---|---|
 | samples | 7,600 (3,800 valid + 3,800 invalid) | 1,900 (950 + 950) |
-| source rows (manifest) | 25,090 from 2,509 base line items | 4,280 from 428 base line items |
+| source rows (manifest) | 25,090 (2,509 line items) | 4,280 (428 line items) |
 
-That is 10 sets (5 train + 5 test) and 47,500 samples in all (the same underlying rows are reused across replicates).
+That is 10 sets and 47,500 samples; replicates reuse the same rows but draw different subsets.
 
-- **Sample:** a random subset of 2 to 5 of a line item's non-null fields, in a random order. Valid if none of
-  its fields is corrupted, otherwise invalid.
-- **Composition:** the two classes have identical counts for every set of fields (sizes 2 / 3 / 4 / 5 are 42% /
-  38% / 17% / 3%), so subset size and which fields are present say nothing about the label. The invalid class is about a
-  third each `inter_document`, `intra_document` and `cross_type`. 45% of the valid samples come from clean rows,
-  the rest from the uncorrupted parts of corrupted rows.
-- **Replicates:** drawn independently (their sample ids almost never coincide), reproducible from the seed, and
-  fixed in the file so Clef and the probe see exactly the same samples.
+**A sample** is a random subset of 2 to 5 of a line item's non-null fields, in a random order (for the chain
+rule P(f1..fn) = P(fn|f1..fn-1)...P(f1)). It is valid iff none of its fields is corrupted, so a subset of a
+corrupted row that avoids the corrupted fields is valid. Per source row, 4 distinct unordered subsets are drawn,
+then each is permuted.
 
-Details follow.
+**Balancing.** Both classes get exactly the same number of samples for every set of fields (`balance_by:
+field_set`), so subset size and field presence say nothing about the label. Without this, size alone gave
+test AUROC 0.63 and field presence 0.65; now 0.50. A set's share is its share among all subsets of the source
+valid rows (sizes 2 / 3 / 4 / 5: 42% / 38% / 17% / 3%). The invalid class is about a third each
+`inter_document`, `intra_document` and `cross_type` (asserted within 0.03).
 
-The shared samples for comparing Clef and the probe, and for averaging over random subsets.
-A **sample** is an ordered subset of one line row's non-null fields: `fields` is f1..fn in a random
-order, for the chain-rule factorisation P(f1..fn) = P(fn|f1..fn-1)...P(f2|f1)P(f1). It is **valid iff none
-of its fields is in the row's `invalid_fields`**, so a subset of an invalid row that avoids every
-corrupted field is a valid sample. Per source row, `samples_per_row` distinct *unordered* subsets of size
->= `min_subset_size` are drawn uniformly, then each gets a uniformly random permutation (ordered tuples
-are not enumerated; that would weight a subset by n!). The source rows are `manifest.json`'s rows
-(`source: manifest`) or all rows (`all_rows`). Replicate r of a split uses `default_rng([seed, split index,
-r])`, so replicates are independent and raising `n_replicates` leaves the earlier ones unchanged.
-`params.subsets` in the config holds every value (currently 5 replicates, 4 subsets per row, size >= 2,
-3,800 / 950 per class train / test).
-
-**Balancing (`balance_by`).** Each replicate has exactly `n_per_class` valid and invalid samples. With
-`balance_by: none` only the class totals are fixed, and then the label is predictable from the sample's
-shape: a larger subset is more likely to contain a corrupted field (train P(valid) = 0.60 / 0.46 / 0.31 /
-0.21 at 2 / 3 / 4 / 5 fields), and the fields present differ too (`sub_amount`, filled in by corruption, marks
-a corrupted row more often). A logistic regression on the test split reaches AUROC 0.63 from size alone and
-0.65 from which fields are present (first field: 0.52), without reading the document. The committed file uses
-`balance_by: field_set`: both classes get **exactly the same number of samples for every set of fields** (so
-the same sizes), and those baselines drop to 0.50 (checked for replicates 0 and 1; first field 0.49 to 0.50).
-A set's target share is its share among *all* subsets (size >= `min_subset_size`, equal weight) of the source
-*valid* rows. It therefore depends only on which fields real line items have, not on the corruption, the error
-types or `samples_per_row` (the draw cap alone moves the full-set share from 3.3% to 2.7%). Sizes 2 / 3 / 4 / 5
-get 41.7% / 37.9% / 17.3% / 3.1%. Counts use largest-remainder rounding, and a set whose valid or invalid pool is
-too small raises. Train ceiling is ~7,900 and test ~1,340 samples per class (the full 5-field set binds), so
-3,800 / 950 fits; raising `samples_per_row` (up to 26 for a 5-field row) enlarges the pool.
-
-The file stores `sample_id` strings, `doc|line_index|error_type or valid|k|f1+f2+...` (the order is part
-of the id), plus the sha256 of every input and per-replicate `stats`. Read it only through
-`subsets.load_subsets(data_root, split, replicate)`: it refuses a stale file, re-derives each sample's row,
-fields and label, and checks the class balance, the equal per-set counts and the error-type shares. Run it
-from the repo root, after the manifest:
+**Use.** Read it only through `subsets.load_subsets(data_root, split, replicate)`, which refuses a stale file
+and re-checks every sample against its row. `sample_id` is `doc|line_index|error_type|k|f1+f2+...`; the
+field order is part of the id. Rebuild (repo root, after the manifest), with all values in `params.subsets` of
+the config:
 `uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
+Replicate r uses `default_rng([seed, split index, r])`; raising `n_replicates` leaves earlier ones unchanged.
 
 Caveats:
-- **Error types are only approximately equal.** The manifest gives every error type the same number of
-  rows, and random selection keeps the invalid class near an equal share (largest deviation 0.024 over all
-  10 replicates; train ~0.01). `max_error_type_share_deviation` (0.03) is asserted by the builder and loader.
-  `cross_type` never touches `channel` or `program_desc`, so a sample made only of those two fields can never be a
-  cross_type error: within that set the invalid class is inter / intra only.
-- **The valid class is a mixture.** A subset of a corrupted row that avoids every corrupted field is a valid
-  sample (its values are the originals). 45% of the valid samples come from clean rows (37% with `none`), the
-  rest from corrupted rows, so a per-error-type breakdown of the valid class is meaningless.
-- **Equal field sets does not remove every tell.** The values themselves (a filled `sub_amount`, an OCR fragment) can
-  still differ between classes; keep a baseline in every report.
-- Source rows from the manifest carry its selection bias (see Known limitations); `n_rows_too_small` and
-  `n_rows_fewer_subsets_than_requested` per replicate are in the file's `stats`.
-- Replicates overlap very little (pairwise Jaccard of ids ~0.004), partly because the order is part of the id.
-- A row's samples, and the rows of one base row, are not independent; resample by document.
+- 45% of valid samples come from clean rows, the rest from the uncorrupted parts of corrupted rows, so a
+  per-error-type breakdown of the valid class is meaningless.
+- `cross_type` never touches `channel` or `program_desc`, so a sample of only those two is never a
+  cross_type error.
+- Matching field sets does not remove value-level tells (a filled `sub_amount`, an OCR fragment); keep a
+  baseline in every report.
+- Samples from one row, and rows of one line item, are not independent; resample by document. Source rows carry
+  the manifest's selection bias (see Known limitations).
 
 ## Known limitations
 
