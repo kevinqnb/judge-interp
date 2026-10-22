@@ -44,7 +44,12 @@ import numpy as np
 import yaml
 from sklearn.metrics import roc_auc_score
 
-from judge_interp.prompts import LINE_FIELDS
+from judge_interp.dataset_spec import load_dataset_spec
+
+# The VRDU line-item field order (formerly judge_interp.prompts.LINE_FIELDS).
+LINE_FIELDS = list(
+    load_dataset_spec(Path(__file__).resolve().parents[1] / "experiments" / "dataset-configs" / "vrdu_line.py").fields
+)
 
 _spec = importlib.util.spec_from_file_location("analysis_entity_detection", Path(__file__).parent / "entity_detection.py")
 er = importlib.util.module_from_spec(_spec)
