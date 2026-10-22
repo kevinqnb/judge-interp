@@ -116,6 +116,27 @@ selection; it is not yet wired into `row_detection`.
 
 ## Random field subsets (`subsets.json`, line only)
 
+**At a glance.** `subsets.json` holds **5 replicates** per split, each an independent random evaluation set;
+averaging is over those 5 (mean and spread of any metric). Per replicate:
+
+| | train | test |
+|---|---|---|
+| samples | 7,600 (3,800 valid + 3,800 invalid) | 1,900 (950 + 950) |
+| source rows (manifest) | 25,090 from 2,509 base line items | 4,280 from 428 base line items |
+
+That is 10 sets (5 train + 5 test) and 47,500 samples in all (the same underlying rows are reused across replicates).
+
+- **Sample:** a random subset of 2 to 5 of a line item's non-null fields, in a random order. Valid if none of
+  its fields is corrupted, otherwise invalid.
+- **Composition:** the two classes have identical counts for every set of fields (sizes 2 / 3 / 4 / 5 are 42% /
+  38% / 17% / 3%), so subset size and which fields are present say nothing about the label. The invalid class is about a
+  third each `inter_document`, `intra_document` and `cross_type`. 45% of the valid samples come from clean rows,
+  the rest from the uncorrupted parts of corrupted rows.
+- **Replicates:** drawn independently (their sample ids almost never coincide), reproducible from the seed, and
+  fixed in the file so Clef and the probe see exactly the same samples.
+
+Details follow.
+
 The shared samples for comparing Clef and the probe, and for averaging over random subsets.
 A **sample** is an ordered subset of one line row's non-null fields: `fields` is f1..fn in a random
 order, for the chain-rule factorisation P(f1..fn) = P(fn|f1..fn-1)...P(f2|f1)P(f1). It is **valid iff none
