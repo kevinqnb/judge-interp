@@ -1,0 +1,13 @@
+# Model config: Cloudflare clef-flash, the direct judge of the clef_* tasks.
+# Everything that identifies the model and how its inputs are encoded. Experiment configs point
+# here with `model_config:`; the runner snapshots this file into the run directory.
+model: Cloudflare/clef-flash
+# Full commit hash, not a branch or tag: weights and release code are both fetched at it.
+revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
+release_code:
+  file: joint_schema_model.py
+  # sha256 of the file at `revision`; load_release_code refuses a file that does not match.
+  sha256: 0e304cf7c6500e8bb59bef7e2afd2c6373f82596dfb3b57d1aa93c175e2dc3a3
+dtype: bfloat16
+# Token budget per record (state + questions); longer records are excluded or raise, never truncated.
+max_length: 16384

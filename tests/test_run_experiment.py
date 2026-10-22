@@ -59,3 +59,28 @@ def test_removed_tasks_are_rejected(tmp_path, task):
     p.write_text(yaml.safe_dump({**cfg, "task": task}))
     with pytest.raises(ValueError, match="task must be one of"):
         run.load_config(p)
+
+
+CLEF_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-14-clef-relation-smoke-01.yaml"
+
+
+def test_clef_config_requires_model_config_and_rejects_inline_model_keys(tmp_path):
+    import yaml
+
+    cfg = run.load_config(CLEF_CONFIG)
+    assert cfg["task"] == "clef_relation_row"
+    broken = {**cfg, "params": {k: v for k, v in cfg["params"].items() if k != "model_config"}}
+    p = tmp_path / f"{cfg['id']}.yaml"
+    p.write_text(yaml.safe_dump(broken))
+    with pytest.raises(KeyError, match="model_config"):
+        run.load_config(p)
+    for key in ("revision", "dtype", "max_length", "model"):
+        p.write_text(yaml.safe_dump({**cfg, "params": {**cfg["params"], key: "x"}}))
+        with pytest.raises(KeyError, match=key):
+            run.load_config(p)
+
+
+def test_every_task_module_implements_the_task_interface():
+    for task, module in run._TASK_MODULES.items():
+        assert task in module.TASK_PARAMS and callable(module.run)
+    assert set(run._TASK_PARAMS) == set(run._TASK_MODULES)

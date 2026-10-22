@@ -668,3 +668,58 @@ def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
     assert sum(out[f"n_spans_{et}"] for et in spec.error_types) == out["n_invalid_spans"]
     return out
 
+
+
+# ----------------------------------------------------------------------
+# Run
+
+ROW_PARAMS = (
+    "data_root", "model", "dataset_config", "split", "layers", "dtype", "device",
+    "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
+)
+
+
+def write_span_representations(result: dict, path: Path) -> None:
+    """Write a ``collect_rows`` result to a compressed ``.npz``.
+
+    Args:
+        result: ``collect_rows`` output; ``representations`` is stored as ``rep_<layer>``
+            and every other entry under its own key.
+        path: destination file.
+    """
+    payload = {f"rep_{L}": result["representations"][L] for L in result["layers"].tolist()}
+    for k, v in result.items():
+        if k == "representations":
+            continue
+        payload[k] = v
+    np.savez_compressed(path, **payload)
+
+
+def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build_items_fn, lm_class) -> dict:
+    """Collect span representations for a row task and write ``artifacts/span_representations.npz``.
+
+    Args:
+        cfg: the config (``id``, ``seed`` and ``params`` as ``ROW_PARAMS``).
+        spec: the dataset named by ``params["dataset_config"]``.
+        run_dir: run output directory; per-document shards go under ``artifacts/cache``.
+        repo_root: directory that ``params["data_root"]`` is relative to.
+        build_items_fn: the task's ``build_items``.
+        lm_class: the task's ``RowDetectionLM`` subclass.
+
+    Returns:
+        ``compute_metrics`` output.
+    """
+    from transformers import AutoTokenizer
+
+    p, seed = cfg["params"], int(cfg["seed"])
+    rlm = lm_class(model_name=p["model"], layers=p["layers"], device=p["device"], dtype=p["dtype"], verbose=True)
+    limit = p["context_token_limit"]
+    tokenizer = AutoTokenizer.from_pretrained(p["model"]) if limit is not None else None
+    items = build_items_fn(spec, p, seed, repo_root, tokenizer)
+    print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={spec.name}, split={p['split']}")
+    result = rlm.collect_rows(
+        items, cache_dir=run_dir / "artifacts" / "cache", verify_read_point=p["verify_read_point"],
+    )
+    (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
+    return compute_metrics(result, spec)

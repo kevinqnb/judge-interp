@@ -16,6 +16,7 @@ from pathlib import Path
 from judge_interp.dataset_spec import DatasetSpec
 from judge_interp.row_detection import (  # noqa: F401  (re-exported: the task's public API)
     SPAN_META_KEYS,
+    ROW_PARAMS,
     RowDetectionLM,
     check_row,
     check_row_invariants,
@@ -25,6 +26,7 @@ from judge_interp.row_detection import (  # noqa: F401  (re-exported: the task's
     select_rows,
 )
 from judge_interp.row_detection import build_items as _build_items
+from judge_interp.row_detection import run_rows
 
 
 _HEADER = """You are validating a record extracted from a document by an information-extraction pipeline.
@@ -79,3 +81,12 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
 
 class EntityDetectionLM(RowDetectionLM):
     """``RowDetectionLM`` for the entity-detection instructions."""
+
+
+TASK_PARAMS = {"entity_detection": ROW_PARAMS}
+
+
+def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg: None) -> dict:
+    """Run the task: see ``row_detection.run_rows``. ``model_cfg`` must be ``None`` (no model config)."""
+    assert model_cfg is None
+    return run_rows(cfg, spec, run_dir, repo_root, build_items, EntityDetectionLM)

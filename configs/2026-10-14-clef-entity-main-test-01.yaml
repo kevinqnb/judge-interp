@@ -8,15 +8,11 @@ description: >-
 seed: 0
 params:
   data_root: data
-  model: Cloudflare/clef-flash
-  # pinned HF revision of the model + joint_schema_model.py release code
-  revision: 8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3
-  dataset: main
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  model_config: experiments/model-configs/clef.yaml
   split: test
   device: cuda
-  dtype: bfloat16
   # encode_record silently truncates beyond this; records longer than it are handled per overlong_docs.
-  max_length: 16384
   # "exclude": drop records over max_length and list them (artifacts/excluded_overlong.json); "error": raise.
   overlong_docs: exclude
   # "none": the document's own OCR text; "other_document": another document's (ablation: AUROC should fall toward 0.5).

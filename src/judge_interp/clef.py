@@ -26,6 +26,7 @@ record share attention in the model, so they are not independent.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -40,6 +41,15 @@ from judge_interp import relation_detection as rdr
 from judge_interp.dataset_spec import DatasetSpec, load_dataset_spec
 
 OPTION_IDS = ("true", "false")  # joint_schema_model.question_options order for a noul question
+TASKS = ("clef_entity_row", "clef_relation_row")
+_COMMON_PARAMS = (
+    "data_root", "model_config", "dataset_config", "split", "device", "overlong_docs", "context_control",
+    "determinism_check_n", "known_answer_check", "error_types", "rows_per_stratum",
+)
+TASK_PARAMS: dict[str, tuple[str, ...]] = {
+    "clef_entity_row": _COMMON_PARAMS,
+    "clef_relation_row": _COMMON_PARAMS + ("samples_per_row", "min_subset_size", "n_per_class", "subset_rng_stream"),
+}
 OVERLONG_MODES = ("exclude", "error")
 CONTEXT_CONTROLS = ("none", "other_document")
 _DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
@@ -392,19 +402,27 @@ def swap_contexts(contexts: dict[str, str], seed: int) -> dict[str, str]:
 # Model side
 
 
-def load_release_code(model: str, revision: str):
-    """Import the release code ``joint_schema_model.py`` at a pinned revision (no weights).
+def load_release_code(model: str, revision: str, filename: str, sha256: str):
+    """Import the release code at a pinned revision (no weights), after checking its hash.
 
     Args:
         model: HF repo id.
-        revision: HF revision to download the file from.
+        revision: HF commit hash to download the file from.
+        filename: the release-code file in the repo (``joint_schema_model.py``).
+        sha256: expected sha256 hex digest of the file.
 
     Returns:
         The imported module.
+
+    Raises:
+        ValueError: the downloaded file's digest differs from ``sha256``.
     """
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(model, "joint_schema_model.py", revision=revision)
+    path = hf_hub_download(model, filename, revision=revision)
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if digest != sha256:
+        raise ValueError(f"{model}@{revision}/{filename}: sha256 {digest} != expected {sha256}")
     spec = importlib.util.spec_from_file_location("clef_joint_schema_model", path)
     jsm = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = jsm  # its dataclasses (postponed annotations) look themselves up here
@@ -504,6 +522,7 @@ class ClefScorer:
             raise RuntimeError(f"device {device!r} requested but CUDA is not available")
         self.jsm, self.torch, self.max_length, self.device = jsm, torch, max_length, device
         path = snapshot_download(model, revision=revision)
+        assert Path(path).name == revision, f"snapshot {path} is not commit {revision}"
         self.model, self.processor = jsm.load_release_model(path, device=device, dtype=getattr(torch, _DTYPES[dtype]))
         self.tokenizer = self.processor.tokenizer
 
@@ -642,28 +661,36 @@ def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.nd
     return {k: np.array(v) for k, v in cols.items()}
 
 
-def run(cfg: dict, run_dir: Path, repo_root: Path) -> dict:
-    """Build records, score them with Clef and write ``artifacts/clef_predictions.npz``.
+def validate_params(p: dict) -> None:
+    """Check the config values that ``run`` branches on.
 
     Args:
-        cfg: the config (``task``, ``seed`` and ``params`` for the Clef tasks).
-        run_dir: run output directory; ``artifacts/`` is created inside it.
-        repo_root: directory that ``params["data_root"]`` is relative to.
+        p: the config ``params``.
 
-    Returns:
-        Flat scalar metrics: item, unit and exclusion counts, class counts, max token
-        count and mean ``P(true)`` per class, plus the known-answer probabilities if enabled.
+    Raises:
+        ValueError: ``overlong_docs`` or ``context_control`` is not an allowed value.
     """
-    task, p, seed = cfg["task"], cfg["params"], int(cfg["seed"])
-    assert task in ("clef_entity_row", "clef_relation_row"), task
     if p["overlong_docs"] not in OVERLONG_MODES:
         raise ValueError(f"overlong_docs must be one of {OVERLONG_MODES}, got {p['overlong_docs']!r}")
     if p["context_control"] not in CONTEXT_CONTROLS:
         raise ValueError(f"context_control must be one of {CONTEXT_CONTROLS}, got {p['context_control']!r}")
-    max_length = p["max_length"]
-    assert isinstance(max_length, int) and max_length > 0
 
-    spec = load_dataset_spec(repo_root / p["dataset_config"])
+
+def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Path) -> tuple[list[dict], dict]:
+    """Select rows and build one Clef unit per entity row or relation sample (no model needed).
+
+    Args:
+        task: ``clef_entity_row`` or ``clef_relation_row``.
+        p: the config ``params``.
+        seed: run seed.
+        spec: the dataset.
+        repo_root: directory that ``p["data_root"]`` is relative to.
+
+    Returns:
+        ``(units, metrics)``: the units, each with ``context_doc`` set, and the counts
+        (``n_items``, ``sample_*``, ``n_units_before_filter``) known before scoring.
+    """
+    assert task in TASKS, task
     item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
     item_params["context_token_limit"] = None  # over-length handling is Clef's own (overlong_docs)
     if task == "clef_entity_row":
@@ -691,9 +718,50 @@ def run(cfg: dict, run_dir: Path, repo_root: Path) -> dict:
     for u in units:
         u["context_doc"] = context_doc[u["doc_id"]]
     metrics["n_units_before_filter"] = len(units)
+    return units, metrics
 
-    jsm = load_release_code(p["model"], p["revision"])
-    scorer = ClefScorer(jsm, p["model"], p["revision"], p["device"], p["dtype"], max_length)
+
+def summarize(cols: dict[str, np.ndarray]) -> dict:
+    """Flat scalar metrics of a prediction table.
+
+    Args:
+        cols: output of ``_entity_columns`` or ``_relation_columns``.
+
+    Returns:
+        Prediction, class and token counts and mean ``P(true)`` per class (``None`` for an empty class).
+    """
+    lab = cols["label_valid"].astype(bool)
+    return {
+        "n_predictions": int(len(lab)), "n_valid": int(lab.sum()), "n_invalid": int((~lab).sum()),
+        "max_n_tokens": int(cols["n_tokens"].max()),
+        "mean_p_true_valid": float(cols["p_true"][lab].mean()) if lab.any() else None,
+        "mean_p_true_invalid": float(cols["p_true"][~lab].mean()) if (~lab).any() else None,
+    }
+
+
+def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg: dict) -> dict:
+    """Build records, score them with Clef and write ``artifacts/clef_predictions.npz``.
+
+    Args:
+        cfg: the config (``task``, ``seed`` and ``params`` for the Clef tasks).
+        spec: the dataset named by ``params["dataset_config"]``.
+        run_dir: run output directory; ``artifacts/`` is created inside it.
+        repo_root: directory that ``params["data_root"]`` is relative to.
+        model_cfg: the validated model config (``model_config.load_clef_model_config``).
+
+    Returns:
+        Flat scalar metrics: item, unit and exclusion counts, class counts, max token
+        count and mean ``P(true)`` per class, plus the known-answer probabilities if enabled.
+    """
+    task, p, seed = cfg["task"], cfg["params"], int(cfg["seed"])
+    validate_params(p)
+    max_length = model_cfg["max_length"]
+
+    units, metrics = build_units(task, p, seed, spec, repo_root)
+
+    rc = model_cfg["release_code"]
+    jsm = load_release_code(model_cfg["model"], model_cfg["revision"], rc["file"], rc["sha256"])
+    scorer = ClefScorer(jsm, model_cfg["model"], model_cfg["revision"], p["device"], model_cfg["dtype"], max_length)
     units, excluded = filter_overlong(units, jsm, scorer.tokenizer, max_length, p["overlong_docs"])
     metrics["n_excluded_overlong"] = len(excluded)
     metrics["n_excluded_overlong_docs"] = len({u["doc_id"] for u in excluded})
@@ -709,12 +777,5 @@ def run(cfg: dict, run_dir: Path, repo_root: Path) -> dict:
 
     cols = _entity_columns(units, results) if task == "clef_entity_row" else _relation_columns(units, results)
     np.savez_compressed(run_dir / "artifacts" / "clef_predictions.npz", **cols)
-
-    lab = cols["label_valid"].astype(bool)
-    metrics.update({
-        "n_predictions": int(len(lab)), "n_valid": int(lab.sum()), "n_invalid": int((~lab).sum()),
-        "max_n_tokens": int(cols["n_tokens"].max()),
-        "mean_p_true_valid": float(cols["p_true"][lab].mean()) if lab.any() else None,
-        "mean_p_true_invalid": float(cols["p_true"][~lab].mean()) if (~lab).any() else None,
-    })
+    metrics.update(summarize(cols))
     return metrics

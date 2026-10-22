@@ -18,11 +18,12 @@ from judge_interp import clef
 from judge_interp import entity_detection as edr
 from judge_interp import relation_detection as rdr
 from dataset_specs import LINE, SPECS
+from judge_interp.model_config import load_clef_model_config
 
 LINE_FIELDS = list(LINE.fields)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODEL, REVISION = "Cloudflare/clef-flash", "8b2e5fd17c09fd49bc2880b805d5323ec7ff4ff3"
+MODEL_CFG = load_clef_model_config(REPO_ROOT / "experiments" / "model-configs" / "clef.yaml")
 ALL_LINE = ["inter_document", "intra_document", "cross_type"]
 
 _spec = importlib.util.spec_from_file_location(
@@ -54,7 +55,14 @@ class FakeTokenizer:
 
 @pytest.fixture(scope="module")
 def jsm():
-    return clef.load_release_code(MODEL, REVISION)
+    rc = MODEL_CFG["release_code"]
+    return clef.load_release_code(MODEL_CFG["model"], MODEL_CFG["revision"], rc["file"], rc["sha256"])
+
+
+def test_load_release_code_refuses_a_hash_mismatch():
+    rc = MODEL_CFG["release_code"]
+    with pytest.raises(ValueError, match="sha256"):
+        clef.load_release_code(MODEL_CFG["model"], MODEL_CFG["revision"], rc["file"], "0" * 64)
 
 
 # ------------------------------------------------------------------ entity

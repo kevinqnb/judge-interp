@@ -10,6 +10,7 @@ Reads the config envelope (``id``, ``project``, ``task``, ``description``, ``see
     run.json                         manifest (task, git sha, status, timestamps)
     config.snapshot.yaml             verbatim copy of the config
     dataset_config.snapshot.py       verbatim copy of the dataset-config module (prompt vocabulary)
+    model_config.snapshot.yaml       verbatim copy of the model config (tasks with ``model_config`` only)
     metrics.json                     flat scalar metrics
     artifacts/span_representations.npz   per-layer ``rep_<L>`` arrays + span metadata
     artifacts/cache/<document_id>.npz    per-document shards (resume support)
@@ -26,6 +27,12 @@ Tasks
     have ``supports_relation``.
 ``clef_entity_row`` / ``clef_relation_row`` (``judge_interp.clef``): the Cloudflare
     clef-flash model as a direct judge; no representations are collected.
+
+Each task module exposes ``TASK_PARAMS`` (its required params) and
+``run(cfg, spec, run_dir, repo_root, model_cfg)``, which returns the metrics; the runner owns
+config loading, snapshots, the manifest (``status`` is ``success`` or ``failed``), seeding and
+``metrics.json``. ``model_cfg`` is the loaded model config for tasks whose params include
+``model_config``, else ``None``.
 
 ``params`` of the two representation tasks
     data_root          repo-relative dir the dataset config's ``split_path`` / ``context_path``
@@ -47,6 +54,18 @@ Tasks
     rows_per_stratum   {"valid": n, "<error_type>": n, ...}; keys must equal "valid" +
                        ``error_types``; n is null (all rows) or an int >= 1, and a
                        stratum smaller than n is a hard error. Drawn with ``seed``.
+
+``params`` of the two Clef tasks: ``data_root``, ``dataset_config``, ``split``, ``error_types``
+and ``rows_per_stratum`` as above, plus
+    model_config       repo-relative path of a model config
+                       (e.g. ``experiments/model-configs/clef.yaml``: model, pinned revision,
+                       release-code hash, dtype, ``max_length``)
+    device             torch device string; CUDA must be available if requested
+    overlong_docs      "exclude" | "error"; records over the model config's ``max_length``
+    context_control    "none" | "other_document"
+    determinism_check_n, known_answer_check   sanity controls (see ``judge_interp.clef``)
+and, for ``clef_relation_row``, ``samples_per_row``, ``min_subset_size``, ``n_per_class`` and
+``subset_rng_stream``.
 """
 from __future__ import annotations
 
@@ -61,28 +80,25 @@ from pathlib import Path
 
 import numpy as np
 import yaml
-from transformers import AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from judge_interp import clef, entity_detection, relation_detection  # noqa: E402
 from judge_interp.dataset_spec import load_dataset_spec  # noqa: E402
+from judge_interp.model_config import load_clef_model_config  # noqa: E402
 
 
-_ROW_PARAMS = (
-    "data_root", "model", "dataset_config", "split", "layers", "dtype", "device",
-    "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
-)
-_CLEF_PARAMS = (
-    "data_root", "model", "revision", "dataset_config", "split", "device", "dtype", "max_length",
-    "overlong_docs", "context_control", "determinism_check_n", "known_answer_check",
-    "error_types", "rows_per_stratum",
-)
+# task name -> module. Each module exposes TASK_PARAMS (task -> required params) and
+# run(cfg, spec, run_dir, repo_root, model_cfg) -> metrics.
+_TASK_MODULES = {
+    "entity_detection": entity_detection,
+    "relation_detection": relation_detection,
+    "clef_entity_row": clef,
+    "clef_relation_row": clef,
+}
 _TASK_PARAMS: dict[str, tuple[str, ...]] = {
-    "entity_detection": _ROW_PARAMS,
-    "relation_detection": _ROW_PARAMS,
-    "clef_entity_row": _CLEF_PARAMS,
-    "clef_relation_row": _CLEF_PARAMS + ("samples_per_row", "min_subset_size", "n_per_class", "subset_rng_stream"),
+    task: module.TASK_PARAMS[task] for task, module in _TASK_MODULES.items()
 }
 # Allowed for any task -- read only by scripts/submit.sh, ignored here.
 _SUBMIT_ONLY_PARAMS = frozenset({"gpu_type", "gpu_memory", "gpu_c", "omp", "walltime"})
@@ -149,22 +165,6 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
-def _write_span_representations(result: dict, path: Path) -> None:
-    """Write a ``collect_rows`` result to a compressed ``.npz``.
-
-    Args:
-        result: ``collect_rows`` output; ``representations`` is stored as ``rep_<layer>``
-            and every other entry under its own key.
-        path: destination file.
-    """
-    payload = {f"rep_{L}": result["representations"][L] for L in result["layers"].tolist()}
-    for k, v in result.items():
-        if k == "representations":
-            continue
-        payload[k] = v
-    np.savez_compressed(path, **payload)
-
-
 def main(argv=None) -> None:
     """Run the experiment named by a config and write its outputs under ``$RUNS_ROOT/<id>/``.
 
@@ -192,6 +192,11 @@ def main(argv=None) -> None:
     dataset_config_path = REPO_ROOT / params["dataset_config"]
     (run_dir / "dataset_config.snapshot.py").write_text(dataset_config_path.read_text())
     spec = load_dataset_spec(dataset_config_path)
+    model_cfg = None
+    if "model_config" in _TASK_PARAMS[task]:
+        model_config_path = REPO_ROOT / params["model_config"]
+        model_cfg = load_clef_model_config(model_config_path)
+        (run_dir / "model_config.snapshot.yaml").write_text(model_config_path.read_text())
 
     manifest = {
         "id": cfg["id"],
@@ -218,53 +223,16 @@ def main(argv=None) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    if task in ("clef_entity_row", "clef_relation_row"):
-        from judge_interp import clef
-
-        metrics = clef.run(cfg, run_dir, REPO_ROOT)
-        (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-        print("metrics:", json.dumps(metrics, indent=2))
+    try:
+        metrics = _TASK_MODULES[task].run(cfg, spec, run_dir, REPO_ROOT, model_cfg)
+    except BaseException:
         manifest["finished_at"] = _now()
-        manifest["status"] = "success"
+        manifest["status"] = "failed"
         (run_dir / "run.json").write_text(json.dumps(manifest, indent=2))
-        print(f"wrote {run_dir}")
-        return
-
-    if task == "entity_detection":
-        from judge_interp import entity_detection as task_module
-
-        lm_class = task_module.EntityDetectionLM
-    elif task == "relation_detection":
-        from judge_interp import relation_detection as task_module
-
-        lm_class = task_module.RelationDetectionLM
-    else:
-        raise AssertionError(f"unhandled task {task!r} -- load_config should have rejected this")
-
-    rlm = lm_class(
-        model_name=params["model"],
-        layers=params["layers"],
-        device=params["device"],
-        dtype=params["dtype"],
-        verbose=True,
-    )
-
-    limit = params["context_token_limit"]
-    tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
-    items = task_module.build_items(spec, params, seed, REPO_ROOT, tokenizer)
-    print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={spec.name}, split={params['split']}")
-
-    result = rlm.collect_rows(
-        items,
-        cache_dir=run_dir / "artifacts" / "cache",
-        verify_read_point=params["verify_read_point"],
-    )
-    _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
-    metrics = task_module.compute_metrics(result, spec)
+        raise
 
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print("metrics:", json.dumps(metrics, indent=2))
-
     manifest["finished_at"] = _now()
     manifest["status"] = "success"
     (run_dir / "run.json").write_text(json.dumps(manifest, indent=2))
