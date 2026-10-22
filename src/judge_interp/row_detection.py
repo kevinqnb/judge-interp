@@ -41,7 +41,7 @@ from judge_interp.dataset_spec import DatasetSpec
 from judge_interp.prompts import load_context, load_split, render_query, sub_seed
 from judge_interp.representationlm import RepresentationLM, to_npz_array
 
-_SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
+_SOURCE_SCOPES = ("other_document", "same_document")
 _PAD = " "  # inserted before each closing quote; see the module docstring
 READ_TOKEN = _PAD + '"\n'  # the one token every entity is read at: pad, closing quote and newline merged
 
@@ -99,14 +99,15 @@ def check_row(row: dict, spec: DatasetSpec) -> None:
         assert e["error_type"] == row["error_type"], f"{where}/{f}: field vs row error_type"
         src = e["source"]
         assert src["scope"] in _SOURCE_SCOPES, f"{where}/{f}: scope {src['scope']!r}"
+        assert isinstance(src.get("null_fill"), bool), f"{where}/{f}: source null_fill {src.get('null_fill')!r}"
         if src["scope"] == "same_document":
-            need = {"scope", "dataset", "field", "line_index"}
+            need = {"scope", "null_fill", "dataset", "field", "line_index"}
             if row["error_type"] == "cross_type":
                 need.add("exchanged_with")
             assert set(src) == need, f"{where}/{f}: source keys {sorted(src)}"
             assert isinstance(src["dataset"], str) and isinstance(src["field"], str), f"{where}/{f}"
         else:
-            assert set(src) == {"scope"}, f"{where}/{f}: source keys {sorted(src)}"
+            assert set(src) == {"scope", "null_fill"}, f"{where}/{f}: source keys {sorted(src)}"
 
 
 def _source_columns(entry: dict | None) -> dict:

@@ -60,6 +60,7 @@
     "error_type": "intra_document",
     "source": {
      "scope": "same_document",
+     "null_fill": false,
      "dataset": "line",
      "field": "program_end_date",
      "line_index": 1
@@ -69,6 +70,7 @@
     "error_type": "intra_document",
     "source": {
      "scope": "same_document",
+     "null_fill": false,
      "dataset": "line",
      "field": "sub_amount",
      "line_index": 1
@@ -99,6 +101,7 @@
     "error_type": "cross_type",
     "source": {
      "scope": "same_document",
+     "null_fill": false,
      "dataset": "line",
      "field": "program_start_date",
      "line_index": 0,
@@ -127,7 +130,8 @@
    "channel": {
     "error_type": "inter_document",
     "source": {
-     "scope": "other_document"
+     "scope": "other_document",
+     "null_fill": false
     }
    },
    "program_desc": null,

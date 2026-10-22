@@ -1,0 +1,53 @@
+id: 2026-10-21-vrdu-invalids-04
+project: judge-interp
+description: >-
+  Removes judge shortcuts from -03. (A1) OCR-fragment dates are ordinary candidate values
+  in every pool and every error type, and date order is enforced only when both dates
+  parse, so "is a fragment" no longer predicts "is correct". (A2) A corruption must differ
+  from the original by an equivalence key (parsed date / numeric amount / case- and
+  whitespace-folded text), so reformats such as 2/18/20 -> 02/18/20 or ISSUE -> Issue are
+  never labelled errors. (A3) The synthetic main date sentinels are gone. Error types,
+  k ranges and kinds are unchanged from -03; -03 numbers do not carry over (the -03 data
+  is at commit daec77d).
+seed: 0
+params:
+  data_root: data/vrdu
+
+  main:
+    # Unchanged from -02 (inter_document only): one invalid row per achievable
+    # k in this inclusive range, pools compiled per split.
+    k_range: [1, 9]
+    pool_scope: per_split
+
+  line:
+    # Unchanged from -02 (inter_document, intra_document).
+    k_range: [1, 5]
+
+  # A field whose base value is null MAY be chosen for invalidation and given a
+  # non-null value; a non-null base value is NEVER replaced with null.
+  corrupt_from_null: true
+  corrupt_to_null: false
+
+  dates:
+    # Ordering enforced on every generated row of every error type (cross_type
+    # included): parsed(from) <= parsed(to) whenever BOTH parse. A null or an OCR
+    # fragment (e.g. "/08/20") has no position in time and never blocks or violates it.
+    main_fields: [flight_from, flight_to]
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+
+  cross_type:
+    # A cross_type field takes a value from another field of the same kind in the
+    # same document (main or line). Fields in no kind (contract_num, program_desc)
+    # are never touched. channel is left out: it is a short number, a poor same-kind
+    # partner for names. tv_address is grouped with names loosely.
+    kinds:
+      name: [advertiser, agency, property, tv_address, product]
+      date: [flight_from, flight_to, program_start_date, program_end_date]
+      amount: [gross_amount, sub_amount]
+    # One cross_type row per achievable k in this range (k = number of kinded
+    # fields at most: 8 main, 3 line).
+    main:
+      k_range: [1, 8]
+    line:
+      k_range: [1, 3]

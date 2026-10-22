@@ -46,9 +46,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data" / "vrdu")
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"
-CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-14-vrdu-invalids-03.yaml"
+CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-21-vrdu-invalids-04.yaml"
 PIVOT = 50
 DATE_FIELDS = ["program_start_date", "program_end_date"]
+KIND_OF = {"flight_from": "date", "flight_to": "date", "program_start_date": "date",
+           "program_end_date": "date", "gross_amount": "amount", "sub_amount": "amount"}
+EQ = b.make_eq(KIND_OF, PIVOT)
 
 
 # --- parse_date ------------------------------------------------------------
@@ -74,18 +77,18 @@ def test_parse_date(text, expected):
 # --- pools ---------------------------------------------------------------
 
 
-def test_main_pools_dates_drop_fragments_add_sentinels_others_drop_nulls():
+def test_main_pools_keep_fragments_and_have_no_sentinels_nulls_dropped():
     rows = [
         {"advertiser": "a", "agency": None, "property": None, "tv_address": None, "product": None,
          "contract_num": None, "flight_from": "01/10/20", "flight_to": None, "gross_amount": None},
         {"advertiser": "a", "agency": None, "property": None, "tv_address": None, "product": None,
          "contract_num": None, "flight_from": "05/20/", "flight_to": "02/02/20", "gross_amount": None},
     ]
-    pools = b.main_pools(rows, ["01/01/00", "12/31/49"], ["flight_from", "flight_to"], PIVOT)
+    pools = b.main_pools(rows)
     assert pools["advertiser"] == ["a", "a"]
     assert pools["agency"] == []
-    assert sorted(pools["flight_from"]) == sorted(["01/10/20", "01/01/00", "12/31/49"])
-    assert sorted(pools["flight_to"]) == sorted(["02/02/20", "01/01/00", "12/31/49"])
+    assert pools["flight_from"] == ["01/10/20", "05/20/"]   # the fragment stays; nothing synthetic added
+    assert pools["flight_to"] == ["02/02/20"]
 
 
 def test_line_inter_pools_excludes_own_document():
@@ -97,7 +100,7 @@ def test_line_inter_pools_excludes_own_document():
         {"document_id": "B", "line_index": 0, "channel": "2", "program_desc": "y",
          "program_start_date": "02/01/20", "program_end_date": "02/05/20", "sub_amount": "$2"},
     ]
-    pools = b.line_inter_pools_by_doc(rows, DATE_FIELDS, PIVOT)
+    pools = b.line_inter_pools_by_doc(rows, DATE_FIELDS)
     assert set(pools) == {"A", "B"}
     assert pools["A"]["channel"] == ["2"]              # only B's row, A's own two excluded
     assert pools["B"]["channel"] == ["1", "1b"]
@@ -112,22 +115,79 @@ def test_date_feasibility_ordered_pair_impossible_to_reorder():
     # page dates {02/01, 02/05}; row is start=02/01 end=02/05.
     row = {"program_start_date": "02/01/20", "program_end_date": "02/05/20"}
     pools = {"program_start_date": ["02/01/20", "02/05/20"], "program_end_date": ["02/01/20", "02/05/20"]}
-    start_alone, end_alone, both = b._date_feasibility(row, DATE_FIELDS, pools, PIVOT)
+    start_alone, end_alone, both = b._date_feasibility(row, DATE_FIELDS, pools, PIVOT, EQ)
     assert (start_alone, end_alone, both) == (True, True, False)  # each alone works; together cannot
 
 
-def test_date_feasibility_fragment_start_blocks_end_alone():
+def test_date_feasibility_fragment_partner_does_not_block():
+    # start is the fragment "03/01/": it has no position in time, so any end date is orderable.
     row = {"program_start_date": "03/01/", "program_end_date": "03/31/20"}
-    pools = {"program_start_date": ["03/31/20"], "program_end_date": ["03/31/20"]}
-    assert b._date_feasibility(row, DATE_FIELDS, pools, PIVOT) == (True, False, False)
+    pools = {"program_start_date": ["03/31/20", "03/05/20"], "program_end_date": ["03/31/20", "03/05/20"]}
+    # start alone: {03/31, 03/05} <= 03/31; end alone: 03/05 vs a fragment start; both: 03/05 <= 03/05.
+    assert b._date_feasibility(row, DATE_FIELDS, pools, PIVOT, EQ) == (True, True, True)
+
+
+def test_date_feasibility_a_fragment_candidate_is_always_orderable():
+    row = {"program_start_date": "05/01/20", "program_end_date": "05/10/20"}
+    only_late = ["05/01/20", "06/01/20"]    # the only different start (06/01) is after the end
+    assert b._date_feasibility(row, DATE_FIELDS, {"program_start_date": only_late, "program_end_date": ["05/10/20"]},
+                               PIVOT, EQ)[0] is False
+    with_fragment = [*only_late, "/12/20"]
+    assert b._date_feasibility(row, DATE_FIELDS, {"program_start_date": with_fragment, "program_end_date": ["05/10/20"]},
+                               PIVOT, EQ)[0] is True
+
+
+def test_pair_ok_enforces_order_only_when_both_parse():
+    assert b.pair_ok((2020, 1, 1), (2020, 1, 1)) and b.pair_ok((2020, 1, 1), (2020, 2, 1))
+    assert not b.pair_ok((2020, 2, 1), (2020, 1, 1))
+    assert b.pair_ok(None, (2020, 1, 1)) and b.pair_ok((2020, 2, 1), None) and b.pair_ok(None, None)
+
+
+@pytest.mark.parametrize(
+    "field,a,b_",
+    [
+        ("program_start_date", "2/18/20", "02/18/20"),
+        ("program_start_date", "2/18/2020", "02/18/20"),
+        ("sub_amount", "$1,234.00", "1234"),
+        ("program_desc", "ISSUE", "Issue"),
+        ("program_desc", "Priorities  USA", "priorities usa"),
+        ("program_start_date", "/08/20", " /08/20 "),
+    ],
+)
+def test_equivalence_key_treats_reformats_as_the_same_value(field, a, b_):
+    assert EQ(field, a) == EQ(field, b_)
+
+
+@pytest.mark.parametrize(
+    "field,a,b_",
+    [
+        ("program_start_date", "2/18/20", "2/19/20"),
+        ("program_start_date", "/08/20", "/09/20"),
+        ("sub_amount", "$1,234.00", "$1,234.50"),
+        ("channel", "5", "05"),       # no kind -> text: an identifier is not read as a number
+        ("program_desc", "Show A", "Show B"),
+    ],
+)
+def test_equivalence_key_keeps_different_values_apart(field, a, b_):
+    assert EQ(field, a) != EQ(field, b_)
+
+
+def test_equivalence_key_none_is_none():
+    assert EQ("sub_amount", None) is None
 
 
 def test_nondate_invalidatable_excludes_constant_field():
     rows = [{"channel": "5", "program_desc": "A", "sub_amount": None},
             {"channel": "5", "program_desc": "B", "sub_amount": "$9"}]
     pools = {f: [r[f] for r in rows if r[f] is not None] for f in ["channel", "program_desc", "sub_amount"]}
-    got = b._nondate_invalidatable(rows[0], b.LINE_FIELDS, DATE_FIELDS, pools)
+    got = b._nondate_invalidatable(rows[0], b.LINE_FIELDS, DATE_FIELDS, pools, EQ)
     assert "channel" not in got and {"program_desc", "sub_amount"} <= set(got)
+
+
+def test_nondate_invalidatable_excludes_a_field_whose_only_alternative_is_a_reformat():
+    row = {"channel": "5", "program_desc": "ISSUE", "sub_amount": "$1,234.00"}
+    pools = {"channel": ["5"], "program_desc": ["Issue"], "sub_amount": ["1234"]}
+    assert b._nondate_invalidatable(row, b.LINE_FIELDS, DATE_FIELDS, pools, EQ) == []
 
 
 def test_achievable_counts():
@@ -145,7 +205,7 @@ def test_achievable_targets_filters_to_range_and_excludes_infeasible_field():
     }
     # feasible_nondate = {channel, sub_amount} = 2; both date-alone options and "both" are feasible
     # (see achievable_counts) -> achievable = {0,1,2,3,4}; requesting up to 5 caps at 4.
-    targets = b.achievable_targets(row, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, (1, 5))
+    targets = b.achievable_targets(row, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, (1, 5), EQ)
     assert targets == [1, 2, 3, 4]
 
 
@@ -153,9 +213,11 @@ def test_achievable_targets_filters_to_range_and_excludes_infeasible_field():
 
 
 def test_sample_new_returns_a_differing_value_and_raises_without_one():
-    assert b.sample_new(["x", "x", "y"], "x", random.Random(0)) == "y"
+    assert b.sample_new(["x", "x", "y"], "x", random.Random(0), EQ, "program_desc") == "y"
     with pytest.raises(AssertionError):
-        b.sample_new(["x", "x"], "x", random.Random(0))
+        b.sample_new(["x", "x"], "x", random.Random(0), EQ, "program_desc")
+    with pytest.raises(AssertionError):     # a case variant is not a different value
+        b.sample_new(["X", "x"], "x", random.Random(0), EQ, "program_desc")
 
 
 def test_make_invalid_row_caps_when_only_one_date_field_can_change():
@@ -164,7 +226,7 @@ def test_make_invalid_row_caps_when_only_one_date_field_can_change():
     shared = ["02/01/20", "02/05/20"]
     pools = {"channel": ["9"], "program_desc": ["Solo"], "sub_amount": ["$9"],
              "program_start_date": shared, "program_end_date": shared}
-    new_row, changed = b.make_invalid_row(row, 3, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(1))
+    new_row, changed = b.make_invalid_row(row, 3, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(1), EQ)
     assert len(changed) == 1 and changed[0] in DATE_FIELDS
     assert b.parse_date(new_row["program_start_date"], PIVOT) <= b.parse_date(new_row["program_end_date"], PIVOT)
 
@@ -174,7 +236,7 @@ def test_make_invalid_row_returns_none_when_nothing_feasible():
            "program_start_date": "04/10/20", "program_end_date": "04/10/20", "sub_amount": "$5"}
     pools = {"channel": ["7"], "program_desc": ["x"], "sub_amount": ["$5"],
              "program_start_date": ["04/10/20"], "program_end_date": ["04/10/20"]}
-    assert b.make_invalid_row(row, 2, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(0)) is None
+    assert b.make_invalid_row(row, 2, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(0), EQ) is None
 
 
 # --- build_intra_chain ---------------------------------------------------
@@ -203,7 +265,7 @@ def test_build_intra_chain_reaches_max_with_fully_distinct_donors():
     base = {"channel": "1", "program_desc": "Base Show",
             "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$100.00"}
     donors = _l6_style_donors()
-    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
     assert [len(fields) for _row, fields, _donors in chain] == [1, 2, 3, 4, 5]
     # nested: each step's fields are a superset of the previous step's
     for i in range(len(chain) - 1):
@@ -220,14 +282,14 @@ def test_build_intra_chain_caps_at_donor_scarcity():
     base = {"channel": "8", "program_desc": "Cap Base",
             "program_start_date": "07/01/20", "program_end_date": "07/10/20", "sub_amount": "$700.00"}
     donors = _l6_style_donors()[:2]  # only 2 distinct donors available
-    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
     assert [len(fields) for _row, fields, _donors in chain] == [1, 2]  # stops at 2, not assumed to be 5
 
 
 def test_build_intra_chain_no_donors_is_empty():
     base = {"channel": "1", "program_desc": "d",
             "program_start_date": "01/01/20", "program_end_date": "01/05/20", "sub_amount": "$1"}
-    assert b.build_intra_chain(base, [], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0)) == []
+    assert b.build_intra_chain(base, [], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ) == []
 
 
 def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising():
@@ -238,7 +300,7 @@ def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising
             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
     donor = {"channel": "2", "program_desc": "A", "line_index": 1,
              "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
-    chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
     assert chain == []
 
 
@@ -258,12 +320,54 @@ def test_build_intra_chain_never_reproduces_a_near_duplicate_donor():
                "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
     donor_b = {"channel": "9", "program_desc": "Z", "line_index": 2,
                "program_start_date": "09/01/20", "program_end_date": "09/10/20", "sub_amount": "$9"}
-    chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0))
+    chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
     assert chain  # progress is still made via donor_b despite donor_a's collision risk
     for row, _fields, _donors in chain:
         got = tuple(row[f] for f in b.LINE_FIELDS)
         assert got != tuple(donor_a[f] for f in b.LINE_FIELDS)
         assert got != tuple(donor_b[f] for f in b.LINE_FIELDS)
+
+
+def _feasible(base, donors):
+    other_tuples = {tuple(EQ(f, d[f]) for f in b.LINE_FIELDS) for d in donors}
+    return b._intra_feasible(base, dict(base), donors, other_tuples, b.LINE_FIELDS, DATE_FIELDS, [], set(), PIVOT, EQ)
+
+
+def test_intra_feasible_a_fragment_donor_is_eligible_and_not_order_checked():
+    base = {"channel": "1", "program_desc": "A",
+            "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$1"}
+    donor = {"channel": "9", "program_desc": "A", "line_index": 1,
+             "program_start_date": "/12/20", "program_end_date": "05/10/20", "sub_amount": "$1"}
+    feasible = _feasible(base, [donor])
+    assert feasible == {"channel": [0], "program_start_date": [0]}   # the fragment start is borrowable
+
+
+def test_intra_feasible_a_reformat_donor_is_not_an_error():
+    base = {"channel": "1", "program_desc": "ISSUE",
+            "program_start_date": "5/1/20", "program_end_date": "05/10/20", "sub_amount": "$1,000.00"}
+    donor = {"channel": "9", "program_desc": "Issue", "line_index": 1,
+             "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "2,000"}
+    # desc and start date differ only in format; sub_amount ($1,000 vs 2,000) and channel genuinely differ
+    assert _feasible(base, [donor]) == {"channel": [0], "sub_amount": [0]}
+
+
+def test_intra_feasible_duplicate_guard_compares_equivalent_values():
+    # Borrowing channel would give (2, "A", ...) which is donor_a up to case: excluded.
+    base = {"channel": "1", "program_desc": "A",
+            "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    donor_a = {"channel": "2", "program_desc": "a", "line_index": 1,
+               "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    assert _feasible(base, [donor_a]) == {}
+
+
+def test_intra_feasible_order_enforced_against_a_parseable_partner_only():
+    base = {"channel": "1", "program_desc": "A",
+            "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$1"}
+    late = {"channel": "1", "program_desc": "A", "line_index": 1,
+            "program_start_date": "06/01/20", "program_end_date": "06/10/20", "sub_amount": "$2"}
+    feasible = _feasible(base, [late])
+    assert "program_start_date" not in feasible        # 06/01 > partner end 05/10
+    assert feasible["program_end_date"] == [0]         # 06/10 >= partner start 05/01
 
 
 # --- tiny end-to-end -------------------------------------------------
@@ -322,7 +426,7 @@ def test_line_counts_and_provenance(built):
     assert sum(1 for r in invalid_t if r["error_type"] == "intra_document") == 2
 
     prov = built["provenance"]
-    assert prov["config_id"] == "2026-10-14-vrdu-invalids-03"
+    assert prov["config_id"] == "2026-10-21-vrdu-invalids-04"
     dist = prov["num_invalid_fields_dist"]["line"]["train"]
     assert {int(k): v for k, v in dist["inter_document"].items()} == {1: 15, 2: 15, 3: 15, 4: 15, 5: 15}
     assert {int(k): v for k, v in dist["intra_document"].items()} == {1: 12, 2: 12, 3: 6, 4: 6, 5: 6}
@@ -393,8 +497,7 @@ def test_date_order_holds_on_every_touched_line_row(built):
         a, z = row["program_start_date"], row["program_end_date"]
         if a is None or z is None:
             continue
-        assert b.parse_date(a, PIVOT) is not None and b.parse_date(z, PIVOT) is not None
-        assert b.parse_date(a, PIVOT) <= b.parse_date(z, PIVOT)
+        assert b.pair_ok(b.parse_date(a, PIVOT), b.parse_date(z, PIVOT))
 
 
 def test_intra_document_values_always_come_from_the_same_document(built):
@@ -464,11 +567,11 @@ def test_cross_type_candidates_same_kind_cross_dataset_and_exclusions():
          "program_end_date": "02/03/20", "sub_amount": None},
     ]
     truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
-                             [{"document_id": "d", "valid": True, **r} for r in line_rows])["d"]
+                             [{"document_id": "d", "valid": True, **r} for r in line_rows], EQ)["d"]
     counts = _counts()
 
     def cands(target):
-        return b.cross_type_candidates(target, KINDS, kind_of, main_row, line_rows, truth, PIVOT, counts)
+        return b.cross_type_candidates(target, KINDS, kind_of, main_row, line_rows, truth, counts, EQ)
 
     # amount: main gross_amount can take the line sub_amount and vice versa.
     assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("gross_amount")] == [("$9", "line", "sub_amount", 0)]
@@ -477,11 +580,11 @@ def test_cross_type_candidates_same_kind_cross_dataset_and_exclusions():
     assert sorted(v for v, _ in cands("advertiser")) == ["B"]
     # a value already valid for the target is excluded: advertiser "A" is valid for advertiser.
     assert "A" not in [v for v, _ in cands("advertiser")] and [v for v, _ in cands("agency")] == ["A"]
-    # date: the line fragment is dropped; flight_from may take flight_to and the parseable line dates,
-    # but not its own valid value.
+    # date: the line fragment "02/0" is an ordinary candidate; flight_from may take flight_to and the
+    # line dates, but not its own valid value 02/01/20 (line 0's start date).
     got = sorted(v for v, _ in cands("flight_from"))
-    assert got == ["02/02/20", "02/03/20", "03/01/20"]
-    assert counts["excluded_unparseable_date"] >= 1 and counts["excluded_valid_for_target"] >= 1
+    assert got == ["02/0", "02/02/20", "02/03/20", "03/01/20"]
+    assert counts["excluded_valid_for_target"] >= 1 and "excluded_unparseable_date" not in counts
     # contract_num / program_desc have no kind
     assert not {"contract_num", "channel", "program_desc"} & set(b.field_kinds(KINDS))
 
@@ -495,9 +598,9 @@ def test_cross_type_value_valid_for_target_elsewhere_in_document_is_excluded():
     line_rows = [{"line_index": 0, "channel": None, "program_desc": None, "program_start_date": "01/01/20",
                   "program_end_date": "01/05/20", "sub_amount": None}]
     truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
-                             [{"document_id": "d", "valid": True, **r} for r in line_rows])["d"]
+                             [{"document_id": "d", "valid": True, **r} for r in line_rows], EQ)["d"]
     got = [(v, s["field"]) for v, s in b.cross_type_candidates(
-        "flight_from", KINDS, kind_of, main_row, line_rows, truth, PIVOT, _counts())]
+        "flight_from", KINDS, kind_of, main_row, line_rows, truth, _counts(), EQ)]
     assert ("01/01/20", "program_start_date") not in got
     assert ("01/05/20", "program_end_date") in got and ("02/01/20", "flight_to") in got
 
@@ -577,3 +680,82 @@ def test_cross_type_does_not_perturb_other_error_types(built, tmp_path):
         old = [r for r in built[name.replace("/", "_").replace(".json", "")] if r["error_type"] != "cross_type"]
         new = [r for r in json.loads((other / name).read_text()) if r["error_type"] != "cross_type"]
         assert old == new
+
+
+# --- 2026-10-21 (-04): fragments are ordinary values, no sentinels, reformats are not errors ------------
+
+
+def test_date_fragment_stats_counts_corrupted_and_kept_fragments_by_row_type():
+    def row(error_type, start, end, bad):
+        return {"error_type": error_type, "program_start_date": start, "program_end_date": end,
+                "field_errors": {"program_start_date": {"x": 1} if "program_start_date" in bad else None,
+                                 "program_end_date": {"x": 1} if "program_end_date" in bad else None}}
+    rows = [row(None, "01/01/20", "/05/20", []),                 # valid: one fragment kept
+            row("inter_document", "/02/20", "01/09/20", ["program_start_date"]),   # corrupted fragment, kept clean
+            row("inter_document", "01/03/20", None, ["program_start_date"])]       # null end is not counted
+    assert b.date_fragment_stats(rows, DATE_FIELDS, PIVOT) == {
+        "inter_document": {"corrupted": 2, "corrupted_fragment": 1, "kept": 1, "kept_fragment": 0},
+        "valid": {"corrupted": 0, "corrupted_fragment": 0, "kept": 2, "kept_fragment": 1},
+    }
+
+
+def test_no_sentinel_values_or_scopes_are_emitted(built):
+    for key in ("main_train", "main_test"):
+        for row in built[key]:
+            for f in ("flight_from", "flight_to"):
+                assert row[f] not in ("01/01/00", "12/31/49")
+            assert all(e is None or e["source"]["scope"] != "sentinel" for e in row["field_errors"].values())
+
+
+def test_fragments_are_drawn_as_corrupted_date_values(built):
+    # The fixture's other documents carry fragment dates (L3, L5, m3), which are now in the pools,
+    # so across all inter_document line rows at least one corrupted date is a fragment.
+    stats = built["provenance"]["date_fragment_rates"]["line"]["train"]["inter_document"]
+    assert stats["corrupted_fragment"] >= 1
+    assert stats["corrupted"] >= stats["corrupted_fragment"]
+
+
+def test_provenance_records_fragment_rates_for_every_dataset_and_split(built):
+    for ds in ("main", "line"):
+        for split in ("train", "test"):
+            cells = built["provenance"]["date_fragment_rates"][ds][split]
+            assert "valid" in cells and set(cells) <= {"valid", "inter_document", "intra_document", "cross_type"}
+
+
+def test_pick_fragment_neutral_draws_fragments_at_the_pool_rate_not_the_eligible_rate():
+    # Pool: 8 real dates + 2 fragments (rate 0.2). Order filtering leaves 1 real + both fragments
+    # eligible; a uniform pick would take a fragment 2/3 of the time.
+    pool = [f"r{i}" for i in range(8)] + ["/01/20", "/02/20"]
+    eligible = ["r0", "/01/20", "/02/20"]
+    frag = lambda v: v.startswith("/")
+    rng = random.Random(0)
+    n = 3000
+    hits = sum(frag(b.pick_fragment_neutral(eligible, pool, frag, rng)) for _ in range(n))
+    assert 0.15 < hits / n < 0.25      # expected 0.20, sd ~0.007
+
+
+def test_pick_fragment_neutral_forces_the_only_available_class():
+    frag = lambda v: v.startswith("/")
+    pool = ["r0", "r1", "/01/20"]
+    rng = random.Random(0)
+    assert {b.pick_fragment_neutral(["/01/20"], pool, frag, rng) for _ in range(20)} == {"/01/20"}
+    assert {b.pick_fragment_neutral(["r1"], pool, frag, rng) for _ in range(20)} == {"r1"}
+    with pytest.raises(AssertionError):
+        b.pick_fragment_neutral([], pool, frag, rng)
+
+
+def test_null_fill_is_true_exactly_when_the_valid_row_had_no_value(built):
+    seen = {True: 0, False: 0}
+    for ds, id_keys in (("main", ["document_id"]), ("line", ["document_id", "line_index"])):
+        for split in ("train", "test"):
+            base = {tuple(r[k] for k in id_keys): r
+                    for r in json.loads((built["data_root"] / ds / f"{split}_base.json").read_text())}
+            for row in built[f"{ds}_{split}"]:
+                for f, entry in row["field_errors"].items():
+                    if entry is None:
+                        continue
+                    flag = entry["source"]["null_fill"]
+                    assert flag is (base[tuple(row[k] for k in id_keys)][f] is None), (ds, split, row["document_id"], f)
+                    seen[flag] += 1
+    # m1's agency is null in the fixture, so null-fills exist; every other corrupted entity replaces a value.
+    assert seen[True] >= 1 and seen[False] >= 1

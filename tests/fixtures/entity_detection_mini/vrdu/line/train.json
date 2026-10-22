@@ -59,6 +59,7 @@
     "error_type": "cross_type",
     "source": {
      "scope": "same_document",
+     "null_fill": false,
      "dataset": "line",
      "field": "program_start_date",
      "line_index": 0,

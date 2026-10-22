@@ -24,12 +24,14 @@ Every row (valid or not, both datasets) carries two explicit label fields:
                 be correct on an invalid row); otherwise ``{"error_type": ...,
                 "source": {...}}`` saying how the wrong value got there. Sources:
                   {"scope": "other_document"}       drawn from another document
-                  {"scope": "sentinel"}             main date sentinel
                   {"scope": "same_document", "dataset", "field", "line_index",
                    ["exchanged_with"]}              a value taken from this document
                                                     (``line_index`` null for main;
                                                     ``exchanged_with`` is cross_type
                                                     only -- see below)
+                Every source also carries ``null_fill``: True when the valid row had NO value
+                in that field (the corruption adds an entity that was absent), False when
+                it replaces one.
                 ``invalid_fields`` is exactly the set of non-null ``field_errors``.
 
 Error types (main: inter_document, cross_type; line: all three):
@@ -46,23 +48,25 @@ Error types (main: inter_document, cross_type; line: all three):
                   exchange, recorded as ``exchanged_with`` in both sources. A value
                   is eligible for field ``t`` only if it is NOT already a valid value
                   of ``t`` anywhere in the document (otherwise the "wrong type" row
-                  would actually be correct). Dates must parse; fields with no kind
-                  are never touched. Uses its own RNG stream, so adding it does not
+                  would actually be correct); "the same value" is judged by
+                  ``equivalence_key``, so a reformat counts as the same. Fields with
+                  no kind are never touched. Uses its own RNG stream, so adding it does not
                   perturb inter_document / intra_document rows.
 
-  main   pool = every non-null value for the field within the split being written.
-         Date fields also carry two synthetic sentinels so an ordered pair always
-         exists. For each row, one invalid row is emitted per achievable field
-         count in ``main.k_range``; a count the row cannot reach is simply not
-         emitted (not capped-and-mislabeled).
+  main   pool = every non-null value for the field within the split being written
+         (OCR-fragment dates included; nothing synthetic). For each row, one
+         invalid row is emitted per k in ``main.k_range``; a k the row cannot
+         fully reach is realized at the largest achievable count below it and
+         recorded under ``capped_rows`` (it has not happened so far: every row
+         reaches every k).
 
   line   Two independent error types, each producing (up to) one invalid row per
          achievable count in ``line.k_range`` (now 1..5, all five LINE_FIELDS):
 
            inter_document  pool = every non-null value for the field from every
-                            OTHER document in the split. No sentinels, so a line
-                            date is only ever corrupted to a date that genuinely
-                            appears in some other document.
+                            OTHER document in the split, so a line date is only
+                            ever corrupted to a date that genuinely appears in
+                            some other document.
            intra_document  values come exclusively from the row's OWN document's
                             OTHER line items, one distinct donor item per
                             corrupted field -- a donor used for one field cannot
@@ -74,11 +78,22 @@ Error types (main: inter_document, cross_type; line: all three):
                             point the row's realized count -- never assumed to be
                             k_hi -- is what gets recorded. Guarded against
                             reproducing another valid row in the document
-                            verbatim.
+                            (up to ``equivalence_key``).
+
+A corruption must differ from the original by ``equivalence_key`` (parsed date,
+numeric amount, case- and whitespace-folded text): a reformat such as ``2/18/20``
+-> ``02/18/20`` or ``ISSUE`` -> ``Issue`` is never an error.
+
+OCR-fragment dates (``/08/20``, ``02/21/``) are ordinary values in every pool and
+every error type. They have no position in time, so ``from <= to`` is enforced only
+when BOTH dates parse (``pair_ok``). Order-filtering alone would over-select
+fragments (they always pass), so ``pick_fragment_neutral`` draws the class
+(fragment / real date) at the pool's own rate first; ``date_fragment_rates`` in
+``invalids.json`` records the resulting corrupted-vs-kept rates per error type.
 
 Field selection is uniform over the fields invalidatable for that row. The two
 date fields are coupled: a value must keep ``from <= to`` (for every error type,
-cross_type included), so whether a date field can be corrupted depends on whether
+cross_type included; see above), so whether a date field can be corrupted depends on whether
 its partner is corrupted too (and, for the intra-document chain, on the partner's
 *current* -- possibly already-corrupted -- value). A consequence for cross_type:
 two date fields of one record cannot be directly exchanged (that would reverse
@@ -87,7 +102,7 @@ their order) unless they hold equal dates, which the eligibility rule excludes.
 No cluster job: this is local data preparation. Run it directly:
 
     uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py \
-        --config configs/2026-09-15-vrdu-invalids-02.yaml
+        --config configs/2026-10-21-vrdu-invalids-04.yaml
 """
 
 from __future__ import annotations
@@ -100,6 +115,7 @@ import statistics
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
@@ -117,7 +133,7 @@ REQUIRED_PARAM_KEYS = {"data_root", "main", "line", "corrupt_from_null", "corrup
 INTER_DOCUMENT, INTRA_DOCUMENT, CROSS_TYPE = "inter_document", "intra_document", "cross_type"
 ERROR_TYPES = {"main": (INTER_DOCUMENT, CROSS_TYPE), "line": (INTER_DOCUMENT, INTRA_DOCUMENT, CROSS_TYPE)}
 assert not set(MAIN_FIELDS) & set(LINE_FIELDS), "main/line field names collide"
-REQUIRED_DATE_KEYS = {"main_fields", "line_fields", "year_pivot", "main_sentinels"}
+REQUIRED_DATE_KEYS = {"main_fields", "line_fields", "year_pivot"}
 
 
 # --- Dates --------------------------------------------------------------------
@@ -143,42 +159,69 @@ def parse_date(text, year_pivot):
     return (year, month, day)
 
 
+def pair_ok(parsed_from, parsed_to):
+    """Date-order rule: ``from <= to``, enforced only when BOTH sides parse.
+
+    A null or an OCR fragment (``parse_date`` -> None) has no position in time,
+    so it neither violates nor blocks the order. Every error type, feasibility
+    check and verifier uses this one rule.
+    """
+    return parsed_from is None or parsed_to is None or parsed_from <= parsed_to
+
+
+@cache
+def equivalence_key(kind, text, year_pivot):
+    """Canonical form of a value: two values with the same key are the same entity.
+
+    A reformat of the original (``2/18/20`` vs ``02/18/20``, ``$1,234.00`` vs
+    ``1234``, ``ISSUE`` vs ``Issue``) is not an error, so it must never count as
+    a corruption. Dates compare as parsed dates and amounts as numbers (by
+    ``kind``); everything else, fragments included, as whitespace-collapsed
+    case-folded text.
+    """
+    if kind == "date":
+        parsed = parse_date(text, year_pivot)
+        if parsed is not None:
+            return ("date", parsed)
+    elif kind == "amount":
+        digits = re.sub(r"[\s$,]", "", text)
+        if re.fullmatch(r"\d+(\.\d+)?", digits):
+            return ("amount", Decimal(digits))
+    return ("text", " ".join(text.split()).casefold())
+
+
+def make_eq(kind_of, year_pivot):
+    """``eq(field, value)``: the equivalence key of ``value`` as a ``field`` value (None for None)."""
+    def eq(field, value):
+        return None if value is None else equivalence_key(kind_of.get(field), value, year_pivot)
+    return eq
+
+
 # --- Pools (main dataset + line inter-document) --------------------------------
 
 
-def main_pools(base_rows, sentinels, date_fields, year_pivot):
+def main_pools(base_rows):
     """One value list per main field: its non-null values, frequency-weighted.
 
-    Date fields keep only parseable values, plus the sentinels, so an OCR
-    fragment is never emitted as an invalid date and an ordered pair always
-    exists.
+    Date fields keep OCR fragments like every other value: the corrupted-date
+    distribution must look like the valid-date distribution, or "is a fragment"
+    would predict "is correct".
     """
-    pools = {}
-    for field in MAIN_FIELDS:
-        non_null = [r[field] for r in base_rows if r[field] is not None]
-        if field in date_fields:
-            parseable = [v for v in non_null if parse_date(v, year_pivot) is not None]
-            pools[field] = parseable + list(sentinels)
-        else:
-            pools[field] = non_null
-    return pools
+    return {f: [r[f] for r in base_rows if r[f] is not None] for f in MAIN_FIELDS}
 
 
-def line_inter_pools_by_doc(line_base, date_fields, year_pivot):
+def line_inter_pools_by_doc(line_base, date_fields):
     """One value pool per document: every LINE_FIELD's non-null values, drawn
     exclusively from every OTHER document's line rows in the split.
 
-    The two date fields share one pool -- every parseable date on any other
-    document's line rows. No sentinels: matches the line side's existing
-    convention that a line date is only ever corrupted to a date that really
-    appears somewhere (here: in some other document).
+    The two date fields share one pool -- every date value (fragments
+    included) on any other document's line rows.
     """
     docs = sorted({r["document_id"] for r in line_base})
     pools = {}
     for doc in docs:
         others = [r for r in line_base if r["document_id"] != doc]
         date_pool = [v for f in date_fields for r in others for v in [r[f]] if v is not None]
-        date_pool = [v for v in date_pool if parse_date(v, year_pivot) is not None]
         field_pools = {}
         for field in LINE_FIELDS:
             if field in date_fields:
@@ -192,41 +235,39 @@ def line_inter_pools_by_doc(line_base, date_fields, year_pivot):
 # --- Feasibility -----------------------------------------------------------
 
 
-def _nondate_invalidatable(row, target_fields, date_fields, pools):
+def _nondate_invalidatable(row, target_fields, date_fields, pools, eq):
     return [
         f for f in target_fields
-        if f not in date_fields and any(v != row[f] for v in pools[f])
+        if f not in date_fields and any(eq(f, v) != eq(f, row[f]) for v in pools[f])
     ]
 
 
-def _date_feasibility(row, date_fields, pools, year_pivot):
-    """Which date corruptions keep the pair ordered.
+def _date_candidates(row, field, pools, year_pivot, eq):
+    """Parsed value (None = fragment) of every pool value that is not equivalent to ``row[field]``."""
+    original = eq(field, row[field])
+    return [parse_date(v, year_pivot) for v in pools[field] if eq(field, v) != original]
+
+
+def _date_feasibility(row, date_fields, pools, year_pivot, eq):
+    """Which date corruptions keep the pair ordered (see ``pair_ok``).
 
     Returns ``(start_alone, end_alone, both)``: whether the from-date can be
     changed with the to-date retained, vice versa, and whether both can be
-    changed together. Date pools contain only parseable values, so every
-    candidate parses.
+    changed together. A fragment candidate (or a null / fragment partner) is
+    never blocked by order.
     """
     from_field, to_field = date_fields
-    s0, e0 = row[from_field], row[to_field]
-    parsed_s, parsed_e = parse_date(s0, year_pivot), parse_date(e0, year_pivot)
-    fragment_s = s0 is not None and parsed_s is None
-    fragment_e = e0 is not None and parsed_e is None
+    parsed_s = parse_date(row[from_field], year_pivot)
+    parsed_e = parse_date(row[to_field], year_pivot)
+    from_c = _date_candidates(row, from_field, pools, year_pivot, eq)
+    to_c = _date_candidates(row, to_field, pools, year_pivot, eq)
 
-    from_candidates = [parse_date(v, year_pivot) for v in pools[from_field] if v != s0]
-    to_candidates = [parse_date(v, year_pivot) for v in pools[to_field] if v != e0]
-    earliest_from = min(from_candidates) if from_candidates else None
-    latest_to = max(to_candidates) if to_candidates else None
-
-    start_alone = (
-        not fragment_e and earliest_from is not None
-        and (parsed_e is None or earliest_from <= parsed_e)
+    start_alone = any(pair_ok(p, parsed_e) for p in from_c)
+    end_alone = any(pair_ok(parsed_s, q) for q in to_c)
+    both = bool(from_c) and bool(to_c) and (
+        None in from_c or None in to_c
+        or min(p for p in from_c if p is not None) <= max(q for q in to_c if q is not None)
     )
-    end_alone = (
-        not fragment_s and latest_to is not None
-        and (parsed_s is None or latest_to >= parsed_s)
-    )
-    both = earliest_from is not None and latest_to is not None and earliest_from <= latest_to
     return start_alone, end_alone, both
 
 
@@ -241,7 +282,7 @@ def achievable_counts(n_nondate, date_feasibility):
     return {a + d for a in range(n_nondate + 1) for d in date_counts}
 
 
-def achievable_targets(base_row, target_fields, date_fields, pools, year_pivot, k_range):
+def achievable_targets(base_row, target_fields, date_fields, pools, year_pivot, k_range, eq):
     """Sorted, distinct ``num_invalid_fields`` values this row can realize in ``k_range``.
 
     Line-side only (inter-document + the ceiling check for intra-document).
@@ -251,8 +292,8 @@ def achievable_targets(base_row, target_fields, date_fields, pools, year_pivot, 
     triggers that capping -- the requested k is already the achieved one.
     """
     k_lo, k_hi = k_range
-    feasible_nondate = _nondate_invalidatable(base_row, target_fields, date_fields, pools)
-    date_feasibility = _date_feasibility(base_row, date_fields, pools, year_pivot)
+    feasible_nondate = _nondate_invalidatable(base_row, target_fields, date_fields, pools, eq)
+    date_feasibility = _date_feasibility(base_row, date_fields, pools, year_pivot, eq)
     achievable = achievable_counts(len(feasible_nondate), date_feasibility)
     return sorted(x for x in achievable if k_lo <= x <= k_hi)
 
@@ -260,10 +301,11 @@ def achievable_targets(base_row, target_fields, date_fields, pools, year_pivot, 
 # --- Corruption (shared: main + line inter-document) ------------------------
 
 
-def sample_new(pool, original, rng):
-    """First value of a random permutation of ``pool`` that differs from ``original``."""
+def sample_new(pool, original, rng, eq, field):
+    """First value of a random permutation of ``pool`` not equivalent to ``original``."""
+    original_key = eq(field, original)
     for value in rng.sample(pool, len(pool)):
-        if value != original:
+        if eq(field, value) != original_key:
             return value
     raise AssertionError(f"pool of {len(pool)} values has none differing from {original!r}")
 
@@ -301,44 +343,75 @@ def _choose_fields(feasible_nondate, date_fields, date_feasibility, k, rng):
     return sorted([*chosen_nondate, *chosen_dates])
 
 
-def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, rng):
-    """Assign new value(s) to the chosen date field(s), keeping ``from <= to``.
+def pick_fragment_neutral(eligible, pool, is_fragment, rng):
+    """Pick one of ``eligible`` (a subset of ``pool``) without over-selecting OCR fragments.
+
+    A fragment passes every order filter and a real date only sometimes does, so a
+    uniform pick from the order-feasible values draws fragments far above their rate in
+    the pool -- which would make "is a fragment" predict "was corrupted". Instead the
+    class (fragment / real) is drawn at the pool's own fragment rate, then a value
+    uniformly within it. Only when one class has no feasible value is the other forced.
+    """
+    fragments = [x for x in eligible if is_fragment(x)]
+    reals = [x for x in eligible if not is_fragment(x)]
+    if fragments and reals:
+        rate = sum(1 for x in pool if is_fragment(x)) / len(pool)
+        chosen = fragments if rng.random() < rate else reals
+    else:
+        chosen = fragments or reals
+    assert chosen, "no date candidate despite feasibility"
+    return chosen[rng.randrange(len(chosen))]
+
+
+def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, rng, eq):
+    """Assign new value(s) to the chosen date field(s), keeping ``from <= to`` where both parse.
 
     Feasibility has already guaranteed a valid choice exists; the assertions here
     fire only on a logic error.
     """
     from_field, to_field = date_fields
-    s0, e0 = row[from_field], row[to_field]
+    parsed_s = parse_date(row[from_field], year_pivot)
+    parsed_e = parse_date(row[to_field], year_pivot)
+    orig_s, orig_e = eq(from_field, row[from_field]), eq(to_field, row[to_field])
 
-    def pick(candidates):
-        assert candidates, "no date candidate despite feasibility"
-        return candidates[rng.randrange(len(candidates))]
+    def parsed(v):
+        return parse_date(v, year_pivot)
+
+    def is_fragment(v):
+        return parsed(v) is None
+
+    def pick(eligible, field, orig):
+        pool = [v for v in pools[field] if eq(field, v) != orig]
+        return pick_fragment_neutral(eligible, pool, is_fragment, rng)
 
     if chosen_dates == frozenset([from_field]):
-        bound = parse_date(e0, year_pivot)  # None -> to-date is null, unconstrained
         new_row[from_field] = pick([
             v for v in pools[from_field]
-            if v != s0 and (bound is None or parse_date(v, year_pivot) <= bound)
-        ])
+            if eq(from_field, v) != orig_s and pair_ok(parsed(v), parsed_e)
+        ], from_field, orig_s)
     elif chosen_dates == frozenset([to_field]):
-        bound = parse_date(s0, year_pivot)
         new_row[to_field] = pick([
             w for w in pools[to_field]
-            if w != e0 and (bound is None or parse_date(w, year_pivot) >= bound)
-        ])
+            if eq(to_field, w) != orig_e and pair_ok(parsed_s, parsed(w))
+        ], to_field, orig_e)
     else:
-        latest_to = max(parse_date(w, year_pivot) for w in pools[to_field] if w != e0)
+        to_c = _date_candidates(row, to_field, pools, year_pivot, eq)
+        to_free = None in to_c
+        latest_to = max((q for q in to_c if q is not None), default=None)
         new_from = pick([
-            v for v in pools[from_field] if v != s0 and parse_date(v, year_pivot) <= latest_to
-        ])
-        parsed_from = parse_date(new_from, year_pivot)
+            v for v in pools[from_field]
+            if eq(from_field, v) != orig_s
+            and (parsed(v) is None or to_free or parsed(v) <= latest_to)
+        ], from_field, orig_s)
+        parsed_from = parsed(new_from)
         new_to = pick([
-            w for w in pools[to_field] if w != e0 and parse_date(w, year_pivot) >= parsed_from
-        ])
+            w for w in pools[to_field]
+            if eq(to_field, w) != orig_e and pair_ok(parsed_from, parsed(w))
+        ], to_field, orig_e)
         new_row[from_field], new_row[to_field] = new_from, new_to
 
 
-def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng):
+def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq):
     """Build one invalid row from ``base_row``. Returns ``(new_row, invalid_fields)`` or None.
 
     On the main-dataset path ``k`` may exceed what the row supports, in which
@@ -347,8 +420,8 @@ def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot,
     ever pass an already-achievable ``k`` (from ``achievable_targets``), so this
     never returns None or caps there.
     """
-    feasible_nondate = _nondate_invalidatable(base_row, target_fields, date_fields, pools)
-    date_feasibility = _date_feasibility(base_row, date_fields, pools, year_pivot)
+    feasible_nondate = _nondate_invalidatable(base_row, target_fields, date_fields, pools, eq)
+    date_feasibility = _date_feasibility(base_row, date_fields, pools, year_pivot, eq)
     chosen = _choose_fields(feasible_nondate, date_fields, date_feasibility, k, rng)
     if not chosen:
         return None
@@ -356,13 +429,17 @@ def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot,
     new_row = dict(base_row)
     for field in chosen:
         if field not in date_fields:
-            new_row[field] = sample_new(pools[field], base_row[field], rng)
+            new_row[field] = sample_new(pools[field], base_row[field], rng, eq, field)
     chosen_dates = frozenset(f for f in chosen if f in date_fields)
     if chosen_dates:
-        _corrupt_dates(new_row, chosen_dates, base_row, date_fields, pools, year_pivot, rng)
+        _corrupt_dates(new_row, chosen_dates, base_row, date_fields, pools, year_pivot, rng, eq)
 
     changed = sorted(f for f in base_row if new_row[f] != base_row[f])
     assert changed == chosen, f"changed {changed} != chosen {chosen} ({base_row.get('document_id')})"
+    for f in chosen:
+        assert eq(f, new_row[f]) != eq(f, base_row[f]), (
+            f"{base_row.get('document_id')}: {f} {base_row[f]!r} -> {new_row[f]!r} is a reformat, not an error"
+        )
     return new_row, chosen
 
 
@@ -402,7 +479,7 @@ def tag_row(row, fields, id_keys, k, valid, invalid_fields, error_type, sources)
 
 
 def generate_split(base_rows, fields, target_fields, id_keys, k_range,
-                   pool_for_row, date_fields, year_pivot, rng, source_for):
+                   pool_for_row, date_fields, year_pivot, rng, source_for, eq):
     """Return ``(output_rows, skipped, capped)`` for one main-dataset split.
 
     All emitted invalid rows are ``inter_document``; ``source_for(field, value)``
@@ -422,7 +499,7 @@ def generate_split(base_rows, fields, target_fields, id_keys, k_range,
         row_id = {key: base_row[key] for key in id_keys}
         row_caps, produced = [], 0
         for k in range(k_lo, k_hi + 1):
-            result = make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng)
+            result = make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq)
             if result is None:
                 row_caps.append({**row_id, "k": k, "realized": 0})
                 continue
@@ -439,7 +516,7 @@ def generate_split(base_rows, fields, target_fields, id_keys, k_range,
     return out, skipped, capped
 
 
-def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, date_fields, year_pivot):
+def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, date_fields, year_pivot, eq):
     """Boundary checks on one emitted main-dataset split. Raises on any inconsistency."""
     valid_rows = [r for r in out_rows if r["valid"]]
     invalid_rows = [r for r in out_rows if not r["valid"]]
@@ -466,6 +543,7 @@ def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, da
         assert 1 <= row["num_invalid_fields"] == len(changed) <= row["k"] <= k_hi
         for field in changed:
             assert row[field] is not None, f"{key}: field {field} corrupted to null"
+            assert eq(field, row[field]) != eq(field, base[field]), f"{key}: {field} only reformatted"
         for field in carried:
             assert row[field] == base[field], f"{key}: carried field {field} changed"
 
@@ -476,10 +554,23 @@ def verify_output(out_rows, base_by_id, fields, target_fields, id_keys, k_hi, da
         start, end = row[from_field], row[to_field]
         if start is None or end is None:
             continue
-        parsed_start, parsed_end = parse_date(start, year_pivot), parse_date(end, year_pivot)
         key = tuple(row[k] for k in id_keys)
-        assert parsed_start is not None and parsed_end is not None, (key, start, end)
-        assert parsed_start <= parsed_end, (key, start, end)
+        assert pair_ok(parse_date(start, year_pivot), parse_date(end, year_pivot)), (key, start, end)
+
+
+def annotate_null_fill(rows, base_by_id, id_keys):
+    """Set ``source["null_fill"]`` on every corrupted entity: True when the valid row had no value there.
+
+    A null field is rendered as absent, so filling one in is a spurious entity rather than a
+    wrong value for a real one -- a different kind of error, tagged so it can be stratified.
+    Written as an explicit True / False on every corrupted entity, never only when True.
+    """
+    for row in rows:
+        if row["valid"]:
+            continue
+        base = base_by_id[tuple(row[k] for k in id_keys)]
+        for f in row["invalid_fields"]:
+            row["field_errors"][f]["source"]["null_fill"] = base[f] is None
 
 
 def verify_field_errors(rows, fields, allowed_error_types):
@@ -495,22 +586,24 @@ def verify_field_errors(rows, fields, allowed_error_types):
         for f in wrong:
             assert row["field_errors"][f]["error_type"] == row["error_type"], (f, row["field_errors"][f])
             assert isinstance(row["field_errors"][f]["source"], dict)
+            assert isinstance(row["field_errors"][f]["source"].get("null_fill"), bool), (f, row["field_errors"][f])
 
 
 # --- Row emission: line ---------------------------------------------------
 
 
 def _intra_feasible(base_row, current_row, other_rows, other_tuples, target_fields, date_fields,
-                     corrupted, used_donors, year_pivot):
+                     corrupted, used_donors, year_pivot, eq):
     """Fields still open to intra-document corruption at this step of the chain.
 
     Returns ``{field: [eligible donor index, ...]}`` for fields not yet
     corrupted with at least one not-yet-used donor supplying a non-null value
-    that (a) differs from the row's ORIGINAL value, (b) for a date field, keeps
-    ``from <= to`` against the partner date field's *current* (possibly
-    already-corrupted) value, and (c) would not make the row an exact duplicate
-    of another valid row in the document -- a (field, donor) pair that WOULD
-    reproduce one verbatim is simply excluded here, not fatal: two line items
+    that (a) is not equivalent to the row's ORIGINAL value (``eq``: a reformat is
+    not an error), (b) for a date field, keeps ``from <= to`` against the partner
+    date field's *current* (possibly already-corrupted) value whenever both
+    parse (``pair_ok``), and (c) would not make the row equivalent to another
+    valid row in the document -- a (field, donor) pair that WOULD reproduce one
+    is simply excluded here, not fatal: two line items
     differing in only one field is plausible real data, and the chain should
     just decline that specific pair (or stop, if nothing else is left) rather
     than abort the whole build over it.
@@ -525,22 +618,18 @@ def _intra_feasible(base_row, current_row, other_rows, other_tuples, target_fiel
             if idx in used_donors:
                 continue
             value = donor[field]
-            if value is None or value == base_row[field]:
+            if value is None or eq(field, value) == eq(field, base_row[field]):
                 continue
             if field in date_fields:
                 partner = to_field if field == from_field else from_field
-                partner_value = current_row[partner]
-                if partner_value is not None:
-                    parsed_partner = parse_date(partner_value, year_pivot)
-                    parsed_value = parse_date(value, year_pivot)
-                    if parsed_partner is None or parsed_value is None:
-                        continue
-                    if field == from_field and parsed_value > parsed_partner:
-                        continue
-                    if field == to_field and parsed_value < parsed_partner:
-                        continue
+                parsed_value = parse_date(value, year_pivot)
+                parsed_partner = parse_date(current_row[partner], year_pivot)
+                if field == from_field and not pair_ok(parsed_value, parsed_partner):
+                    continue
+                if field == to_field and not pair_ok(parsed_partner, parsed_value):
+                    continue
             hypothetical = tuple(
-                (value if f == field else current_row[f]) for f in target_fields
+                eq(f, value if f == field else current_row[f]) for f in target_fields
             )
             if hypothetical in other_tuples:
                 continue
@@ -550,7 +639,7 @@ def _intra_feasible(base_row, current_row, other_rows, other_tuples, target_fiel
     return feasible
 
 
-def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_pivot, k_hi, rng):
+def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_pivot, k_hi, rng, eq):
     """Grow ``base_row`` into up to ``k_hi`` intra-document invalid variants.
 
     Each successive field corruption draws its value from a distinct,
@@ -564,7 +653,7 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
     1, 2, ..., achieved (empty list if the row has no usable donor at all);
     ``donors`` maps each corrupted field to its donor's ``line_index``.
     """
-    other_tuples = {tuple(r[f] for f in target_fields) for r in other_rows}
+    other_tuples = {tuple(eq(f, r[f]) for f in target_fields) for r in other_rows}
     current = dict(base_row)
     corrupted = []
     used_donors = set()
@@ -572,12 +661,20 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
     results = []
     while len(corrupted) < k_hi:
         feasible = _intra_feasible(base_row, current, other_rows, other_tuples, target_fields,
-                                    date_fields, corrupted, used_donors, year_pivot)
+                                    date_fields, corrupted, used_donors, year_pivot, eq)
         if not feasible:
             break
         feasible_fields = [f for f in target_fields if f in feasible]
         field = feasible_fields[rng.randrange(len(feasible_fields))]
-        donor_idx = feasible[field][rng.randrange(len(feasible[field]))]
+        if field in date_fields:
+            every_donor = [i for i, d in enumerate(other_rows)
+                           if i not in used_donors and d[field] is not None
+                           and eq(field, d[field]) != eq(field, base_row[field])]
+            donor_idx = pick_fragment_neutral(
+                feasible[field], every_donor,
+                lambda i: parse_date(other_rows[i][field], year_pivot) is None, rng)
+        else:
+            donor_idx = feasible[field][rng.randrange(len(feasible[field]))]
 
         current[field] = other_rows[donor_idx][field]
         corrupted.append(field)
@@ -585,7 +682,7 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
         donors[field] = other_rows[donor_idx]["line_index"]
 
         snapshot = dict(current)
-        full_tuple = tuple(snapshot[f] for f in target_fields)
+        full_tuple = tuple(eq(f, snapshot[f]) for f in target_fields)
         assert full_tuple not in other_tuples, (
             f"intra-document corruption at {base_row.get('document_id')}/"
             f"{base_row.get('line_index')} reproduced another valid row verbatim "
@@ -595,12 +692,12 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
     return results
 
 
-def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_range, rng):
+def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_range, rng, eq):
     """One invalid row per achievable num_invalid_fields for the inter-document type."""
-    targets = achievable_targets(row, target_fields, date_fields, pool, year_pivot, k_range)
+    targets = achievable_targets(row, target_fields, date_fields, pool, year_pivot, k_range, eq)
     rows = []
     for k in targets:
-        result = make_invalid_row(row, k, target_fields, date_fields, pool, year_pivot, rng)
+        result = make_invalid_row(row, k, target_fields, date_fields, pool, year_pivot, rng, eq)
         assert result is not None and len(result[1]) == k, (
             f"k={k} came from achievable_targets so it must be exactly realizable"
         )
@@ -608,7 +705,7 @@ def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_ran
     return rows
 
 
-def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
+def generate_line_split(line_base, date_fields, year_pivot, k_range, rng, eq):
     """Build inter- and intra-document invalid line rows for one split.
 
     Returns ``(output_rows, skipped, capped)`` where ``skipped``/``capped`` are
@@ -625,7 +722,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
     for rows in by_doc.values():
         rows.sort(key=lambda r: r["line_index"])
 
-    inter_pools = line_inter_pools_by_doc(line_base, date_fields, year_pivot)
+    inter_pools = line_inter_pools_by_doc(line_base, date_fields)
 
     skipped = {INTER_DOCUMENT: [], INTRA_DOCUMENT: []}
     capped = {INTER_DOCUMENT: [], INTRA_DOCUMENT: []}
@@ -634,7 +731,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
         for row in rows:
             row_id = {"document_id": row["document_id"], "line_index": row["line_index"]}
 
-            inter_rows = line_inter_document(row, inter_pools[doc_id], LINE_FIELDS, date_fields, year_pivot, k_range, rng)
+            inter_rows = line_inter_document(row, inter_pools[doc_id], LINE_FIELDS, date_fields, year_pivot, k_range, rng, eq)
             if not inter_rows:
                 skipped["inter_document"].append(row_id)
             else:
@@ -647,7 +744,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
                                        {f: {"scope": "other_document"} for f in invalid_fields}))
 
             other_rows = [r for r in rows if r is not row]
-            chain = build_intra_chain(row, other_rows, LINE_FIELDS, date_fields, year_pivot, k_hi, rng)
+            chain = build_intra_chain(row, other_rows, LINE_FIELDS, date_fields, year_pivot, k_hi, rng, eq)
             chain = [(r, fields, donors) for r, fields, donors in chain if len(fields) >= k_lo]
             if not chain:
                 skipped["intra_document"].append(row_id)
@@ -663,7 +760,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng):
     return out, skipped, capped
 
 
-def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_doc):
+def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_doc, eq):
     """Boundary checks on one emitted line split. Raises on any inconsistency."""
     valid_rows = [r for r in out_rows if r["valid"]]
     invalid_rows = [r for r in out_rows if not r["valid"]]
@@ -692,6 +789,7 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         assert row["k"] == row["num_invalid_fields"] == len(changed) >= 1, (key, row["error_type"], row)
         for field in changed:
             assert row[field] is not None, f"{key}: field {field} corrupted to null"
+            assert eq(field, row[field]) != eq(field, base[field]), f"{key}: {field} only reformatted"
 
         # Only checked for intra-document: its values are drawn directly from
         # another row in this document, so this must always hold by
@@ -717,20 +815,18 @@ def verify_line_output(out_rows, base_by_id, date_fields, year_pivot, line_by_do
         if from_field in changed or to_field in changed:
             start, end = row[from_field], row[to_field]
             if start is not None and end is not None:
-                parsed_start, parsed_end = parse_date(start, year_pivot), parse_date(end, year_pivot)
-                assert parsed_start is not None and parsed_end is not None, (key, start, end)
-                assert parsed_start <= parsed_end, (key, start, end)
+                assert pair_ok(parse_date(start, year_pivot), parse_date(end, year_pivot)), (key, start, end)
 
     for row in invalid_rows:
         if row["error_type"] != "intra_document":
             continue
         key = (row["document_id"], row["line_index"])
-        full = tuple(row[f] for f in LINE_FIELDS)
+        full = tuple(eq(f, row[f]) for f in LINE_FIELDS)
         others = {
-            tuple(r[f] for f in LINE_FIELDS) for r in line_by_doc[row["document_id"]]
+            tuple(eq(f, r[f]) for f in LINE_FIELDS) for r in line_by_doc[row["document_id"]]
             if (r["document_id"], r["line_index"]) != key
         }
-        assert full not in others, f"{key}: intra-document row duplicates another valid row verbatim"
+        assert full not in others, f"{key}: intra-document row duplicates another valid row"
 
 
 # --- cross_type ----------------------------------------------------------
@@ -747,27 +843,27 @@ def field_kinds(kinds):
     return out
 
 
-def document_truth(main_base, line_base):
-    """``{document_id: {field: set of non-null valid values}}`` over main + line fields."""
+def document_truth(main_base, line_base, eq):
+    """``{document_id: {field: set of equivalence keys of the non-null valid values}}`` over main + line fields."""
     truth = {r["document_id"]: {f: set() for f in [*MAIN_FIELDS, *LINE_FIELDS]} for r in main_base}
     for r in main_base:
         for f in MAIN_FIELDS:
             if r[f] is not None:
-                truth[r["document_id"]][f].add(r[f])
+                truth[r["document_id"]][f].add(eq(f, r[f]))
     for r in line_base:
         for f in LINE_FIELDS:
             if r[f] is not None:
-                truth[r["document_id"]][f].add(r[f])
+                truth[r["document_id"]][f].add(eq(f, r[f]))
     return truth
 
 
-def cross_type_candidates(target, kinds, kind_of, main_row, line_rows, truth_doc, year_pivot, counts):
+def cross_type_candidates(target, kinds, kind_of, main_row, line_rows, truth_doc, counts, eq):
     """Eligible ``[(value, source)]`` for filing a value under ``target``.
 
     Every non-null value of every other same-kind field of this document, in
-    either dataset, except (a) unparseable dates and (b) values that are already
-    a valid value of ``target`` in this document. ``counts`` accumulates how many
-    candidates each rule removed.
+    either dataset, except values equivalent to a valid value of ``target`` in
+    this document (OCR-fragment dates are eligible, like any other value).
+    ``counts`` accumulates how many candidates the rule removed.
     """
     kind = kind_of[target]
     out = []
@@ -782,10 +878,7 @@ def cross_type_candidates(target, kinds, kind_of, main_row, line_rows, truth_doc
             if value is None:
                 continue
             counts["considered"] += 1
-            if kind == "date" and parse_date(value, year_pivot) is None:
-                counts["excluded_unparseable_date"] += 1
-                continue
-            if value in truth_doc[target]:
+            if eq(target, value) in truth_doc[target]:
                 counts["excluded_valid_for_target"] += 1
                 continue
             out.append((value, {"scope": "same_document", "dataset": dataset,
@@ -812,7 +905,7 @@ def mark_exchanges(sources, dataset, row):
 
 
 def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, line_by_doc, truth,
-                             kinds, date_fields, year_pivot, k_range, rng):
+                             kinds, date_fields, year_pivot, k_range, rng, eq):
     """cross_type invalid rows for one dataset/split: one per achievable ``k`` in ``k_range``.
 
     Returns ``(rows, skipped, capped, stats)``. ``rng`` must be this
@@ -836,7 +929,7 @@ def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, l
         row_id = {key: base[key] for key in id_keys}
         cands = {
             t: cross_type_candidates(t, kinds, kind_of, main_by_doc[doc], line_by_doc.get(doc, []),
-                                     truth[doc], year_pivot, stats["candidate_counts"])
+                                     truth[doc], stats["candidate_counts"], eq)
             for t in targets
         }
         pools = {t: [v for v, _ in cands[t]] for t in targets}
@@ -845,14 +938,14 @@ def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, l
             for v, src in cands[t]:
                 sources_by_value[t].setdefault(v, []).append(src)
 
-        ks = achievable_targets(base, targets, date_fields, pools, year_pivot, (k_lo, k_hi))
+        ks = achievable_targets(base, targets, date_fields, pools, year_pivot, (k_lo, k_hi), eq)
         if not ks:
             skipped.append(row_id)
             continue
         if ks[-1] < k_hi:
             capped.append({**row_id, "reached": ks[-1]})
         for k in ks:
-            result = make_invalid_row(base, k, targets, date_fields, pools, year_pivot, rng)
+            result = make_invalid_row(base, k, targets, date_fields, pools, year_pivot, rng, eq)
             assert result is not None and len(result[1]) == k, "k came from achievable_targets"
             new_row, invalid_fields = result
             sources = {f: dict(rng.choice(sources_by_value[f][new_row[f]])) for f in invalid_fields}
@@ -867,9 +960,9 @@ def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, l
 
 
 def verify_cross_type_rows(rows, dataset, base_by_id, id_keys, main_by_doc, line_by_doc, truth, kinds,
-                           date_fields, year_pivot):
-    """Every cross_type field is a real, same-kind, parseable-if-date value of its
-    own document that is not already valid for the field it was filed under."""
+                           date_fields, year_pivot, eq):
+    """Every cross_type field is a real, same-kind value of its own document that
+    is not (equivalent to) a value already valid for the field it was filed under."""
     kind_of = field_kinds(kinds)
     for row in rows:
         assert row["error_type"] == CROSS_TYPE
@@ -888,9 +981,7 @@ def verify_cross_type_rows(rows, dataset, base_by_id, id_keys, main_by_doc, line
                 donor = next(r for r in line_by_doc[doc] if r["line_index"] == src["line_index"])
                 taken = donor[src["field"]]
             assert taken is not None and row[f] == taken, (key, f, src)
-            assert row[f] not in truth[doc][f], f"{key}: {f} filed a value that is valid for it"
-            if kind_of[f] == "date":
-                assert parse_date(row[f], year_pivot) is not None, (key, f, row[f])
+            assert eq(f, row[f]) not in truth[doc][f], f"{key}: {f} filed a value that is valid for it"
             ex = src["exchanged_with"]
             if ex is not None:
                 back = row["field_errors"][ex]["source"]
@@ -907,8 +998,8 @@ def load_config(path):
         assert key in config, f"config missing top-level key {key!r}"
     params = config["params"]
     assert not REQUIRED_PARAM_KEYS - set(params), f"config params missing {sorted(REQUIRED_PARAM_KEYS - set(params))}"
-    assert not REQUIRED_DATE_KEYS - set(params["dates"]), (
-        f"config params.dates missing {sorted(REQUIRED_DATE_KEYS - set(params['dates']))}"
+    assert set(params["dates"]) == REQUIRED_DATE_KEYS, (
+        f"config params.dates keys {sorted(params['dates'])} != {sorted(REQUIRED_DATE_KEYS)}"
     )
     assert set(params["main"]) == {"k_range", "pool_scope"}, "params.main keys"
     assert set(params["line"]) == {"k_range"}, "params.line keys"
@@ -929,6 +1020,30 @@ def read_base(path, fields, id_keys):
     return rows
 
 
+# --- Diagnostics ------------------------------------------------------------
+
+
+def date_fragment_stats(rows, date_fields, year_pivot):
+    """Per row type, how many date entities are OCR fragments, split by corrupted / kept.
+
+    ``{"valid" | error_type: {"corrupted": n, "corrupted_fragment": n, "kept": n,
+    "kept_fragment": n}}`` over the non-null date entities. If fragments were a
+    label signal (a fragment predicting "correct", or "corrupted"), the
+    corrupted fragment rate would differ from the kept / valid one.
+    """
+    stats = {}
+    for row in rows:
+        cell = stats.setdefault(row["error_type"] or "valid", Counter())
+        for f in date_fields:
+            if row[f] is None:
+                continue
+            side = "corrupted" if row["field_errors"][f] is not None else "kept"
+            cell[side] += 1
+            cell[side + "_fragment"] += parse_date(row[f], year_pivot) is None
+    return {et: {key: cell[key] for key in ("corrupted", "corrupted_fragment", "kept", "kept_fragment")}
+            for et, cell in sorted(stats.items())}
+
+
 # --- Main --------------------------------------------------------------------
 
 
@@ -945,12 +1060,10 @@ def main(argv=None):
     seed = config["seed"]
     dates = params["dates"]
     year_pivot = dates["year_pivot"]
-    sentinels = list(dates["main_sentinels"])
     main_date_fields = list(dates["main_fields"])
     line_date_fields = list(dates["line_fields"])
     assert set(main_date_fields) <= set(MAIN_FIELDS) and len(main_date_fields) == 2
     assert set(line_date_fields) <= set(LINE_FIELDS) and len(line_date_fields) == 2
-    assert all(parse_date(s, year_pivot) is not None for s in sentinels), "unparseable sentinel"
     assert params["corrupt_from_null"] is True and params["corrupt_to_null"] is False, (
         "this build assumes corrupt_from_null=true, corrupt_to_null=false"
     )
@@ -963,6 +1076,7 @@ def main(argv=None):
     cross = params["cross_type"]
     kinds = {kind: list(members) for kind, members in cross["kinds"].items()}
     kind_of = field_kinds(kinds)
+    eq = make_eq(kind_of, year_pivot)
     assert set(kinds.get("date", [])) == {*main_date_fields, *line_date_fields}, (
         "cross_type.kinds.date must be exactly the main + line date fields"
     )
@@ -990,6 +1104,7 @@ def main(argv=None):
         "line_inter_date_pool_sizes": {},
         "line_intra_donor_counts": {},
         "line_inter_coincidental_overlap": {},
+        "date_fragment_rates": {"main": {}, "line": {}},
     }
 
     for split in ("train", "test"):
@@ -1002,19 +1117,12 @@ def main(argv=None):
         assert set(line_docs) <= set(main_by_id), "line documents missing from the main base"
 
         # --- main dataset (inter_document generation unchanged; cross_type appended) ---
-        pools_main = main_pools(main_base, sentinels, main_date_fields, year_pivot)
+        pools_main = main_pools(main_base)
         provenance["main_pool_sizes"][split] = {f: len(p) for f, p in pools_main.items()}
-        real_dates = {r[f] for f in main_date_fields for r in main_base if r[f] is not None}
-        sentinel_only = {sv for sv in sentinels if sv not in real_dates}
-
-        def main_source(field, value, _only=sentinel_only, _dates=main_date_fields):
-            if field in _dates and value in _only:
-                return {"scope": "sentinel"}
-            return {"scope": "other_document"}
-
         out_rows, skipped, capped = generate_split(
             main_base, MAIN_FIELDS, MAIN_FIELDS, ["document_id"], main_k_range,
-            lambda _r, _p=pools_main: _p, main_date_fields, year_pivot, rng, main_source,
+            lambda _r, _p=pools_main: _p, main_date_fields, year_pivot, rng,
+            lambda _field, _value: {"scope": "other_document"}, eq,
         )
 
         line_by_doc = {}
@@ -1022,22 +1130,24 @@ def main(argv=None):
             line_by_doc.setdefault(row["document_id"], []).append(row)
         for rows_ in line_by_doc.values():
             rows_.sort(key=lambda r: r["line_index"])
-        truth = document_truth(main_base, line_base)
+        truth = document_truth(main_base, line_base, eq)
 
         cross_rng = random.Random(f"{seed}:{split}:main:{CROSS_TYPE}")
         cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
             "main", main_base, MAIN_FIELDS, ["document_id"], main_by_id, line_by_doc, truth, kinds,
-            main_date_fields, year_pivot, cross_k["main"], cross_rng,
+            main_date_fields, year_pivot, cross_k["main"], cross_rng, eq,
         )
         out_rows = out_rows + cross_rows
         base_by_id = {(r["document_id"],): r for r in main_base}
+        annotate_null_fill(out_rows, base_by_id, ["document_id"])
         verify_output(out_rows, base_by_id, MAIN_FIELDS, MAIN_FIELDS, ["document_id"],
-                      max(main_k_range[1], cross_k["main"][1]), main_date_fields, year_pivot)
+                      max(main_k_range[1], cross_k["main"][1]), main_date_fields, year_pivot, eq)
         verify_cross_type_rows(cross_rows, "main", base_by_id, ["document_id"], main_by_id, line_by_doc,
-                               truth, kinds, main_date_fields, year_pivot)
+                               truth, kinds, main_date_fields, year_pivot, eq)
         (data_root / "main" / f"{split}.json").write_text(
             json.dumps(out_rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
+        provenance["date_fragment_rates"]["main"][split] = date_fragment_stats(out_rows, main_date_fields, year_pivot)
         n_valid = sum(1 for r in out_rows if r["valid"])
         n_by_type = {et: sum(1 for r in out_rows if r["error_type"] == et) for et in ERROR_TYPES["main"]}
         provenance["counts"]["main"][split] = {
@@ -1066,7 +1176,7 @@ def main(argv=None):
         )
 
         # --- line dataset (inter- + intra-document, then cross_type) ---
-        inter_pools = line_inter_pools_by_doc(line_base, line_date_fields, year_pivot)
+        inter_pools = line_inter_pools_by_doc(line_base, line_date_fields)
         inter_sizes = [len(p[line_date_fields[0]]) for p in inter_pools.values()]
         provenance["line_inter_date_pool_sizes"][split] = {
             "min": min(inter_sizes), "median": statistics.median(inter_sizes), "max": max(inter_sizes),
@@ -1077,21 +1187,23 @@ def main(argv=None):
             "docs_with_no_donor": sum(1 for c in donor_counts if c == 0),
         }
 
-        out_rows, skipped, capped = generate_line_split(line_base, line_date_fields, year_pivot, line_k_range, rng)
+        out_rows, skipped, capped = generate_line_split(line_base, line_date_fields, year_pivot, line_k_range, rng, eq)
         cross_rng = random.Random(f"{seed}:{split}:line:{CROSS_TYPE}")
         cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
             "line", line_base, LINE_FIELDS, ["document_id", "line_index"], main_by_id, line_by_doc, truth,
-            kinds, line_date_fields, year_pivot, cross_k["line"], cross_rng,
+            kinds, line_date_fields, year_pivot, cross_k["line"], cross_rng, eq,
         )
         out_rows = out_rows + cross_rows
         base_by_id_line = {(r["document_id"], r["line_index"]): r for r in line_base}
-        verify_line_output(out_rows, base_by_id_line, line_date_fields, year_pivot, line_by_doc)
+        annotate_null_fill(out_rows, base_by_id_line, ["document_id", "line_index"])
+        verify_line_output(out_rows, base_by_id_line, line_date_fields, year_pivot, line_by_doc, eq)
         verify_cross_type_rows(cross_rows, "line", base_by_id_line, ["document_id", "line_index"], main_by_id,
-                               line_by_doc, truth, kinds, line_date_fields, year_pivot)
+                               line_by_doc, truth, kinds, line_date_fields, year_pivot, eq)
         (data_root / "line" / f"{split}.json").write_text(
             json.dumps(out_rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
+        provenance["date_fragment_rates"]["line"][split] = date_fragment_stats(out_rows, line_date_fields, year_pivot)
         n_valid = sum(1 for r in out_rows if r["valid"])
         n_inter = sum(1 for r in out_rows if r["error_type"] == INTER_DOCUMENT)
         n_intra = sum(1 for r in out_rows if r["error_type"] == INTRA_DOCUMENT)
