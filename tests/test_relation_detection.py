@@ -167,6 +167,7 @@ def test_instructions_are_relational_and_name_only_line_fields():
     for f in ("advertiser", "agency", "gross_amount", "flight_from"):
         assert f"- {f}:" not in text
     assert "same single item" in text
+    assert "The field names are part of the relation" in text and "listed under the wrong field" in text
     assert "related: true" in text and "related: false" in text
     assert "<field>" not in text  # one verdict for the record, not one per field
     assert "padding space" in text and "closing quote" in text and "newline" in text

@@ -134,6 +134,8 @@ def test_conditional_question_names_primary_and_lists_conditions():
     assert f"- `sub_amount`: {LINE.field_descriptions['sub_amount']}" in text and "- `program_end_date`:" in text
     assert "- `program_start_date`" not in text and "- `channel`" not in text  # only the present conditions
     assert "same single item as every one of the conditions" in text and "not related to one or more" in text
+    assert "The field names are part of the association" in text and "listed under the wrong field" in text
+    assert "as given" not in text  # conditions are judged too, not assumed correct
     assert "Do not use outside knowledge" in text and "unclear evidence means false" in text
     for bad in (["channel"], [], ["sub_amount", "sub_amount"], ["nope"]):
         with pytest.raises(AssertionError):

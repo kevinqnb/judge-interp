@@ -15,7 +15,8 @@ Tasks:
   task, an explicit split into one primary entity and its conditions. Nothing about where the
   samples came from (which dataset, how they were drawn) is known here.
   - conditional: one record per sample, one ``noul`` question: is the primary entity correctly
-    associated, in the document, with all of the conditions? Label: true iff the primary and every
+    associated, in the document, with all of the conditions, with every value under its correct
+    field? Label: true iff the primary and every
     condition is valid (a valid primary with a corrupted condition is false).
   - one-shot: one record per sample, one ``noul`` question: is the whole record valid, i.e. is
     every entity present and of the right type, and are they all related? Label: true iff every
@@ -76,7 +77,9 @@ The primary entity is the field `{primary}`: {primary_desc}.
 The conditions are:
 {conditions}
 
-The document may describe many items of the kind this record describes. Taking the CONDITIONS as given, is the PRIMARY ENTITY correctly associated with them in the CONTEXT (the {context_description})? That is: does the primary entity belong to the same single item as every one of the conditions? Answer true only if it is related to all of them. Answer false if it is not related to one or more of them, for example because it belongs to a different item than they do. A value that does not appear in the CONTEXT cannot be associated with anything in it.
+The document may describe many items of the kind this record describes. Is the PRIMARY ENTITY correctly associated with the CONDITIONS in the CONTEXT (the {context_description})? That is: does the primary entity belong to the same single item as every one of the conditions? Answer true only if it is related to all of them. Answer false if it is not related to one or more of them, for example because it belongs to a different item than they do. A value that does not appear in the CONTEXT cannot be associated with anything in it.
+
+The field names are part of the association. The primary entity and each condition must be what its field denotes for that item, as described above. A value that belongs to the same item but is listed under the wrong field (it is actually the value of a different field) makes the association fail: answer false.
 
 Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence means false."""
 

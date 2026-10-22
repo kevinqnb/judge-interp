@@ -3,7 +3,8 @@
 Same pipeline as ``entity_detection``, with different instructions. ``build_instructions``
 asks the judge whether the non-null fields of one row all describe the same item among the
 several similar items a document may contain (for VRDU, the same line item of the order),
-i.e. whether the entities belong together. The judge gives one verdict on the record as a
+i.e. whether the entities belong together, each value being what its field denotes for that
+item (a value of the right item listed under the wrong field fails the relation). The judge gives one verdict on the record as a
 whole, not one per entity; representations are still collected at every entity's closing
 quote and labelled per entity. Only datasets whose spec has ``supports_relation`` are
 accepted.
@@ -43,11 +44,13 @@ You are given:
 The fields that may appear are:
 {types}
 
-The document may describe many items of the kind this record describes. A valid record is one whose entities are all related: taken together, they describe the same single item in the document. If one or more entities belong to a different item than the others, the record as a whole is not valid, even though each of those entities may be a genuine value of the document. Do not judge whether an individual entity is real, and do not judge entities one by one; judge the entities of the record as a whole, i.e. whether they all belong together.
+The document may describe many items of the kind this record describes. A valid record is one whose entities are all related: taken together, they describe the same single item in the document. If one or more entities belong to a different item than the others, the record as a whole is not valid, even though each of those entities may be a genuine value of the document.
 
-Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Give one verdict for the whole record.
+The field names are part of the relation. Each value must be what its field denotes for that item, as described in the list of fields above. A value that belongs to the right item but is listed under the wrong field (it is actually the value of a different field) breaks the relation, and the record is not valid.
 
-Answer with exactly one line: `related: true` if all the entities of the record belong together as one item, or `related: false` if they do not."""
+Do not judge entities one by one; judge the record as a whole: do all its values, each under its own field, belong together as one item? Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Give one verdict for the whole record.
+
+Answer with exactly one line: `related: true` if all the entities of the record belong together as one item, each under its correct field, or `related: false` if they do not."""
 
 def build_instructions(spec: DatasetSpec) -> str:
     """Build the instruction block, which is fixed for a run.
