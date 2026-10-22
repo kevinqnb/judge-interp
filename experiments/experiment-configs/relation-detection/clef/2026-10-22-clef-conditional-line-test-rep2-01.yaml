@@ -1,0 +1,29 @@
+id: 2026-10-22-clef-conditional-line-test-rep2-01
+project: judge-interp
+task: clef_relation_conditional
+description: >-
+  Clef-flash relation detection (conditional): the first field of each subset is the primary entity and every other field a condition; one noul question per subset (is the primary related to all its conditions). Line dataset, test split, replicate 2 of data/vrdu/subsets.json (1900 samples, 950
+  valid / 950 invalid; the 5 replicates are averaged in analysis). Samples file built by
+  experiments/clef_samples.py (field order as drawn in subsets.json). Over-length documents are excluded and recorded.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  samples_path: experiments/clef-samples/conditional-test-rep2.json
+  device: cuda
+  # "exclude": drop records over the model config's max_length and list them (artifacts/excluded_overlong.json); "error": raise.
+  overlong_docs: exclude
+  # "none": the document's own OCR text; "other_document": another document's (ablation: AUROC should fall toward 0.5).
+  context_control: none
+  # re-score the first N records and assert bitwise-identical logits (0 = off)
+  determinism_check_n: 5
+  # score a hand-built known-answer record first and assert its answer
+  known_answer_check: true
+
+  # -- experiments/submit.sh resources (placeholders pending a GPU timing pilot) --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "02:00:00"

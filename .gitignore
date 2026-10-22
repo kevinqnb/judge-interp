@@ -231,3 +231,6 @@ CLAUDE.local.md
 /data/vrdu/main/test.json
 /data/vrdu/line/train.json
 /data/vrdu/line/test.json
+
+# Clef samples files routed from data/vrdu/subsets.json; regenerate with experiments/clef_samples.py
+/experiments/clef-samples/
