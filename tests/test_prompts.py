@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from judge_interp import prompts
+from dataset_specs import LINE, MAIN
 
 FIXTURE = Path(__file__).parent / "fixtures" / "judge_interp_mini"
 
@@ -21,69 +22,63 @@ def _line_row():
 
 
 def test_render_query_main_fields_and_order():
-    q = prompts.render_query(_main_row(), "main")
+    q = prompts.render_query(_main_row(), MAIN)
     names = [line.split(":", 1)[0] for line in q.splitlines()]
-    assert names == prompts.MAIN_FIELDS
+    assert names == list(MAIN.fields)
 
 
 def test_render_query_line_fields_and_order():
-    q = prompts.render_query(_line_row(), "line")
+    q = prompts.render_query(_line_row(), LINE)
     names = [line.split(":", 1)[0] for line in q.splitlines()]
-    assert prompts.LINE_CARRIED_FIELDS == []
-    assert names == prompts.LINE_FIELDS
+    assert names == list(LINE.fields)
 
 
 def test_render_query_null_and_multiline_values():
-    q = prompts.render_query(_main_row(), "main")
+    q = prompts.render_query(_main_row(), MAIN)
     lines = dict(line.split(": ", 1) for line in q.splitlines())
     assert lines["agency"] == "null"          # json.dumps(None)
     assert lines["product"] == "null"
     # tv_address contains a newline in the source; it must stay on one line.
-    assert len(q.splitlines()) == len(prompts.MAIN_FIELDS)
+    assert len(q.splitlines()) == len(MAIN.fields)
     assert lines["tv_address"] == json.dumps("63 Chestnut St.\nBoston, MA 02101")
 
 
 def test_render_query_no_label_keys_leak():
-    q = prompts.render_query(_main_row(), "main")
+    q = prompts.render_query(_main_row(), MAIN)
     for bad in ("valid", "num_invalid_fields", "invalid_fields", "document_id", "error_type"):
         assert bad not in q
-
-
-def test_render_query_unknown_dataset():
-    with pytest.raises(ValueError):
-        prompts.render_query(_main_row(), "sections")
 
 
 def test_render_query_missing_field_is_hard_error():
     row = _main_row()
     del row["gross_amount"]
     with pytest.raises(AssertionError):
-        prompts.render_query(row, "main")
+        prompts.render_query(row, MAIN)
 
 
-# --- load_ocr_context ----------------------------------------------------
+# --- load_context ---------------------------------------------------------
 
 
-def test_load_ocr_context_reads_file():
-    text = prompts.load_ocr_context(FIXTURE, "doc-alpha")
+def test_load_context_reads_file():
+    text = prompts.load_context(FIXTURE, MAIN, "doc-alpha")
     assert "63 Chestnut St." in text
 
 
-def test_load_ocr_context_missing():
+def test_load_context_missing():
     with pytest.raises(FileNotFoundError):
-        prompts.load_ocr_context(FIXTURE, "doc-nope")
+        prompts.load_context(FIXTURE, MAIN, "doc-nope")
 
 
-def test_load_ocr_context_empty():
+def test_load_context_empty():
     with pytest.raises(AssertionError):
-        prompts.load_ocr_context(FIXTURE, "doc-empty")
+        prompts.load_context(FIXTURE, MAIN, "doc-empty")
 
 
 # --- load_split --------------------------------------------------------
 
 
 def test_load_split_reads_rows():
-    rows = prompts.load_split(FIXTURE, "main", "train", ["inter_document"])
+    rows = prompts.load_split(FIXTURE, MAIN, "train", ["inter_document"])
     assert len(rows) == 3
     assert rows[0]["document_id"] == "doc-alpha"
 
@@ -91,7 +86,7 @@ def test_load_split_reads_rows():
 def test_load_split_selects_error_types_and_always_keeps_valid_rows():
     # the fixture's main file holds 3 valid/inter rows plus one cross_type row
     def kinds(error_types):
-        return sorted((r["document_id"], str(r["error_type"])) for r in prompts.load_split(FIXTURE, "main", "train", error_types))
+        return sorted((r["document_id"], str(r["error_type"])) for r in prompts.load_split(FIXTURE, MAIN, "train", error_types))
     assert kinds([]) == [("doc-alpha", "None"), ("doc-beta", "None")]
     assert kinds(["inter_document"]) == [("doc-alpha", "None"), ("doc-alpha", "inter_document"), ("doc-beta", "None")]
     assert kinds(["cross_type"]) == [("doc-alpha", "None"), ("doc-alpha", "cross_type"), ("doc-beta", "None")]
@@ -101,19 +96,17 @@ def test_load_split_selects_error_types_and_always_keeps_valid_rows():
 def test_load_split_rejects_bad_error_types():
     for bad in (["intra_document"], ["nope"], ["cross_type", "cross_type"], "cross_type", None):
         with pytest.raises(ValueError, match="error_types"):
-            prompts.load_split(FIXTURE, "main", "train", bad)
+            prompts.load_split(FIXTURE, MAIN, "train", bad)
 
 
-def test_load_split_bad_dataset_or_split():
+def test_load_split_bad_split():
     with pytest.raises(ValueError):
-        prompts.load_split(FIXTURE, "sections", "train", [])
-    with pytest.raises(ValueError):
-        prompts.load_split(FIXTURE, "main", "dev", [])
+        prompts.load_split(FIXTURE, MAIN, "dev", [])
 
 
 def test_load_split_missing_file():
     with pytest.raises(FileNotFoundError):
-        prompts.load_split(FIXTURE / "nope", "main", "train", [])
+        prompts.load_split(FIXTURE / "nope", MAIN, "train", [])
 
 
 # --- resolve_layers -------------------------------------------------------

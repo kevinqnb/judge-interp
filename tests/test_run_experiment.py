@@ -44,9 +44,9 @@ def test_relation_detection_fixture_config_loads_and_requires_every_key(tmp_path
     p.write_text(yaml.safe_dump(bad))
     with pytest.raises(KeyError, match="row_subset"):
         run.load_config(p)
-    main = {**cfg, "params": {**cfg["params"], "dataset": "main"}}
+    main = {**cfg, "params": {**cfg["params"], "dataset_config": "experiments/dataset-configs/vrdu_main.py"}}
     p.write_text(yaml.safe_dump(main))
-    with pytest.raises(ValueError, match="'line'"):
+    with pytest.raises(ValueError, match="does not support the relation tasks"):
         run.load_config(p)
 
 

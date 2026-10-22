@@ -2,9 +2,9 @@
 
 Pipeline:
 1. ``build_instructions`` states the judging task: for each non-null field of a row,
-   decide whether the value is explicitly supported by the OCR context and is the
+   decide whether the value is explicitly supported by the context and is the
    right kind of value for that field.
-2. ``build_items`` loads ``data/vrdu/{main,line}/<split>.json``, draws a stratified
+2. ``build_items`` loads the spec's split file, draws a stratified
    subset of rows (``select_rows``), renders each row (``render_row``) and attaches a
    per-entity label from the row's ``field_errors``.
 3. ``EntityDetectionLM.collect_rows`` runs one prefill pass per row and stores, per
@@ -17,6 +17,9 @@ Rendering: every non-null value is a JSON string followed by one pad space befor
 closing quote, and the query ends with a newline. Under byte-level BPE (Qwen2.5) this
 makes the closing quote tokenize the same way on every line and keeps the value's last
 character out of the quote token, so the read position carries no entity text.
+
+The task is dataset-independent: field names and descriptions, the record and context wording,
+the error types and the file layout come from a ``DatasetSpec`` passed to every function.
 
 Labels are per entity: ``field_errors[field]`` is null for a correct entity and
 ``{"error_type", "source"}`` for a corrupted one. Null fields have no quote and no span.
@@ -33,37 +36,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from judge_interp.prompts import (
-    ERROR_TYPES,
-    LINE_CARRIED_FIELDS,
-    QUERY_FIELDS,
-    TYPE_DESCRIPTIONS,
-    load_ocr_context,
-    load_split,
-    render_query,
-    sub_seed,
-)
+from judge_interp.dataset_spec import DatasetSpec
+from judge_interp.prompts import load_context, load_split, render_query, sub_seed
 from judge_interp.representationlm import RepresentationLM, to_npz_array
 
-DATASETS = ("main", "line")
-assert LINE_CARRIED_FIELDS == [], "line rows must not carry main fields in this task"
-ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type")
 _SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
 _PAD = " "  # inserted before each closing quote; see the module docstring
-
-assert set(QUERY_FIELDS["main"]).isdisjoint(QUERY_FIELDS["line"]), "main/line field names collide"
-
-_RECORD_NOUN = {"main": "the document's order (one record per document)", "line": "one line item of the document's order"}
-_OTHER_PLACE = {
-    "main": "to another field of the record or to another part of the document",
-    "line": "to another field of this line item, to another line item, or to the order as a whole",
-}
 
 _HEADER = """You are validating a record extracted from a document by an information-extraction pipeline.
 
 You are given:
-1) In ## CONTEXT: the full OCR text of the source document.
-2) In ## QUERY: the extracted record, which is {noun}. It has one line per field, in the form `field: value`. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value.
+1) In ## CONTEXT: the full {context_description}.
+2) In ## QUERY: the extracted record, which is {record_description}. It has one line per field, in the form `field: value`. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value.
 
 The fields are:
 {types}
@@ -78,7 +62,7 @@ For each field with a value, answer with exactly one line in the form `<field>: 
 
 EXPLICIT_CRITERION = """({n}) Explicit support. Every non-null value must appear explicitly in the context. A value may differ from the context only in trivial surface formatting (whitespace, line breaks, letter case, and equivalent number forms such as 10 vs 10.0 or 1,000 vs 1000). A value produced by paraphrasing, summarising, inferring, rounding, unit conversion, or any other transformation of the text is NOT explicit support. A `null` value always satisfies this criterion."""
 
-_TYPE_CRITERION = """({n}) Type correspondence. The field name is a claim about what the value is, and it must hold in this document: the value must be what that field denotes here, as described in the list of fields above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field fails this criterion, even though it is a genuine entity of the document. For example, a value under `advertiser` whose text is really the name of the agency, the TV station, or a product description is invalid, as is a date or a dollar amount that belongs {other_place}. Check each value against the role its field requires, not merely against the text."""
+_TYPE_CRITERION = """({n}) Type correspondence. The field name is a claim about what the value is, and it must hold in this document: the value must be what that field denotes here, as described in the list of fields above. Appearing somewhere in the context is not enough. A value that is present in the context but is actually the value of a different field fails this criterion, even though it is a genuine entity of the document. So does a value that belongs to a different part of the document than the record being judged.{hint} Check each value against the role its field requires, not merely against the text."""
 
 # Span metadata columns, in shard order. All values are str / int / bool.
 SPAN_META_KEYS = (
@@ -90,36 +74,48 @@ SPAN_META_KEYS = (
 _MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "exact_end_alignment", "prompt_n_tokens")
 
 
-def build_instructions(dataset: str) -> str:
-    """The instruction block for one dataset (fixed for a run)."""
-    if dataset not in DATASETS:
-        raise ValueError(f"dataset must be one of {DATASETS}, got {dataset!r}")
-    types = "\n".join(f"- {f}: {TYPE_DESCRIPTIONS[f]}" for f in QUERY_FIELDS[dataset])
-    criteria = "\n".join([
+def build_criteria(spec: DatasetSpec) -> str:
+    """The numbered validity criteria of the instructions (also used by ``clef``)."""
+    return "\n".join([
         EXPLICIT_CRITERION.format(n=1),
-        _TYPE_CRITERION.format(n=2, other_place=_OTHER_PLACE[dataset]),
+        _TYPE_CRITERION.format(
+            n=2, hint="" if spec.type_confusion_hint is None else f" For example, {spec.type_confusion_hint}."
+        ),
     ])
-    return _HEADER.format(noun=_RECORD_NOUN[dataset], types=types, criteria=criteria)
+
+
+def build_instructions(spec: DatasetSpec) -> str:
+    """The instruction block for one dataset (fixed for a run)."""
+    types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in spec.fields)
+    return _HEADER.format(
+        record_description=spec.record_description, context_description=spec.context_description, types=types,
+        criteria=build_criteria(spec),
+    )
+
+
+def row_index(row: dict, spec: DatasetSpec) -> int | None:
+    """The row's index within its document, or ``None`` for a dataset with one row per document."""
+    return None if spec.row_index_key is None else row[spec.row_index_key]
 
 
 # ----------------------------------------------------------------------
 # Rows: validation and labels
 
 
-def check_row(row: dict, dataset: str) -> None:
+def check_row(row: dict, spec: DatasetSpec) -> None:
     """Assert that a row's label fields agree with each other.
 
     Args:
         row: a dataset row with ``valid``, ``error_type``, ``k``, ``num_invalid_fields``,
-            ``invalid_fields``, ``field_errors`` and one key per field in ``dataset``.
-        dataset: ``"main"`` or ``"line"``; selects the expected field list.
+            ``invalid_fields``, ``field_errors`` and one key per field of ``spec``.
+        spec: the dataset; selects the expected field list.
 
     Raises:
         AssertionError: the label fields disagree, a corrupted field has a null value,
             or a ``source`` entry is malformed for its scope.
     """
-    fields = QUERY_FIELDS[dataset]
-    where = f"{row['document_id']!r}/{row.get('line_index')}"
+    fields = list(spec.fields)
+    where = f"{row['document_id']!r}/{row_index(row, spec)}"
     fe = row["field_errors"]
     assert list(fe) == fields, f"{where}: field_errors keys {list(fe)} != {fields}"
     bad = [f for f in fields if fe[f] is not None]
@@ -128,7 +124,7 @@ def check_row(row: dict, dataset: str) -> None:
     assert row["k"] == row["num_invalid_fields"] == len(bad) == len(row["invalid_fields"]), where
     assert set(row["invalid_fields"]) == set(bad), f"{where}: invalid_fields vs field_errors"
     if not row["valid"]:
-        assert row["error_type"] in ERROR_TYPES[dataset], f"{where}: error_type {row['error_type']!r}"
+        assert row["error_type"] in spec.error_types, f"{where}: error_type {row['error_type']!r}"
     for f in fields:
         v = row[f]
         assert v is None or isinstance(v, str), f"{where}/{f}: non-str value {v!r}"
@@ -145,7 +141,7 @@ def check_row(row: dict, dataset: str) -> None:
             if row["error_type"] == "cross_type":
                 need.add("exchanged_with")
             assert set(src) == need, f"{where}/{f}: source keys {sorted(src)}"
-            assert src["dataset"] in DATASETS and src["field"] in TYPE_DESCRIPTIONS, f"{where}/{f}"
+            assert isinstance(src["dataset"], str) and isinstance(src["field"], str), f"{where}/{f}"
         else:
             assert set(src) == {"scope"}, f"{where}/{f}: source keys {sorted(src)}"
 
@@ -181,15 +177,15 @@ def _source_columns(entry: dict | None) -> dict:
 # Rendering
 
 
-def render_row(row: dict, dataset: str) -> dict:
+def render_row(row: dict, spec: DatasetSpec) -> dict:
     """Render a row as the query text and locate each entity's closing quote.
 
     The text equals ``prompts.render_query`` with one pad space before each non-null
     value's closing quote and a trailing newline (asserted line by line).
 
     Args:
-        row: a dataset row; every field of ``dataset`` must be a ``str`` or ``None``.
-        dataset: ``"main"`` or ``"line"``.
+        row: a dataset row; every field of ``spec`` must be a ``str`` or ``None``.
+        spec: the dataset.
 
     Returns:
         ``{"text": str, "spans": [(field, char_start, char_end), ...]}``: one span per
@@ -199,7 +195,7 @@ def render_row(row: dict, dataset: str) -> dict:
     lines: list[str] = []
     spans: list[tuple[str, int, int]] = []
     offset = 0
-    for f in QUERY_FIELDS[dataset]:
+    for f in spec.fields:
         v = row[f]
         prefix = f"{f}: "
         encoded = json.dumps(v)
@@ -213,9 +209,9 @@ def render_row(row: dict, dataset: str) -> dict:
         offset += len(lines[-1]) + 1
     text = "\n".join(lines) + "\n"
 
-    base = render_query(row, dataset).split("\n")
+    base = render_query(row, spec).split("\n")
     assert len(base) == len(lines), "render_row diverged from prompts.render_query"
-    for f, b, mine in zip(QUERY_FIELDS[dataset], base, lines):
+    for f, b, mine in zip(spec.fields, base, lines):
         expected = b if row[f] is None else b[:-1] + _PAD + '"'
         assert mine == expected, f"{f}: render_row diverged from prompts.render_query"
     for f, a, b in spans:
@@ -232,14 +228,20 @@ def _stratum(row: dict) -> str:
     return "valid" if row["valid"] else row["error_type"]
 
 
-def select_rows(rows: list[dict], dataset: str, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
+def _sort_index(row: dict, spec: DatasetSpec) -> int:
+    """Sort key for a row within its document (constant when a document has one row)."""
+    idx = row_index(row, spec)
+    return -1 if idx is None else idx
+
+
+def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
     """Draw a stratified subset of rows.
 
     Strata are ``"valid"`` plus each error type present in ``rows``.
 
     Args:
         rows: rows from ``prompts.load_split``.
-        dataset: ``"main"`` or ``"line"``; seeds the per-stratum draw.
+        spec: the dataset; its ``name`` seeds the per-stratum draw.
         split: ``"train"`` or ``"test"``; seeds the per-stratum draw.
         rows_per_stratum: stratum name -> number of rows to draw (``None`` takes all);
             keys must equal the strata present exactly.
@@ -258,7 +260,7 @@ def select_rows(rows: list[dict], dataset: str, split: str, rows_per_stratum: di
     chosen: list[dict] = []
     for s in strata:
         pool = sorted((r for r in rows if _stratum(r) == s),
-                      key=lambda r: (r["document_id"], r.get("line_index", -1), r["k"]))
+                      key=lambda r: (r["document_id"], _sort_index(r, spec), r["k"]))
         n = rows_per_stratum[s]
         if n is None:
             chosen.extend(pool)
@@ -267,16 +269,17 @@ def select_rows(rows: list[dict], dataset: str, split: str, rows_per_stratum: di
             raise ValueError(f"rows_per_stratum[{s!r}] must be null or an int >= 1, got {n!r}")
         if n > len(pool):
             raise ValueError(f"stratum {s!r}: {n} rows requested but only {len(pool)} available")
-        chosen.extend(random.Random(sub_seed(seed, dataset, split, s)).sample(pool, n))
-    return sorted(chosen, key=lambda r: (r["document_id"], r.get("line_index", -1), _stratum(r), r["k"]))
+        chosen.extend(random.Random(sub_seed(seed, spec.name, split, s)).sample(pool, n))
+    return sorted(chosen, key=lambda r: (r["document_id"], _sort_index(r, spec), _stratum(r), r["k"]))
 
 
-def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
+def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
     """Build one ``EntityDetectionLM.collect_rows`` item per selected row.
 
     Args:
-        params: config ``params`` with ``data_root``, ``dataset``, ``split``,
-            ``error_types``, ``rows_per_stratum`` and ``context_token_limit``.
+        spec: the dataset.
+        params: config ``params`` with ``data_root``, ``split``, ``error_types``,
+            ``rows_per_stratum`` and ``context_token_limit``.
         seed: run seed for the stratified draw.
         repo_root: directory that ``params["data_root"]`` is relative to.
         tokenizer: HF tokenizer used to enforce ``context_token_limit``; must be given
@@ -289,49 +292,47 @@ def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> lis
         of ``SPAN_META_KEYS``).
 
     Raises:
-        ValueError: unknown dataset, tokenizer/limit mismatch, or an OCR context
+        ValueError: tokenizer/limit mismatch, or a context
             longer than ``context_token_limit`` tokens.
     """
     data_root = repo_root / params["data_root"]
-    dataset, split = params["dataset"], params["split"]
-    if dataset not in DATASETS:
-        raise ValueError(f"dataset must be one of {DATASETS}, got {dataset!r}")
+    split = params["split"]
     limit = params["context_token_limit"]
     if (limit is None) != (tokenizer is None):
         raise ValueError("tokenizer must be given iff context_token_limit is not null")
 
-    rows = load_split(data_root, dataset, split, params["error_types"])
+    rows = load_split(data_root, spec, split, params["error_types"])
     for r in rows:
-        check_row(r, dataset)
-    selected = select_rows(rows, dataset, split, params["rows_per_stratum"], seed)
+        check_row(r, spec)
+    selected = select_rows(rows, spec, split, params["rows_per_stratum"], seed)
 
-    instructions = build_instructions(dataset)
+    instructions = build_instructions(spec)
     contexts: dict[str, str] = {}
     items: list[dict] = []
     ordinal: dict[str, int] = {}
     for r in selected:
         doc_id = r["document_id"]
         if doc_id not in contexts:
-            text = load_ocr_context(data_root, doc_id)
+            text = load_context(data_root, spec, doc_id)
             if limit is not None:
                 n_tokens = len(tokenizer.encode(text, add_special_tokens=False))
                 if n_tokens > limit:
                     raise ValueError(
-                        f"OCR context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
+                        f"context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
                     )
             contexts[doc_id] = text
         j = ordinal.get(doc_id, 0)
         ordinal[doc_id] = j + 1
-        rendered = render_row(r, dataset)
+        rendered = render_row(r, spec)
         spans = []
         for pos, (f, c0, c1) in enumerate(rendered["spans"], start=1):
             entry = r["field_errors"][f]
             spans.append({
                 "char_start": c0,
                 "char_end": c1,
-                "dataset": dataset,
+                "dataset": spec.name,
                 "row_ordinal": j,
-                "line_index": r["line_index"] if dataset == "line" else -1,
+                "line_index": -1 if row_index(r, spec) is None else row_index(r, spec),
                 "row_error_type": "" if r["valid"] else r["error_type"],
                 "row_k": r["k"],
                 "field": f,
@@ -366,7 +367,7 @@ class EntityDetectionLM(RepresentationLM):
 
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
-            context: the ``## CONTEXT:`` text (OCR).
+            context: the ``## CONTEXT:`` text.
             query: the ``## QUERY:`` text; ``spans`` offsets are relative to it.
             spans: dicts with one-character ``char_start`` / ``char_end`` covering a
                 closing quote in ``query``.
@@ -669,11 +670,12 @@ def check_row_invariants(result: dict) -> None:
     assert (sp[np.r_[True, ~same]] == 1).all(), "field_position does not start at 1"
 
 
-def compute_metrics(result: dict) -> dict:
+def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
     """Summarise span counts and prompt lengths of a run.
 
     Args:
         result: aggregated arrays from ``EntityDetectionLM.collect_rows``.
+        spec: the dataset; one ``n_spans_<error_type>`` count is emitted per ``spec.error_types``.
 
     Returns:
         Flat scalar dict: span, prompt, valid/invalid and per-error-type counts,
@@ -695,7 +697,7 @@ def compute_metrics(result: dict) -> dict:
         "min_prompt_n_tokens": int(result["prompt_n_tokens"].min()),
         "max_prompt_n_tokens": int(result["prompt_n_tokens"].max()),
     }
-    for et in ALL_ERROR_TYPES:
+    for et in spec.error_types:
         out[f"n_spans_{et}"] = int((result["field_error_type"] == et).sum())
-    assert sum(out[f"n_spans_{et}"] for et in ALL_ERROR_TYPES) == out["n_invalid_spans"]
+    assert sum(out[f"n_spans_{et}"] for et in spec.error_types) == out["n_invalid_spans"]
     return out

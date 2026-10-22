@@ -1,11 +1,15 @@
-"""Relation detection: hidden states read at each entity's closing quote, one prompt per line-item row.
+"""Relation detection: hidden states read at each entity's closing quote, one prompt per row.
 
-Same pipeline as ``entity_detection`` on the ``line`` dataset, with different instructions:
+Same pipeline as ``entity_detection``, with different instructions:
 
-1. ``build_instructions`` asks the judge whether the non-null fields of one line item
-   (channel, program description, start and end dates, sub-amount) all describe the
-   same line item of the order, i.e. whether the entities belong together.
-2. ``build_items`` loads ``data/vrdu/line/<split>.json``, draws a stratified subset of
+1. ``build_instructions`` asks the judge whether the non-null fields of one row all
+   describe the same item among the several similar items a document may contain (for
+   VRDU, the same line item of the order), i.e. whether the entities belong together.
+   The judge is asked for one verdict on the record as a whole, not one per entity; the
+   per-entity labels and reads below are unaffected (representations are still collected
+   at every entity's closing quote, labelled per entity).
+   Only datasets whose spec has ``supports_relation`` are accepted.
+2. ``build_items`` loads the spec's split file, draws a stratified subset of
    rows (``select_rows``), renders each row (``render_row``) and attaches a per-entity
    label from the row's ``field_errors``.
 3. ``RelationDetectionLM.collect_rows`` runs one prefill pass per row and stores, per
@@ -32,45 +36,29 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from judge_interp.prompts import (
-    ERROR_TYPES,
-    LINE_CARRIED_FIELDS,
-    LINE_FIELDS,
-    QUERY_FIELDS,
-    TYPE_DESCRIPTIONS,
-    load_ocr_context,
-    load_split,
-    render_query,
-    sub_seed,
-)
+from judge_interp.dataset_spec import DatasetSpec
+from judge_interp.entity_detection import row_index
+from judge_interp.prompts import load_context, load_split, render_query, sub_seed
 from judge_interp.representationlm import RepresentationLM, to_npz_array
 
-DATASET = "line"
-assert LINE_CARRIED_FIELDS == [], "line rows must not carry main fields in this task"
-assert QUERY_FIELDS[DATASET] == LINE_FIELDS, "the line query must be exactly the line-item fields"
-ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type")
-assert set(ALL_ERROR_TYPES) == set(ERROR_TYPES[DATASET]), "error types of the line dataset changed"
 _SOURCE_SCOPES = ("other_document", "sentinel", "same_document")
 _PAD = " "  # inserted before each closing quote; see the module docstring
-# A same-document source may name a main field (a cross-type swap with a document-level
-# field), so source validation needs the full field vocabulary, not just the line fields.
-_SOURCE_FIELDS = frozenset(QUERY_FIELDS["main"]) | frozenset(LINE_FIELDS)
 
 
-_HEADER = """You are validating the relationships between entities extracted from a document by an information-extraction pipeline. The entities are the values of one line item (one broadcast spot) of an advertising order.
+_HEADER = """You are validating the relationships between entities extracted from a document by an information-extraction pipeline. The entities are the values of one record: {record_description}.
 
 You are given:
-1) In ## CONTEXT: the full OCR text of the source document.
-2) In ## QUERY: the extracted line item. It has one line per field, in the form `field: value`, each line ending with a newline. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value. The closing quote and the newline after it end the entity.
+1) In ## CONTEXT: the full {context_description}.
+2) In ## QUERY: the extracted record. It has one line per field, in the form `field: value`, each line ending with a newline. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value. The closing quote and the newline after it end the entity.
 
 The fields are:
 {types}
 
-The document may contain many line items. The entities of a valid line item must all be related: they must all describe the same line item in the document, i.e. the same broadcast spot. An entity that is present in the context, but that belongs to a different line item than the line item's other entities, fails this criterion even though it is itself a genuine value of the document. Do not judge whether an individual entity is real; judge whether it belongs together with the other entities of this line item.
+The document may describe many items of the kind this record describes. A valid record is one whose entities are all related: taken together, they describe the same single item in the document. If one or more entities belong to a different item than the others, the record as a whole is not valid, even though each of those entities may be a genuine value of the document. Do not judge whether an individual entity is real, and do not judge entities one by one; judge the entities of the record as a whole, i.e. whether they all belong together.
 
-Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Judge every field against the rest of the line item.
+Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Give one verdict for the whole record. Ignore fields whose value is null.
 
-For each field with a value, answer with exactly one line in the form `<field>: true` if the entity belongs with the other entities of this line item, or `<field>: false` if it does not, in the order shown. Do not answer for fields whose value is null."""
+Answer with exactly one line: `related: true` if all the entities of the record belong together as one item, or `related: false` if they do not."""
 
 # Span metadata columns, in shard order. All values are str / int / bool.
 SPAN_META_KEYS = (
@@ -82,43 +70,54 @@ SPAN_META_KEYS = (
 _MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "exact_end_alignment", "prompt_n_tokens")
 
 
-def build_instructions() -> str:
+def build_instructions(spec: DatasetSpec) -> str:
     """Build the instruction block, which is fixed for a run.
 
+    Args:
+        spec: the dataset; must have ``supports_relation``.
+
     Returns:
-        The instruction text, with one description line per line-item field.
+        The instruction text, with one description line per field.
+
+    Raises:
+        ValueError: the dataset does not support the relation tasks.
     """
-    types = "\n".join(f"- {f}: {TYPE_DESCRIPTIONS[f]}" for f in LINE_FIELDS)
-    return _HEADER.format(types=types)
+    spec.require_relation()
+    types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in spec.fields)
+    return _HEADER.format(
+        record_description=spec.record_description, context_description=spec.context_description, types=types,
+    )
 
 
 # ----------------------------------------------------------------------
 # Rows: validation and labels
 
 
-def check_row(row: dict) -> None:
-    """Assert that a line row's label fields agree with each other.
+def check_row(row: dict, spec: DatasetSpec) -> None:
+    """Assert that a row's label fields agree with each other.
 
     Args:
-        row: a ``line`` dataset row with ``valid``, ``error_type``, ``k``,
+        row: a dataset row with ``valid``, ``error_type``, ``k``,
             ``num_invalid_fields``, ``invalid_fields``, ``field_errors`` and one key
-            per line-item field.
+            per field of ``spec``.
+        spec: the dataset.
 
     Raises:
         AssertionError: the label fields disagree, a corrupted field has a null value,
             or a ``source`` entry is malformed for its scope.
     """
-    where = f"{row['document_id']!r}/{row['line_index']}"
+    fields = list(spec.fields)
+    where = f"{row['document_id']!r}/{row_index(row, spec)}"
     fe = row["field_errors"]
-    assert list(fe) == LINE_FIELDS, f"{where}: field_errors keys {list(fe)} != {LINE_FIELDS}"
-    bad = [f for f in LINE_FIELDS if fe[f] is not None]
+    assert list(fe) == fields, f"{where}: field_errors keys {list(fe)} != {fields}"
+    bad = [f for f in fields if fe[f] is not None]
     assert row["valid"] == (row["error_type"] is None), f"{where}: valid vs error_type"
     assert row["valid"] == (not bad), f"{where}: valid vs field_errors"
     assert row["k"] == row["num_invalid_fields"] == len(bad) == len(row["invalid_fields"]), where
     assert set(row["invalid_fields"]) == set(bad), f"{where}: invalid_fields vs field_errors"
     if not row["valid"]:
-        assert row["error_type"] in ALL_ERROR_TYPES, f"{where}: error_type {row['error_type']!r}"
-    for f in LINE_FIELDS:
+        assert row["error_type"] in spec.error_types, f"{where}: error_type {row['error_type']!r}"
+    for f in fields:
         v = row[f]
         assert v is None or isinstance(v, str), f"{where}/{f}: non-str value {v!r}"
         e = fe[f]
@@ -134,7 +133,7 @@ def check_row(row: dict) -> None:
             if row["error_type"] == "cross_type":
                 need.add("exchanged_with")
             assert set(src) == need, f"{where}/{f}: source keys {sorted(src)}"
-            assert src["dataset"] in ("main", "line") and src["field"] in _SOURCE_FIELDS, f"{where}/{f}"
+            assert isinstance(src["dataset"], str) and isinstance(src["field"], str), f"{where}/{f}"
         else:
             assert set(src) == {"scope"}, f"{where}/{f}: source keys {sorted(src)}"
 
@@ -170,14 +169,15 @@ def _source_columns(entry: dict | None) -> dict:
 # Rendering
 
 
-def render_row(row: dict) -> dict:
-    """Render a line row as the query text and locate each entity's closing quote.
+def render_row(row: dict, spec: DatasetSpec) -> dict:
+    """Render a row as the query text and locate each entity's closing quote.
 
     The text equals ``prompts.render_query`` with one pad space before each non-null
     value's closing quote and a trailing newline (asserted line by line).
 
     Args:
-        row: a ``line`` dataset row; every line-item field must be a ``str`` or ``None``.
+        row: a dataset row; every field of ``spec`` must be a ``str`` or ``None``.
+        spec: the dataset.
 
     Returns:
         ``{"text": str, "spans": [(field, char_start, char_end), ...]}``: one span per
@@ -187,7 +187,7 @@ def render_row(row: dict) -> dict:
     lines: list[str] = []
     spans: list[tuple[str, int, int]] = []
     offset = 0
-    for f in LINE_FIELDS:
+    for f in spec.fields:
         v = row[f]
         prefix = f"{f}: "
         encoded = json.dumps(v)
@@ -201,9 +201,9 @@ def render_row(row: dict) -> dict:
         offset += len(lines[-1]) + 1
     text = "\n".join(lines) + "\n"
 
-    base = render_query(row, DATASET).split("\n")
+    base = render_query(row, spec).split("\n")
     assert len(base) == len(lines), "render_row diverged from prompts.render_query"
-    for f, b, mine in zip(LINE_FIELDS, base, lines):
+    for f, b, mine in zip(spec.fields, base, lines):
         expected = b if row[f] is None else b[:-1] + _PAD + '"'
         assert mine == expected, f"{f}: render_row diverged from prompts.render_query"
     for f, a, b in spans:
@@ -220,13 +220,20 @@ def _stratum(row: dict) -> str:
     return "valid" if row["valid"] else row["error_type"]
 
 
-def select_rows(rows: list[dict], split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
+def _sort_index(row: dict, spec: DatasetSpec) -> int:
+    """Sort key for a row within its document (constant when a document has one row)."""
+    idx = row_index(row, spec)
+    return -1 if idx is None else idx
+
+
+def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
     """Draw a stratified subset of rows.
 
     Strata are ``"valid"`` plus each error type present in ``rows``.
 
     Args:
         rows: rows from ``prompts.load_split``.
+        spec: the dataset; its ``name`` and ``row_index_key`` seed and order the draw.
         split: ``"train"`` or ``"test"``; seeds the per-stratum draw.
         rows_per_stratum: stratum name -> number of rows to draw (``None`` takes all);
             keys must equal the strata present exactly.
@@ -245,7 +252,7 @@ def select_rows(rows: list[dict], split: str, rows_per_stratum: dict, seed: int)
     chosen: list[dict] = []
     for s in strata:
         pool = sorted((r for r in rows if _stratum(r) == s),
-                      key=lambda r: (r["document_id"], r["line_index"], r["k"]))
+                      key=lambda r: (r["document_id"], _sort_index(r, spec), r["k"]))
         n = rows_per_stratum[s]
         if n is None:
             chosen.extend(pool)
@@ -254,16 +261,17 @@ def select_rows(rows: list[dict], split: str, rows_per_stratum: dict, seed: int)
             raise ValueError(f"rows_per_stratum[{s!r}] must be null or an int >= 1, got {n!r}")
         if n > len(pool):
             raise ValueError(f"stratum {s!r}: {n} rows requested but only {len(pool)} available")
-        chosen.extend(random.Random(sub_seed(seed, DATASET, split, s)).sample(pool, n))
-    return sorted(chosen, key=lambda r: (r["document_id"], r["line_index"], _stratum(r), r["k"]))
+        chosen.extend(random.Random(sub_seed(seed, spec.name, split, s)).sample(pool, n))
+    return sorted(chosen, key=lambda r: (r["document_id"], _sort_index(r, spec), _stratum(r), r["k"]))
 
 
-def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
+def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
     """Build one ``RelationDetectionLM.collect_rows`` item per selected row.
 
     Args:
-        params: config ``params`` with ``data_root``, ``dataset`` (must be ``"line"``),
-            ``split``, ``error_types``, ``rows_per_stratum`` and ``context_token_limit``.
+        spec: the dataset; must have ``supports_relation``.
+        params: config ``params`` with ``data_root``, ``split``, ``error_types``,
+            ``rows_per_stratum`` and ``context_token_limit``.
         seed: run seed for the stratified draw.
         repo_root: directory that ``params["data_root"]`` is relative to.
         tokenizer: HF tokenizer used to enforce ``context_token_limit``; must be given
@@ -276,49 +284,48 @@ def build_items(params: dict, seed: int, repo_root: Path, tokenizer=None) -> lis
         of ``SPAN_META_KEYS``).
 
     Raises:
-        ValueError: ``dataset`` is not ``"line"``, tokenizer/limit mismatch, or an OCR
+        ValueError: ``spec`` does not support relation, tokenizer/limit mismatch, or a
             context longer than ``context_token_limit`` tokens.
     """
     data_root = repo_root / params["data_root"]
     split = params["split"]
-    if params["dataset"] != DATASET:
-        raise ValueError(f"relation_detection supports dataset {DATASET!r} only, got {params['dataset']!r}")
+    spec.require_relation()
     limit = params["context_token_limit"]
     if (limit is None) != (tokenizer is None):
         raise ValueError("tokenizer must be given iff context_token_limit is not null")
 
-    rows = load_split(data_root, DATASET, split, params["error_types"])
+    rows = load_split(data_root, spec, split, params["error_types"])
     for r in rows:
-        check_row(r)
-    selected = select_rows(rows, split, params["rows_per_stratum"], seed)
+        check_row(r, spec)
+    selected = select_rows(rows, spec, split, params["rows_per_stratum"], seed)
 
-    instructions = build_instructions()
+    instructions = build_instructions(spec)
     contexts: dict[str, str] = {}
     items: list[dict] = []
     ordinal: dict[str, int] = {}
     for r in selected:
         doc_id = r["document_id"]
         if doc_id not in contexts:
-            text = load_ocr_context(data_root, doc_id)
+            text = load_context(data_root, spec, doc_id)
             if limit is not None:
                 n_tokens = len(tokenizer.encode(text, add_special_tokens=False))
                 if n_tokens > limit:
                     raise ValueError(
-                        f"OCR context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
+                        f"context for {doc_id!r} is {n_tokens} tokens > context_token_limit {limit}"
                     )
             contexts[doc_id] = text
         j = ordinal.get(doc_id, 0)
         ordinal[doc_id] = j + 1
-        rendered = render_row(r)
+        rendered = render_row(r, spec)
         spans = []
         for pos, (f, c0, c1) in enumerate(rendered["spans"], start=1):
             entry = r["field_errors"][f]
             spans.append({
                 "char_start": c0,
                 "char_end": c1,
-                "dataset": DATASET,
+                "dataset": spec.name,
                 "row_ordinal": j,
-                "line_index": r["line_index"],
+                "line_index": -1 if row_index(r, spec) is None else row_index(r, spec),
                 "row_error_type": "" if r["valid"] else r["error_type"],
                 "row_k": r["k"],
                 "field": f,
@@ -353,7 +360,7 @@ class RelationDetectionLM(RepresentationLM):
 
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
-            context: the ``## CONTEXT:`` text (OCR).
+            context: the ``## CONTEXT:`` text.
             query: the ``## QUERY:`` text; ``spans`` offsets are relative to it.
             spans: dicts with one-character ``char_start`` / ``char_end`` covering a
                 closing quote in ``query``.
@@ -390,7 +397,7 @@ class RelationDetectionLM(RepresentationLM):
             idx = self._last_token_covering(offsets, pos)
             s, e = offsets[idx]
             assert s <= pos < e
-            # The OCR context may contain the same strings; the read must be in the query.
+            # The context may contain the same strings; the read must be in the query.
             assert shift <= s < shift + len(query), (
                 f"{span['field']!r}: token {idx} starts outside the QUERY block"
             )
@@ -661,11 +668,12 @@ def check_row_invariants(result: dict) -> None:
     assert (sp[np.r_[True, ~same]] == 1).all(), "field_position does not start at 1"
 
 
-def compute_metrics(result: dict) -> dict:
+def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
     """Summarise span counts and prompt lengths of a run.
 
     Args:
         result: aggregated arrays from ``RelationDetectionLM.collect_rows``.
+        spec: the dataset; one ``n_spans_<error_type>`` count is emitted per ``spec.error_types``.
 
     Returns:
         Flat scalar dict: span, prompt, valid/invalid and per-error-type counts,
@@ -687,7 +695,7 @@ def compute_metrics(result: dict) -> dict:
         "min_prompt_n_tokens": int(result["prompt_n_tokens"].min()),
         "max_prompt_n_tokens": int(result["prompt_n_tokens"].max()),
     }
-    for et in ALL_ERROR_TYPES:
+    for et in spec.error_types:
         out[f"n_spans_{et}"] = int((result["field_error_type"] == et).sum())
-    assert sum(out[f"n_spans_{et}"] for et in ALL_ERROR_TYPES) == out["n_invalid_spans"]
+    assert sum(out[f"n_spans_{et}"] for et in spec.error_types) == out["n_invalid_spans"]
     return out

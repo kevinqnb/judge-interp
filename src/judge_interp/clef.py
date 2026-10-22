@@ -7,18 +7,18 @@ straight from the model. The model runs through its own release code
 
 Tasks:
 - ``clef_entity_row``: one record per row selected by ``entity_detection.build_items``
-  (state = OCR text + the row), one ``noul`` question per non-null field.
+  (state = context text + the row), one ``noul`` question per non-null field.
 - ``clef_relation_row``: rows selected by ``relation_detection.build_items``; from each row,
   random subsets of its non-null fields are drawn (``draw_samples``) and class-balanced
   (``balance``) with one ``default_rng([seed, subset_rng_stream])``. One record per subset
-  (state = OCR text + only the subset's fields), one ``noul`` question; a subset is valid
+  (state = context text + only the subset's fields), one ``noul`` question; a subset is valid
   iff every field in it is valid.
 
 Pipeline: ``entity_units`` / ``relation_units`` build records, ``filter_overlong`` handles
 records that do not fit ``max_length`` (``overlong_docs``: ``"exclude"`` drops and records
 them, ``"error"`` raises), ``ClefScorer`` scores records one at a time, and ``run`` writes
 ``artifacts/clef_predictions.npz`` and returns flat metrics. ``context_control`` can swap
-each document's OCR text for another document's as a control.
+each document's context text for another document's as a control.
 
 Guards: the question option set must be exactly ``("true", "false")``; ``encode_checked``
 raises instead of letting ``encode_record`` silently truncate the state. Questions of one
@@ -37,26 +37,26 @@ import numpy as np
 
 from judge_interp import entity_detection as edr
 from judge_interp import relation_detection as rdr
-from judge_interp.prompts import LINE_FIELDS, QUERY_FIELDS
+from judge_interp.dataset_spec import DatasetSpec, load_dataset_spec
 
 OPTION_IDS = ("true", "false")  # joint_schema_model.question_options order for a noul question
 OVERLONG_MODES = ("exclude", "error")
 CONTEXT_CONTROLS = ("none", "other_document")
 _DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
 
-_ENTITY_QUESTION = """In the EXTRACTED RECORD of the state, which is {noun}, consider the value of the field `{field}`. This field denotes {desc}.
+_ENTITY_QUESTION = """In the EXTRACTED RECORD of the state, which is {record_description}, consider the value of the field `{field}`. This field denotes {desc}.
 
-Is this value present in the CONTEXT (the OCR text of the source document) and of the correct type for this field? That is: is it a VALID value for `{field}` in this document? It is valid only if BOTH criteria hold:
+Is this value present in the CONTEXT (the {context_description}) and of the correct type for this field? That is: is it a VALID value for `{field}` in this document? It is valid only if BOTH criteria hold:
 
 {criteria}
 
 Judge only against the CONTEXT; unclear evidence fails a criterion. Judge this field on its own, independently of the record's other fields."""
 
 # TODO(wording): relation question wording is a first draft, to be reviewed before a full run.
-_RELATION_QUESTION = """The EXTRACTED RECORD of the state lists values of one line item (one broadcast spot) of an advertising order, one `field: value` per line. The fields present are:
+_RELATION_QUESTION = """The EXTRACTED RECORD of the state is {record_description}, listed as one `field: value` per line. The fields present are:
 {types}
 
-Are all of these values correctly related? That is: does every value genuinely serve as the field it is listed under, and do all the values together describe the same single line item (the same broadcast spot) of the order in the CONTEXT (the OCR text of the source document)? Answer false if any value belongs to a different line item or to another part of the order, or is not what its field denotes. A value being present in the CONTEXT is not enough; judge whether the values belong together.
+Are all of these values correctly related? That is: does every value genuinely serve as the field it is listed under, and do all the values together describe the same single item in the CONTEXT (the {context_description})? Answer false if any value belongs to a different item or to another part of the document, or is not what its field denotes. A value being present in the CONTEXT is not enough; judge whether the values belong together.
 
 Judge only against the CONTEXT; unclear evidence means false."""
 
@@ -82,7 +82,7 @@ def build_state(context: str, record_text: str) -> str:
     """Assemble the Clef ``state`` string.
 
     Args:
-        context: OCR text of the document.
+        context: context text of the document.
         record_text: rendered record (see ``render_record_text``).
 
     Returns:
@@ -91,65 +91,66 @@ def build_state(context: str, record_text: str) -> str:
     return f"## CONTEXT\n{context}\n\n## EXTRACTED RECORD\n{record_text}"
 
 
-def entity_question(field: str, dataset: str) -> dict:
+def entity_question(field: str, spec: DatasetSpec) -> dict:
     """Build the ``noul`` question asking whether one field's value is valid.
 
     Args:
         field: the field whose value is judged.
-        dataset: ``"main"`` or ``"line"``; selects the record description.
+        spec: the dataset; supplies the record, context and field descriptions.
 
     Returns:
         A ``{"type": "noul", "instructions": str}`` question.
     """
-    criteria = "\n".join([
-        edr.EXPLICIT_CRITERION.format(n=1),
-        edr._TYPE_CRITERION.format(n=2, other_place=edr._OTHER_PLACE[dataset]),
-    ])
     return {
         "type": "noul",
         "instructions": _ENTITY_QUESTION.format(
-            noun=edr._RECORD_NOUN[dataset], field=field, desc=edr.TYPE_DESCRIPTIONS[field], criteria=criteria
+            record_description=spec.record_description, context_description=spec.context_description,
+            field=field, desc=spec.field_descriptions[field], criteria=edr.build_criteria(spec),
         ),
     }
 
 
-def relation_question(fields: list[str]) -> dict:
+def relation_question(fields: list[str], spec: DatasetSpec) -> dict:
     """Build the ``noul`` question asking whether a subset of line fields belongs together.
 
     Args:
-        fields: at least two distinct line-item fields present in the record.
+        fields: at least two distinct fields of ``spec`` present in the record.
+        spec: the dataset; must support the relation tasks.
 
     Returns:
         A ``{"type": "noul", "instructions": str}`` question.
     """
-    assert set(fields) <= set(LINE_FIELDS) and len(set(fields)) == len(fields) >= 2, fields
-    types = "\n".join(f"- {f}: {rdr.TYPE_DESCRIPTIONS[f]}" for f in fields)
-    return {"type": "noul", "instructions": _RELATION_QUESTION.format(types=types)}
+    spec.require_relation()
+    assert set(fields) <= set(spec.fields) and len(set(fields)) == len(fields) >= 2, fields
+    types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in fields)
+    return {"type": "noul", "instructions": _RELATION_QUESTION.format(
+        record_description=spec.record_description, context_description=spec.context_description, types=types,
+    )}
 
 
-def item_values(item: dict, dataset: str) -> dict[str, str | None]:
+def item_values(item: dict, spec: DatasetSpec) -> dict[str, str | None]:
     """Recover a row's field values from an item's spans.
 
     Args:
         item: an item from ``entity_detection.build_items`` or ``relation_detection.build_items``.
-        dataset: ``"main"`` or ``"line"``.
+        spec: the dataset.
 
     Returns:
-        Field -> value for every field of ``dataset`` (``None`` for a null field).
+        Field -> value for every field of ``spec`` (``None`` for a null field).
     """
     vals = {sp["field"]: sp["value"] for sp in item["spans"]}
     assert len(vals) == len(item["spans"]), "two spans for one field"
-    assert set(vals) <= set(QUERY_FIELDS[dataset]), sorted(vals)
-    return {f: vals.get(f) for f in QUERY_FIELDS[dataset]}
+    assert set(vals) <= set(spec.fields), sorted(vals)
+    return {f: vals.get(f) for f in spec.fields}
 
 
-def entity_units(items: list[dict], dataset: str, contexts: dict[str, str]) -> list[dict]:
+def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str]) -> list[dict]:
     """Build one Clef unit per row.
 
     Args:
         items: items from ``entity_detection.build_items``.
-        dataset: ``"main"`` or ``"line"``.
-        contexts: document_id -> the OCR text shown for that document's rows (its own
+        spec: the dataset.
+        contexts: document_id -> the context text shown for that document's rows (its own
             unless the context control swapped it).
 
     Returns:
@@ -158,8 +159,8 @@ def entity_units(items: list[dict], dataset: str, contexts: dict[str, str]) -> l
     """
     units = []
     for it in items:
-        values = item_values(it, dataset)
-        rec_text = render_record_text(values, QUERY_FIELDS[dataset])
+        values = item_values(it, spec)
+        rec_text = render_record_text(values, spec.fields)
         fields = [sp["field"] for sp in it["spans"]]
         assert all(values[f] is not None for f in fields)
         units.append({
@@ -169,7 +170,7 @@ def entity_units(items: list[dict], dataset: str, contexts: dict[str, str]) -> l
             "record": {
                 "id": f"{it['document_id']}|{it['row_ordinal']}",
                 "state": build_state(contexts[it["document_id"]], rec_text),
-                "questions": {f: entity_question(f, dataset) for f in fields},
+                "questions": {f: entity_question(f, spec) for f in fields},
             },
         })
     return units
@@ -205,11 +206,12 @@ def flatten_items(items: list[dict]) -> dict[str, np.ndarray]:
     return {k: np.array(v) for k, v in cols.items()}
 
 
-def group_rows(split: dict) -> list[dict]:
+def group_rows(split: dict, spec: DatasetSpec) -> list[dict]:
     """Group span indices by row.
 
     Args:
         split: flat arrays from ``flatten_items``.
+        spec: the dataset.
 
     Returns:
         One dict per ``(document, row_ordinal)`` with ``doc``, ``ordinal``, ``rows`` (span
@@ -222,7 +224,7 @@ def group_rows(split: dict) -> list[dict]:
     for (d, o), rows in by_key.items():
         rows = sorted(rows, key=lambda i: int(split["field_position"][i]))
         fields = [str(split["field"][i]) for i in rows]
-        assert len(set(fields)) == len(fields) and set(fields) <= set(LINE_FIELDS), (d, o, fields)
+        assert len(set(fields)) == len(fields) and set(fields) <= set(spec.fields), (d, o, fields)
         ets = {str(split["row_error_type"][i]) for i in rows}
         assert len(ets) == 1, f"{d}/{o}: row_error_type varies within a row: {ets}"
         groups.append({"doc": d, "ordinal": o, "rows": rows, "fields": fields, "error_type": ets.pop()})
@@ -230,7 +232,7 @@ def group_rows(split: dict) -> list[dict]:
 
 
 def draw_samples(groups: list[dict], label_valid: np.ndarray, samples_per_row: int, min_subset_size: int,
-                 rng: np.random.Generator) -> dict:
+                 rng: np.random.Generator, max_fields: int) -> dict:
     """Draw random subsets of each row's non-null fields.
 
     Args:
@@ -239,13 +241,12 @@ def draw_samples(groups: list[dict], label_valid: np.ndarray, samples_per_row: i
         samples_per_row: subsets drawn per row (fewer if the row has fewer subsets).
         min_subset_size: smallest subset size, at least 2.
         rng: generator used for all draws.
+        max_fields: number of fields of the dataset; ``rows`` is padded to this width.
 
     Returns:
-        Arrays, one entry per sample: ``rows`` (span indices padded with -1 to the number
-        of line fields), ``label`` (all fields valid), ``size``, ``doc``, ``ordinal``,
+        Arrays, one entry per sample: ``rows`` (span indices padded with -1 to ``max_fields``), ``label`` (all fields valid), ``size``, ``doc``, ``ordinal``,
         ``error_type``; plus ``stats`` (counts of rows skipped or short of subsets).
     """
-    max_fields = len(LINE_FIELDS)
     assert min_subset_size >= 2, "a subset needs at least two fields"
     out: dict[str, list] = defaultdict(list)
     stats = {"n_rows": len(groups), "n_rows_too_small": 0, "n_rows_fewer_subsets_than_requested": 0}
@@ -303,7 +304,7 @@ def balance(samples: dict, n_per_class: int, rng: np.random.Generator) -> dict:
     return res
 
 
-def draw_relation_samples(flat: dict, p: dict, seed: int) -> dict:
+def draw_relation_samples(flat: dict, p: dict, seed: int, spec: DatasetSpec) -> dict:
     """Draw and class-balance relation samples with one generator.
 
     Args:
@@ -311,22 +312,25 @@ def draw_relation_samples(flat: dict, p: dict, seed: int) -> dict:
         p: config params with ``subset_rng_stream``, ``samples_per_row``, ``min_subset_size``
             and ``n_per_class``.
         seed: run seed; the generator is ``default_rng([seed, subset_rng_stream])``.
+        spec: the dataset.
 
     Returns:
         The balanced samples (see ``draw_samples``).
     """
     rng = np.random.default_rng([seed, p["subset_rng_stream"]])
-    s = draw_samples(group_rows(flat), flat["label_valid"], p["samples_per_row"], p["min_subset_size"], rng)
+    s = draw_samples(group_rows(flat, spec), flat["label_valid"], p["samples_per_row"], p["min_subset_size"], rng,
+                     len(spec.fields))
     return balance(s, p["n_per_class"], rng)
 
 
-def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[dict]:
+def relation_units(flat: dict, samples: dict, contexts: dict[str, str], spec: DatasetSpec) -> list[dict]:
     """Build one Clef unit per relation sample.
 
     Args:
         flat: output of ``flatten_items``.
         samples: balanced samples from ``draw_relation_samples``.
-        contexts: document_id -> the OCR text shown for that document.
+        contexts: document_id -> the context text shown for that document.
+        spec: the dataset.
 
     Returns:
         One dict per sample with ``doc_id``, ``row_ordinal``, ``sample_index``, ``rows``,
@@ -337,7 +341,7 @@ def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[
     for i in range(len(samples["label"])):
         rows = [int(r) for r in samples["rows"][i] if r >= 0]
         fields = [str(flat["field"][r]) for r in rows]
-        assert fields == sorted(fields, key=LINE_FIELDS.index), "subset not in canonical field order"
+        assert fields == sorted(fields, key=spec.fields.index), "subset not in canonical field order"
         doc = str(samples["doc"][i])
         assert all(flat["doc_ids"][r] == doc for r in rows)
         values = {str(flat["field"][r]): str(flat["value"][r]) for r in rows}
@@ -356,7 +360,7 @@ def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[
             "record": {
                 "id": f"{doc}|{int(samples['ordinal'][i])}|{i}",
                 "state": build_state(contexts[doc], render_record_text(values, fields)),
-                "questions": {"related": relation_question(fields)},
+                "questions": {"related": relation_question(fields, spec)},
             },
         })
     return units
@@ -367,14 +371,14 @@ def relation_units(flat: dict, samples: dict, contexts: dict[str, str]) -> list[
 
 
 def swap_contexts(contexts: dict[str, str], seed: int) -> dict[str, str]:
-    """Pair every document with a different document's OCR text.
+    """Pair every document with a different document's context text.
 
     Args:
-        contexts: document_id -> OCR text; needs at least two documents.
+        contexts: document_id -> context text; needs at least two documents.
         seed: seeds the permutation; the pairing is a cyclic shift, so no document maps to itself.
 
     Returns:
-        document_id -> the OCR text of its partner document.
+        document_id -> the context text of its partner document.
     """
     docs = sorted(contexts)
     assert len(docs) >= 2, "the other_document context control needs at least two documents"
@@ -659,31 +663,31 @@ def run(cfg: dict, run_dir: Path, repo_root: Path) -> dict:
     max_length = p["max_length"]
     assert isinstance(max_length, int) and max_length > 0
 
-    item_params = {k: p[k] for k in ("data_root", "dataset", "split", "error_types", "rows_per_stratum")}
+    spec = load_dataset_spec(repo_root / p["dataset_config"])
+    item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
     item_params["context_token_limit"] = None  # over-length handling is Clef's own (overlong_docs)
     if task == "clef_entity_row":
-        items = edr.build_items(item_params, seed, repo_root, None)
+        items = edr.build_items(spec, item_params, seed, repo_root, None)
     else:
-        items = rdr.build_items(item_params, seed, repo_root, None)
-    dataset = p["dataset"]
+        items = rdr.build_items(spec, item_params, seed, repo_root, None)
 
     contexts = {it["document_id"]: it["context"] for it in items}
     shown = swap_contexts(contexts, seed) if p["context_control"] == "other_document" else contexts
     context_doc = {d: d for d in contexts}
     if p["context_control"] == "other_document":
         inv = {c: d for d, c in contexts.items()}
-        assert len(inv) == len(contexts), "two documents with identical OCR text"
+        assert len(inv) == len(contexts), "two documents with identical context text"
         context_doc = {d: inv[shown[d]] for d in contexts}
 
     metrics: dict = {"n_items": len(items)}
     if task == "clef_entity_row":
-        units = entity_units(items, dataset, shown)
+        units = entity_units(items, spec, shown)
     else:
         flat = flatten_items(items)
-        samples = draw_relation_samples(flat, p, seed)
+        samples = draw_relation_samples(flat, p, seed, spec)
         for k, v in samples["stats"].items():
             metrics[f"sample_{k}"] = int(v)
-        units = relation_units(flat, samples, shown)
+        units = relation_units(flat, samples, shown, spec)
     for u in units:
         u["context_doc"] = context_doc[u["doc_id"]]
     metrics["n_units_before_filter"] = len(units)

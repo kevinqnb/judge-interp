@@ -20,6 +20,7 @@ import pytest
 
 from judge_interp import entity_detection as er
 from judge_interp.prompts import load_split, render_query
+from dataset_specs import LINE, MAIN, SPECS
 
 FIXTURE = "tests/fixtures/entity_detection_mini"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,12 +29,12 @@ ALL_LINE = ["inter_document", "intra_document", "cross_type"]
 
 
 def _rows(dataset):
-    return load_split(REPO_ROOT / FIXTURE, dataset, "train", ["inter_document", "cross_type"])
+    return load_split(REPO_ROOT / FIXTURE, SPECS[dataset], "train", ["inter_document", "cross_type"])
 
 
 def _params(dataset, **kw):
     p = dict(
-        data_root=FIXTURE, dataset=dataset, split="train",
+        data_root=FIXTURE, split="train",
         error_types=["inter_document", "cross_type"],
         rows_per_stratum={"valid": None, "inter_document": None, "cross_type": None},
         context_token_limit=None,
@@ -46,7 +47,7 @@ def _params(dataset, **kw):
 
 def test_render_row_hand_worked():
     r = _rows("main")[0]  # M1
-    out = er.render_row(r, "main")
+    out = er.render_row(r, MAIN)
     assert out["text"] == (
         'advertiser: "Acme "\nagency: null\nproperty: "WAAA "\ntv_address: "1 Main St\\nBoston "\n'
         'product: "Race 1 "\ncontract_num: "111 "\nflight_from: "01/01/20 "\nflight_to: "01/31/20 "\n'
@@ -68,7 +69,7 @@ def test_render_row_hand_worked():
 def test_render_row_escaped_inner_quote():
     r = copy.deepcopy(_rows("line")[0])
     r["program_desc"] = 'Say "hi"'
-    out = er.render_row(r, "line")
+    out = er.render_row(r, LINE)
     f, a, b = out["spans"][1]
     assert f == "program_desc"
     assert out["text"].splitlines()[1] == 'program_desc: "Say \\"hi\\" "'
@@ -78,21 +79,21 @@ def test_render_row_escaped_inner_quote():
 def test_render_row_differs_from_render_query_only_by_padding():
     for ds in ("main", "line"):
         for r in _rows(ds):
-            text = er.render_row(r, ds)["text"]
+            text = er.render_row(r, SPECS[ds])["text"]
             assert text.endswith("\n") and not text.endswith("\n\n")
             plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
-            assert "\n".join(plain) == render_query(r, ds)
+            assert "\n".join(plain) == render_query(r, SPECS[ds])
 
 
 def test_line_prompt_has_no_main_fields():
     for r in _rows("line"):
-        text = render_query(r, "line")
+        text = render_query(r, LINE)
         assert text.count("\n") == 4
         assert "advertiser" not in text and "gross_amount" not in text
 
 
 def test_labels_from_field_errors():
-    items = er.build_items(_params("main"), 0, REPO_ROOT)
+    items = er.build_items(MAIN, _params("main"), 0, REPO_ROOT)
     assert [(it["document_id"], it["row_ordinal"]) for it in items] == [
         ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-b", 0),
     ]
@@ -118,7 +119,7 @@ def test_labels_from_field_errors():
 
 
 def test_line_items_and_null_field():
-    items = er.build_items(_params("line"), 0, REPO_ROOT)
+    items = er.build_items(LINE, _params("line"), 0, REPO_ROOT)
     assert len(items) == 4
     n_spans = sorted(len(it["spans"]) for it in items)
     assert n_spans == [4, 5, 5, 5]  # L1 has program_desc null
@@ -130,7 +131,7 @@ def test_line_items_and_null_field():
 
 def test_check_row_rejects_inconsistent_labels():
     good = _rows("main")[1]  # M2
-    er.check_row(good, "main")
+    er.check_row(good, MAIN)
     for mutate in (
         lambda r: r["field_errors"].update(property=None, advertiser=None),  # drops labels, k disagrees
         lambda r: r.update(error_type=None),
@@ -142,36 +143,36 @@ def test_check_row_rejects_inconsistent_labels():
         bad = copy.deepcopy(good)
         mutate(bad)
         with pytest.raises(AssertionError):
-            er.check_row(bad, "main")
+            er.check_row(bad, MAIN)
 
 
 def test_stratified_subset_determinism_and_errors():
     rows = _rows("line")
     p = {"valid": 2, "cross_type": 1}
-    a = er.select_rows(rows, "line", "train", p, 0)
-    assert a == er.select_rows(rows, "line", "train", p, 0)
+    a = er.select_rows(rows, LINE, "train", p, 0)
+    assert a == er.select_rows(rows, LINE, "train", p, 0)
     assert len(a) == 3 and sum(not r["valid"] for r in a) == 1
     with pytest.raises(ValueError, match="requested but only"):
-        er.select_rows(rows, "line", "train", {"valid": 4, "cross_type": 1}, 0)
+        er.select_rows(rows, LINE, "train", {"valid": 4, "cross_type": 1}, 0)
     with pytest.raises(ValueError, match="strata present"):
-        er.select_rows(rows, "line", "train", {"valid": 1}, 0)
+        er.select_rows(rows, LINE, "train", {"valid": 1}, 0)
     with pytest.raises(ValueError, match="int >= 1"):
-        er.select_rows(rows, "line", "train", {"valid": 0, "cross_type": 1}, 0)
+        er.select_rows(rows, LINE, "train", {"valid": 0, "cross_type": 1}, 0)
 
 
 def test_instructions_name_every_field_of_the_dataset_only():
-    main, line = er.build_instructions("main"), er.build_instructions("line")
+    main, line = er.build_instructions(MAIN), er.build_instructions(LINE)
     for f in ("advertiser", "gross_amount"):
         assert f"- {f}:" in main and f"- {f}:" not in line
     for f in ("channel", "sub_amount"):
         assert f"- {f}:" in line and f"- {f}:" not in main
     assert "Type correspondence" in main
-    assert "{n}" not in main and "{other_place}" not in line
+    assert "{n}" not in main and "{hint}" not in line
 
 
 def test_context_token_limit_needs_tokenizer():
     with pytest.raises(ValueError, match="tokenizer"):
-        er.build_items(_params("main", context_token_limit=10), 0, REPO_ROOT)
+        er.build_items(MAIN, _params("main", context_token_limit=10), 0, REPO_ROOT)
 
 
 def _fake_result():
@@ -193,7 +194,7 @@ def _fake_result():
 def test_invariants_accept_good_and_reject_bad():
     r = _fake_result()
     er.check_row_invariants(r)
-    m = er.compute_metrics(r)
+    m = er.compute_metrics(r, MAIN)
     assert (m["n_spans"], m["n_prompts"], m["n_invalid_spans"], m["n_spans_cross_type"]) == (6, 2, 2, 2)
     assert m["n_rows_with_mixed_entities"] == 1
     assert m["n_distinct_quote_token_ids"] == 2

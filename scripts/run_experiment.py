@@ -9,6 +9,7 @@ Reads the config envelope (``id``, ``project``, ``task``, ``description``, ``see
 
     run.json                         manifest (task, git sha, status, timestamps)
     config.snapshot.yaml             verbatim copy of the config
+    dataset_config.snapshot.py       verbatim copy of the dataset-config module (prompt vocabulary)
     metrics.json                     flat scalar metrics
     artifacts/span_representations.npz   per-layer ``rep_<L>`` arrays + span metadata
     artifacts/cache/<document_id>.npz    per-document shards (resume support)
@@ -21,15 +22,18 @@ Tasks
 ``entity_detection`` (``judge_interp.entity_detection``): one prompt per selected
     dataset row, with the hidden state read at each non-null entity's closing quote.
 ``relation_detection`` (``judge_interp.relation_detection``): the same read-out with
-    instructions asking whether a line item's values belong together; ``dataset`` must
-    be ``"line"``.
+    instructions asking whether a row's values belong to the same item; the dataset must
+    have ``supports_relation``.
 ``clef_entity_row`` / ``clef_relation_row`` (``judge_interp.clef``): the Cloudflare
     clef-flash model as a direct judge; no representations are collected.
 
 ``params`` of the two representation tasks
-    data_root          repo-relative dir holding ``vrdu/{main,line,ocr}/``
+    data_root          repo-relative dir the dataset config's ``split_path`` / ``context_path``
+                       are relative to
     model              HF instruct-model repo id
-    dataset            "main" | "line"
+    dataset_config     repo-relative path of a ``.py`` file defining ``DATASET``, a
+                       ``judge_interp.dataset_spec.DatasetSpec``
+                       (e.g. ``experiments/dataset-configs/vrdu_line.py``)
     split              "train" | "test"
     layers             ints and/or "last" (see ``prompts.resolve_layers``)
     dtype              "float32" | "float16" | "bfloat16"
@@ -39,6 +43,7 @@ Tasks
     verify_read_point  bool; run ``RepresentationLM.verify_read_point`` on the first
                        item before judging
     error_types        invalid-row error types to include alongside every valid row
+                       (members of the dataset config's ``error_types``)
     rows_per_stratum   {"valid": n, "<error_type>": n, ...}; keys must equal "valid" +
                        ``error_types``; n is null (all rows) or an int >= 1, and a
                        stratum smaller than n is a hard error. Drawn with ``seed``.
@@ -61,13 +66,15 @@ from transformers import AutoTokenizer
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from judge_interp.dataset_spec import load_dataset_spec  # noqa: E402
+
 
 _ROW_PARAMS = (
-    "data_root", "model", "dataset", "split", "layers", "dtype", "device",
+    "data_root", "model", "dataset_config", "split", "layers", "dtype", "device",
     "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
 )
 _CLEF_PARAMS = (
-    "data_root", "model", "revision", "dataset", "split", "device", "dtype", "max_length",
+    "data_root", "model", "revision", "dataset_config", "split", "device", "dtype", "max_length",
     "overlong_docs", "context_control", "determinism_check_n", "known_answer_check",
     "error_types", "rows_per_stratum",
 )
@@ -111,8 +118,8 @@ def load_config(path: Path) -> dict:
         KeyError: a required envelope key or task param is missing, or a param is not
             valid for the task.
         ValueError: the id does not match the filename, the project is not
-            ``judge-interp``, the task is unknown, or ``params.dataset`` is not allowed
-            for the task.
+            ``judge-interp``, the task is unknown, or the dataset config does not support
+            a relation task that the task needs.
     """
     with open(path) as f:
         cfg = yaml.safe_load(f)
@@ -136,10 +143,9 @@ def load_config(path: Path) -> dict:
     if extra:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
-    if task in ("entity_detection", "clef_entity_row") and params["dataset"] not in ("main", "line"):
-        raise ValueError(f"params.dataset must be 'main' or 'line', got {params['dataset']!r}")
-    if task in ("relation_detection", "clef_relation_row") and params["dataset"] != "line":
-        raise ValueError(f"params.dataset must be 'line' for {task!r}, got {params['dataset']!r}")
+    spec = load_dataset_spec(REPO_ROOT / params["dataset_config"])
+    if task in ("relation_detection", "clef_relation_row"):
+        spec.require_relation()
     return cfg
 
 
@@ -183,6 +189,9 @@ def main(argv=None) -> None:
     (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
 
     (run_dir / "config.snapshot.yaml").write_text(args.config.read_text())
+    dataset_config_path = REPO_ROOT / params["dataset_config"]
+    (run_dir / "dataset_config.snapshot.py").write_text(dataset_config_path.read_text())
+    spec = load_dataset_spec(dataset_config_path)
 
     manifest = {
         "id": cfg["id"],
@@ -242,8 +251,8 @@ def main(argv=None) -> None:
 
     limit = params["context_token_limit"]
     tokenizer = AutoTokenizer.from_pretrained(params["model"]) if limit is not None else None
-    items = task_module.build_items(params, seed, REPO_ROOT, tokenizer)
-    print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={params['dataset']}, split={params['split']}")
+    items = task_module.build_items(spec, params, seed, REPO_ROOT, tokenizer)
+    print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={spec.name}, split={params['split']}")
 
     result = rlm.collect_rows(
         items,
@@ -251,7 +260,7 @@ def main(argv=None) -> None:
         verify_read_point=params["verify_read_point"],
     )
     _write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
-    metrics = task_module.compute_metrics(result)
+    metrics = task_module.compute_metrics(result, spec)
 
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print("metrics:", json.dumps(metrics, indent=2))

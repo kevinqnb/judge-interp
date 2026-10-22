@@ -16,7 +16,10 @@ import numpy as np
 import pytest
 
 from judge_interp import relation_detection as rr
-from judge_interp.prompts import LINE_FIELDS, load_split, render_query
+from judge_interp.prompts import load_split, render_query
+from dataset_specs import LINE, MAIN
+
+LINE_FIELDS = list(LINE.fields)
 
 FIXTURE = "tests/fixtures/relation_detection_mini"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +28,12 @@ ALL_STRATA = {"valid": None, "inter_document": None, "intra_document": None, "cr
 
 
 def _rows():
-    return load_split(REPO_ROOT / FIXTURE, "line", "train", ALL_LINE)
+    return load_split(REPO_ROOT / FIXTURE, LINE, "train", ALL_LINE)
 
 
 def _params(**kw):
     p = dict(
-        data_root=FIXTURE, dataset="line", split="train", error_types=ALL_LINE,
+        data_root=FIXTURE, split="train", error_types=ALL_LINE,
         rows_per_stratum=dict(ALL_STRATA), context_token_limit=None,
     )
     p.update(kw)
@@ -47,7 +50,7 @@ def _by(items, doc, error_type, line_index):
 
 def test_render_row_hand_worked():
     r = [x for x in _rows() if x["document_id"] == "doc-a" and x["valid"] and x["line_index"] == 0][0]
-    out = rr.render_row(r)
+    out = rr.render_row(r, LINE)
     assert out["text"] == (
         'channel: "7 "\nprogram_desc: "Movie "\nprogram_start_date: "01/05/20 "\n'
         'program_end_date: "01/10/20 "\nsub_amount: "$100.00 "\n'
@@ -63,11 +66,11 @@ def test_render_row_hand_worked():
 
 def test_render_row_null_field_has_no_span_and_escaped_quote():
     r = copy.deepcopy([x for x in _rows() if x["valid"] and x["program_desc"] is None][0])
-    out = rr.render_row(r)
+    out = rr.render_row(r, LINE)
     assert out["text"].splitlines()[1] == "program_desc: null"
     assert "program_desc" not in [f for f, _, _ in out["spans"]]
     r["channel"] = 'Say "hi"'
-    out = rr.render_row(r)
+    out = rr.render_row(r, LINE)
     f, a, b = out["spans"][0]
     assert out["text"].splitlines()[0] == 'channel: "Say \\"hi\\" "'
     assert out["text"][a - 3:b] == '\\" "'  # escaped quote, pad space, then the closing quote
@@ -75,16 +78,16 @@ def test_render_row_null_field_has_no_span_and_escaped_quote():
 
 def test_render_row_differs_from_render_query_only_by_padding():
     for r in _rows():
-        text = rr.render_row(r)["text"]
+        text = rr.render_row(r, LINE)["text"]
         assert text.endswith("\n") and not text.endswith("\n\n")
         plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
-        assert "\n".join(plain) == render_query(r, "line")
+        assert "\n".join(plain) == render_query(r, LINE)
         assert text.count("\n") == len(LINE_FIELDS)  # only line-item fields, no main fields
         assert "advertiser" not in text and "gross_amount" not in text
 
 
 def test_labels_and_items():
-    items = rr.build_items(_params(), 0, REPO_ROOT)
+    items = rr.build_items(LINE, _params(), 0, REPO_ROOT)
     assert len(items) == 6
     assert [(it["document_id"], it["row_ordinal"]) for it in items] == [
         ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-a", 3), ("doc-a", 4), ("doc-b", 0),
@@ -117,14 +120,16 @@ def test_labels_and_items():
     assert all(s["label_valid"] and s["row_k"] == 0 and s["dataset"] == "line" for s in valid["spans"])
 
 
-def test_only_line_dataset_is_supported():
-    with pytest.raises(ValueError, match="'line' only"):
-        rr.build_items(_params(dataset="main"), 0, REPO_ROOT)
+def test_dataset_without_relation_support_is_rejected():
+    with pytest.raises(ValueError, match="does not support the relation tasks"):
+        rr.build_items(MAIN, _params(), 0, REPO_ROOT)
+    with pytest.raises(ValueError, match="does not support the relation tasks"):
+        rr.build_instructions(MAIN)
 
 
 def test_check_row_rejects_inconsistent_labels():
     good = [r for r in _rows() if r["error_type"] == "intra_document"][0]
-    rr.check_row(good)
+    rr.check_row(good, LINE)
     for mutate in (
         lambda r: r["field_errors"].update(sub_amount=None),  # drops a label, k disagrees
         lambda r: r.update(error_type=None),
@@ -132,42 +137,44 @@ def test_check_row_rejects_inconsistent_labels():
         lambda r: r["field_errors"]["sub_amount"].update(error_type="inter_document"),
         lambda r: r.update(sub_amount=None),  # corrupted field with null value
         lambda r: r["field_errors"]["sub_amount"]["source"].pop("line_index"),
-        lambda r: r["field_errors"]["sub_amount"]["source"].update(field="not_a_field"),
+        lambda r: r["field_errors"]["sub_amount"]["source"].update(field=None),  # vocabulary is not checked here
     ):
         bad = copy.deepcopy(good)
         mutate(bad)
         with pytest.raises(AssertionError):
-            rr.check_row(bad)
+            rr.check_row(bad, LINE)
 
 
 def test_stratified_subset_determinism_and_errors():
     rows = _rows()
     p = {"valid": 2, "inter_document": 1, "intra_document": 1, "cross_type": 1}
-    a = rr.select_rows(rows, "train", p, 0)
-    assert a == rr.select_rows(rows, "train", p, 0)
+    a = rr.select_rows(rows, LINE, "train", p, 0)
+    assert a == rr.select_rows(rows, LINE, "train", p, 0)
     assert len(a) == 5 and sum(not r["valid"] for r in a) == 3
     with pytest.raises(ValueError, match="requested but only"):
-        rr.select_rows(rows, "train", {**p, "valid": 4}, 0)
+        rr.select_rows(rows, LINE, "train", {**p, "valid": 4}, 0)
     with pytest.raises(ValueError, match="strata present"):
-        rr.select_rows(rows, "train", {"valid": 1}, 0)
+        rr.select_rows(rows, LINE, "train", {"valid": 1}, 0)
     with pytest.raises(ValueError, match="int >= 1"):
-        rr.select_rows(rows, "train", {**p, "valid": 0}, 0)
+        rr.select_rows(rows, LINE, "train", {**p, "valid": 0}, 0)
 
 
 def test_instructions_are_relational_and_name_only_line_fields():
-    text = rr.build_instructions()
+    text = rr.build_instructions(LINE)
     for f in LINE_FIELDS:
         assert f"- {f}:" in text
     for f in ("advertiser", "agency", "gross_amount", "flight_from"):
         assert f"- {f}:" not in text
-    assert "same line item" in text
+    assert "same single item" in text
+    assert "related: true" in text and "related: false" in text
+    assert "<field>" not in text  # one verdict for the record, not one per field
     assert "padding space" in text and "closing quote" in text and "newline" in text
     assert "{" not in text and "}" not in text  # no format placeholder left unfilled
 
 
 def test_context_token_limit_needs_tokenizer():
     with pytest.raises(ValueError, match="tokenizer"):
-        rr.build_items(_params(context_token_limit=10), 0, REPO_ROOT)
+        rr.build_items(LINE, _params(context_token_limit=10), 0, REPO_ROOT)
 
 
 def _fake_result():
@@ -189,7 +196,7 @@ def _fake_result():
 def test_invariants_accept_good_and_reject_bad():
     r = _fake_result()
     rr.check_row_invariants(r)
-    m = rr.compute_metrics(r)
+    m = rr.compute_metrics(r, LINE)
     assert (m["n_spans"], m["n_prompts"], m["n_invalid_spans"], m["n_spans_intra_document"]) == (6, 2, 2, 2)
     assert m["n_rows_with_mixed_entities"] == 1
     assert m["n_distinct_quote_token_ids"] == 2

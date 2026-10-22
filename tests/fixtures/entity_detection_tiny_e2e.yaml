@@ -14,7 +14,7 @@ seed: 0
 params:
   data_root: tests/fixtures/entity_detection_mini
   model: Qwen/Qwen2.5-0.5B-Instruct
-  dataset: main
+  dataset_config: experiments/dataset-configs/vrdu_main.py
   split: train
   layers: [0, 12, "last"]
   dtype: float32

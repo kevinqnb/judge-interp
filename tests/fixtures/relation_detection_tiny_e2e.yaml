@@ -14,7 +14,7 @@ seed: 0
 params:
   data_root: tests/fixtures/relation_detection_mini
   model: Qwen/Qwen2.5-0.5B-Instruct
-  dataset: line
+  dataset_config: experiments/dataset-configs/vrdu_line.py
   split: train
   layers: [0, 12, "last"]
   dtype: float32
