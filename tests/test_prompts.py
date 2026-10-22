@@ -24,22 +24,22 @@ def _line_row():
 def test_render_query_main_fields_and_order():
     q = prompts.render_query(_main_row(), MAIN)
     names = [line.split(":", 1)[0] for line in q.splitlines()]
-    assert names == list(MAIN.fields)
+    assert names == [f for f in MAIN.fields if f not in ("agency", "product")]  # null in this row: omitted
 
 
 def test_render_query_line_fields_and_order():
     q = prompts.render_query(_line_row(), LINE)
     names = [line.split(":", 1)[0] for line in q.splitlines()]
-    assert names == list(LINE.fields)
+    assert names == [f for f in LINE.fields if f != "sub_amount"]  # null in this row: omitted
 
 
 def test_render_query_null_and_multiline_values():
     q = prompts.render_query(_main_row(), MAIN)
     lines = dict(line.split(": ", 1) for line in q.splitlines())
-    assert lines["agency"] == "null"          # json.dumps(None)
-    assert lines["product"] == "null"
+    assert "agency" not in lines and "product" not in lines  # null fields have no line
+    assert "null" not in q
     # tv_address contains a newline in the source; it must stay on one line.
-    assert len(q.splitlines()) == len(MAIN.fields)
+    assert len(q.splitlines()) == len(MAIN.fields) - 2
     assert lines["tv_address"] == json.dumps("63 Chestnut St.\nBoston, MA 02101")
 
 

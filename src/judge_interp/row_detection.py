@@ -12,8 +12,8 @@ that relation needs a dataset with ``supports_relation``); everything else lives
 3. ``check_row_invariants`` and ``compute_metrics`` check label bookkeeping and summarise
    span counts. No verdict is read: the model is never asked to answer.
 
-Rendering: every non-null value is a JSON string followed by one pad space before its
-closing quote, and the query ends with a newline. Under byte-level BPE (Qwen2.5) this
+Rendering: only non-null fields are shown (a null field has no line). Every value is a JSON
+string followed by one pad space before its closing quote, and the query ends with a newline. Under byte-level BPE (Qwen2.5) this
 makes the closing quote tokenize the same way on every line and keeps the value's last
 character out of the quote token, so the read position carries no entity text.
 
@@ -139,8 +139,8 @@ def _source_columns(entry: dict | None) -> dict:
 def render_row(row: dict, spec: DatasetSpec) -> dict:
     """Render a row as the query text and locate each entity's closing quote.
 
-    The text equals ``prompts.render_query`` with one pad space before each non-null
-    value's closing quote and a trailing newline (asserted line by line).
+    The text equals ``prompts.render_query`` (non-null fields only) with one pad space
+    before each value's closing quote and a trailing newline (asserted line by line).
 
     Args:
         row: a dataset row; every field of ``spec`` must be a ``str`` or ``None``.
@@ -154,25 +154,23 @@ def render_row(row: dict, spec: DatasetSpec) -> dict:
     lines: list[str] = []
     spans: list[tuple[str, int, int]] = []
     offset = 0
-    for f in spec.fields:
+    shown = [f for f in spec.fields if row[f] is not None]
+    for f in shown:
         v = row[f]
+        assert isinstance(v, str), f"{f}: non-str value {v!r}"
         prefix = f"{f}: "
-        encoded = json.dumps(v)
-        if v is not None:
-            assert isinstance(v, str), f"{f}: non-str value {v!r}"
-            encoded = encoded[:-1] + _PAD + '"'
+        encoded = json.dumps(v)[:-1] + _PAD + '"'
         lines.append(prefix + encoded)
-        if v is not None:
-            close = offset + len(prefix) + len(encoded) - 1
-            spans.append((f, close, close + 1))
+        close = offset + len(prefix) + len(encoded) - 1
+        spans.append((f, close, close + 1))
         offset += len(lines[-1]) + 1
+    assert lines, "row with no non-null field"
     text = "\n".join(lines) + "\n"
 
     base = render_query(row, spec).split("\n")
     assert len(base) == len(lines), "render_row diverged from prompts.render_query"
-    for f, b, mine in zip(spec.fields, base, lines):
-        expected = b if row[f] is None else b[:-1] + _PAD + '"'
-        assert mine == expected, f"{f}: render_row diverged from prompts.render_query"
+    for f, b, mine in zip(shown, base, lines):
+        assert mine == b[:-1] + _PAD + '"', f"{f}: render_row diverged from prompts.render_query"
     for f, a, b in spans:
         assert text[a:b] == '"', f"{f}: span does not cover a closing quote"
     return {"text": text, "spans": spans}
@@ -329,7 +327,7 @@ class RowDetectionLM(RepresentationLM):
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
             context: the ``## CONTEXT:`` text.
-            query: the ``## QUERY:`` text; ``spans`` offsets are relative to it.
+            query: the ``## EXTRACTED RECORD:`` text; ``spans`` offsets are relative to it.
             spans: dicts with one-character ``char_start`` / ``char_end`` covering a
                 closing quote in ``query``.
 
@@ -367,7 +365,7 @@ class RowDetectionLM(RepresentationLM):
             assert s <= pos < e
             # The context may contain the same strings; the read must be in the query.
             assert shift <= s < shift + len(query), (
-                f"{span['field']!r}: token {idx} starts outside the QUERY block"
+                f"{span['field']!r}: token {idx} starts outside the EXTRACTED RECORD block"
             )
             tid = int(input_ids[idx])
             assert '"' in self.tokenizer.decode([tid]), (

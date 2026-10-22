@@ -49,14 +49,14 @@ def test_render_row_hand_worked():
     r = _rows("main")[0]  # M1
     out = er.render_row(r, MAIN)
     assert out["text"] == (
-        'advertiser: "Acme "\nagency: null\nproperty: "WAAA "\ntv_address: "1 Main St\\nBoston "\n'
+        'advertiser: "Acme "\nproperty: "WAAA "\ntv_address: "1 Main St\\nBoston "\n'
         'product: "Race 1 "\ncontract_num: "111 "\nflight_from: "01/01/20 "\nflight_to: "01/31/20 "\n'
         'gross_amount: "$500.00 "\n'
     )
     assert [f for f, _, _ in out["spans"]] == [
         "advertiser", "property", "tv_address", "product", "contract_num",
         "flight_from", "flight_to", "gross_amount",
-    ]  # agency is null: no span
+    ]  # agency is null: no line, no span
     for _, a, b in out["spans"]:
         assert out["text"][a:b] == '"'
         assert out["text"][a - 1] == " " and out["text"][b] == "\n"  # pad before, newline after
@@ -86,10 +86,11 @@ def test_render_row_differs_from_render_query_only_by_padding():
 
 
 def test_line_prompt_has_no_main_fields():
-    for r in _rows("line"):
+    # fixture line rows: row 1 has a null program_desc, which is omitted -> 4 lines instead of 5
+    for r, n_newlines in zip(_rows("line"), [4, 3, 4, 4]):
         text = render_query(r, LINE)
-        assert text.count("\n") == 4
-        assert "advertiser" not in text and "gross_amount" not in text
+        assert text.count("\n") == n_newlines
+        assert "advertiser" not in text and "gross_amount" not in text and "null" not in text
 
 
 def test_labels_from_field_errors():

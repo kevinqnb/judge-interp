@@ -64,8 +64,7 @@ and ``rows_per_stratum`` as above, plus
     overlong_docs      "exclude" | "error"; records over the model config's ``max_length``
     context_control    "none" | "other_document"
     determinism_check_n, known_answer_check   sanity controls (see ``judge_interp.clef``)
-and, for ``clef_relation_row``, ``samples_per_row``, ``min_subset_size``, ``n_per_class`` and
-``subset_rng_stream``.
+(``clef_relation_row`` takes the same keys: one record and one question per row.)
 """
 from __future__ import annotations
 

@@ -7,7 +7,6 @@ tokenization is faked with a whitespace tokenizer.
 """
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,13 +24,6 @@ LINE_FIELDS = list(LINE.fields)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_CFG = load_clef_model_config(REPO_ROOT / "experiments" / "model-configs" / "clef.yaml")
 ALL_LINE = ["inter_document", "intra_document", "cross_type"]
-
-_spec = importlib.util.spec_from_file_location(
-    "analysis_relation_detection", REPO_ROOT / "analysis" / "relation_detection.py"
-)
-probe = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(probe)
-
 
 def _entity_items(dataset):
     strata = {"valid": None, "inter_document": None, "cross_type": None}
@@ -78,75 +70,54 @@ def test_entity_units_one_question_per_nonnull_field():
         assert it["context"] in u["record"]["state"]
     m1 = [u for u in units if u["doc_id"] == "doc-a" and u["spans"][0]["row_error_type"] == ""][0]
     assert "agency" not in m1["record"]["questions"]  # null in M1
-    assert 'agency: null' in m1["record"]["state"]
+    assert "agency" not in m1["record"]["state"].split("## EXTRACTED RECORD\n")[1]  # null field: no line
     assert 'advertiser: "Acme"' in m1["record"]["state"]  # plain value: no pad-space convention here
     q = m1["record"]["questions"]["property"]["instructions"]
     assert "`property`" in q and SPECS["main"].field_descriptions["property"] in q
 
 
-# ------------------------------------------------------------------ relation subsets
-def test_group_rows_matches_the_probe():
-    flat = clef.flatten_items(_relation_items())
-    groups = clef.group_rows(flat, LINE)
-    assert groups == probe.group_rows(
-        {k: flat[k] for k in ("doc_ids", "row_ordinal", "field", "field_position", "row_error_type")})
-
-
-def test_draw_samples_hand_worked():
-    # One 3-field row (spans 0-2, span 1 invalid) and one 1-field row (too small).
-    # Subsets of size >= 2 of 3 fields: 3 pairs + 1 triple = 4, so 10 requested yields 4.
-    groups = [
-        {"doc": "a", "ordinal": 0, "rows": [0, 1, 2], "fields": ["x", "y", "z"], "error_type": "cross_type"},
-        {"doc": "a", "ordinal": 1, "rows": [3], "fields": ["x"], "error_type": ""},
-    ]
-    label_valid = np.array([True, False, True, True])
-    s = clef.draw_samples(groups, label_valid, 10, 2, np.random.default_rng(0), 5)
-    assert s["stats"] == {"n_rows": 2, "n_rows_too_small": 1, "n_rows_fewer_subsets_than_requested": 1}
-    got = sorted(tuple(r for r in row if r >= 0) for row in s["rows"].tolist())
-    assert got == [(0, 1), (0, 1, 2), (0, 2), (1, 2)]
-    for row, label, size in zip(s["rows"].tolist(), s["label"], s["size"]):
-        members = [r for r in row if r >= 0]
-        assert size == len(members) and label == (1 not in members)
-    again = clef.draw_samples(groups, label_valid, 2, 2, np.random.default_rng(0), 5)
-    same = clef.draw_samples(groups, label_valid, 2, 2, np.random.default_rng(0), 5)
-    assert np.array_equal(again["rows"], same["rows"])
-
-
-def test_draw_relation_samples_is_balanced_and_seed_deterministic():
-    flat = clef.flatten_items(_relation_items())
-    p = dict(samples_per_row=4, min_subset_size=2, n_per_class=3, subset_rng_stream=1)
-    a = clef.draw_relation_samples(flat, p, 0, LINE)
-    b = clef.draw_relation_samples(flat, p, 0, LINE)
-    assert int(a["label"].sum()) == 3 and int((~a["label"]).sum()) == 3
-    for k in ("rows", "label", "size", "doc", "ordinal", "error_type"):
-        assert np.array_equal(a[k], b[k]), k
-
-
-def test_subset_label_is_all_valid_and_state_has_only_the_subset():
+# ------------------------------------------------------------------ relation rows
+def test_relation_units_hand_worked():
+    # relation_detection_mini line train, in item order (doc, line, stratum, k):
+    #   doc-a line 0: cross_type (end date wrong), intra_document (end date + amount wrong), valid
+    #   doc-a line 1: inter_document (channel wrong), valid -- program_desc is null in both
+    #   doc-b line 0: valid
     items = _relation_items()
-    flat = clef.flatten_items(items)
-    p = dict(samples_per_row=40, min_subset_size=2, n_per_class=2, subset_rng_stream=1)
-    samples = clef.draw_relation_samples(flat, p, 0, LINE)
     contexts = {it["document_id"]: it["context"] for it in items}
-    units = clef.relation_units(flat, samples, contexts, LINE)
-    assert len(units) == 4 and sum(u["label_valid"] for u in units) == 2
+    units = clef.relation_units(items, LINE, contexts)
+    assert [u["label_valid"] for u in units] == [False, False, True, False, True, True]
+    assert [u["row_error_type"] for u in units] == ["cross_type", "intra_document", "", "inter_document", "", ""]
+    assert [u["invalid_fields"] for u in units] == [
+        ["program_end_date"], ["program_end_date", "sub_amount"], [], ["channel"], [], []]
+    assert [len(u["fields"]) for u in units] == [5, 5, 5, 4, 4, 5]
     for u in units:
-        assert u["label_valid"] == (u["invalid_fields"] == [])
         lines = u["record"]["state"].split("## EXTRACTED RECORD\n")[1].split("\n")
-        assert [ln.split(":")[0] for ln in lines] == u["fields"]  # only the subset, canonical order
+        assert [ln.split(":")[0] for ln in lines] == u["fields"]  # every non-null field, canonical order, no null line
+        assert "null" not in u["record"]["state"].split("## EXTRACTED RECORD\n")[1]
         assert list(u["record"]["questions"]) == ["related"]
         text = u["record"]["questions"]["related"]["instructions"]
         for f in LINE_FIELDS:
             assert (f"- {f}:" in text) == (f in u["fields"])
+        assert [int(i) for i in u["rows"] if i >= 0] == [LINE_FIELDS.index(f) for f in u["fields"]]
+        assert len(u["rows"]) == len(LINE_FIELDS)
         if u["row_error_type"] == "":
             assert u["label_valid"]
+    assert "program_desc" not in units[3]["record"]["state"]  # null field omitted
 
 
-def test_balance_hard_errors_when_a_class_is_too_small():
-    flat = clef.flatten_items(_relation_items())
-    p = dict(samples_per_row=1, min_subset_size=2, n_per_class=10**6, subset_rng_stream=1)
-    with pytest.raises(ValueError, match="requested"):
-        clef.draw_relation_samples(flat, p, 0, LINE)
+def test_relation_question_matches_the_qwen_framing():
+    text = clef.relation_question(["channel", "sub_amount"], LINE)["instructions"]
+    assert "same single item" in text and "Do not judge whether an individual value is real" in text
+    assert "serves as the field" not in text and "not what its field denotes" not in text
+
+
+def test_entity_question_forbids_outside_knowledge_and_state_has_no_null_line():
+    items = _entity_items("main")
+    contexts = {it["document_id"]: it["context"] for it in items}
+    for u in clef.entity_units(items, SPECS["main"], contexts):
+        assert "null" not in u["record"]["state"].split("## EXTRACTED RECORD\n")[1]
+        for q in u["record"]["questions"].values():
+            assert "Do not use outside knowledge" in q["instructions"]
 
 
 # ------------------------------------------------------------------ context control

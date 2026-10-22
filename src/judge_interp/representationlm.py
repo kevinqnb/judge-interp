@@ -1,7 +1,7 @@
 """Local instruct model wrapper that reads hidden states at chosen prompt positions.
 
 ``RepresentationLM`` builds one chat prompt per data point
-(``## INSTRUCTIONS:`` / ``## CONTEXT:`` / ``## QUERY:`` inside the model's chat
+(``## INSTRUCTIONS:`` / ``## CONTEXT:`` / ``## EXTRACTED RECORD:`` inside the model's chat
 template, generation prompt appended) and runs a single prefill pass through
 nnterp. This base class provides prompt assembly, character-to-token offset
 mapping, residual-stream read points and a read-point self-check; the task
@@ -30,7 +30,7 @@ _TORCH_DTYPES: dict[str, "torch.dtype"] = {
 _PROMPT_TEMPLATE = (
     "## INSTRUCTIONS:\n{instructions}\n\n"
     "## CONTEXT:\n{context}\n\n"
-    "## QUERY:\n{query}"
+    "## EXTRACTED RECORD:\n{query}"
 )
 
 
@@ -133,7 +133,7 @@ class RepresentationLM:
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
             context: the ``## CONTEXT:`` text.
-            query: the ``## QUERY:`` text.
+            query: the ``## EXTRACTED RECORD:`` text.
 
         Returns:
             Token ids of the user turn plus the generation prompt.
@@ -174,7 +174,7 @@ class RepresentationLM:
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
             context: the ``## CONTEXT:`` text.
-            query: the ``## QUERY:`` text. Reads are taken at the last prompt token.
+            query: the ``## EXTRACTED RECORD:`` text. Reads are taken at the last prompt token.
 
         Raises:
             AssertionError: a check below fails.
@@ -309,7 +309,7 @@ class RepresentationLM:
         Args:
             instructions: the ``## INSTRUCTIONS:`` text.
             context: the ``## CONTEXT:`` text.
-            query: the ``## QUERY:`` text; it must occur exactly once in the prompt.
+            query: the ``## EXTRACTED RECORD:`` text; it must occur exactly once in the prompt.
 
         Returns:
             ``(input_ids, offsets, shift)``: token ids, each token's ``(start, end)``

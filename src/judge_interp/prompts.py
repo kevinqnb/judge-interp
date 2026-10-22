@@ -2,7 +2,7 @@
 
 Dataset-independent: everything that depends on the dataset (field lists, descriptions,
 error types, file layout) comes from a ``DatasetSpec`` (see ``dataset_spec``). Provides
-``load_split`` / ``load_context`` readers, ``render_query`` for the ``## QUERY:`` block,
+``load_split`` / ``load_context`` readers, ``render_query`` for the ``## EXTRACTED RECORD:`` block,
 ``resolve_layers`` for config layer lists, and ``sub_seed`` for deterministic per-key
 seeds.
 
@@ -111,10 +111,10 @@ def load_context(data_root: str | Path, spec: DatasetSpec, document_id: str) -> 
 
 
 def render_query(row: dict, spec: DatasetSpec) -> str:
-    """Render a row as the ``## QUERY:`` block.
+    """Render a row as the ``## EXTRACTED RECORD:`` block.
 
-    Emits only the fields of ``spec``, in canonical order, one ``field: <json>`` line
-    each (``null`` for a missing value). JSON encoding keeps a value that contains a
+    Emits only the non-null fields of ``spec``, in canonical order, one ``field: <json>``
+    line each; a null field is omitted. JSON encoding keeps a value that contains a
     newline on one line.
 
     Args:
@@ -134,7 +134,7 @@ def render_query(row: dict, spec: DatasetSpec) -> str:
     missing = [f for f in fields if f not in row]
     assert not missing, f"row is missing whitelisted field(s): {missing}"
 
-    lines = [f"{f}: {json.dumps(row[f])}" for f in fields]
+    lines = [f"{f}: {json.dumps(row[f])}" for f in fields if row[f] is not None]
     return "\n".join(lines)
 
 

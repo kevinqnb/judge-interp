@@ -61,7 +61,7 @@ def test_removed_tasks_are_rejected(tmp_path, task):
         run.load_config(p)
 
 
-CLEF_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-14-clef-relation-smoke-01.yaml"
+CLEF_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-21-clef-relation-smoke-02.yaml"
 
 
 def test_clef_config_requires_model_config_and_rejects_inline_model_keys(tmp_path):

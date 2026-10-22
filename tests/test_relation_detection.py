@@ -67,8 +67,9 @@ def test_render_row_hand_worked():
 def test_render_row_null_field_has_no_span_and_escaped_quote():
     r = copy.deepcopy([x for x in _rows() if x["valid"] and x["program_desc"] is None][0])
     out = rr.render_row(r, LINE)
-    assert out["text"].splitlines()[1] == "program_desc: null"
+    assert "program_desc" not in out["text"]  # null field: no line and no span
     assert "program_desc" not in [f for f, _, _ in out["spans"]]
+    assert out["text"].count("\n") == len(LINE_FIELDS) - 1
     r["channel"] = 'Say "hi"'
     out = rr.render_row(r, LINE)
     f, a, b = out["spans"][0]
@@ -82,7 +83,7 @@ def test_render_row_differs_from_render_query_only_by_padding():
         assert text.endswith("\n") and not text.endswith("\n\n")
         plain = [ln[:-2] + '"' if ln.endswith(' "') else ln for ln in text[:-1].split("\n")]
         assert "\n".join(plain) == render_query(r, LINE)
-        assert text.count("\n") == len(LINE_FIELDS)  # only line-item fields, no main fields
+        assert text.count("\n") == sum(r[f] is not None for f in LINE_FIELDS)  # only non-null line-item fields
         assert "advertiser" not in text and "gross_amount" not in text
 
 

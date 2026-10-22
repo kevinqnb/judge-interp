@@ -38,14 +38,14 @@ _HEADER = """You are validating the relationships between entities extracted fro
 
 You are given:
 1) In ## CONTEXT: the full {context_description}.
-2) In ## QUERY: the extracted record. It has one line per field, in the form `field: value`, each line ending with a newline. A value is a JSON string in double quotes, or `null` when the field was not extracted. Each string value is followed by one space before its closing quote; that padding space is not part of the value. The closing quote and the newline after it end the entity.
+2) In ## EXTRACTED RECORD: the extracted record. It has one line per extracted field, in the form `field: value`, each line ending with a newline. A value is a JSON string in double quotes. Fields that were not extracted are not listed. Each string value is followed by one space before its closing quote; that padding space is not part of the value. The closing quote and the newline after it end the entity.
 
-The fields are:
+The fields that may appear are:
 {types}
 
 The document may describe many items of the kind this record describes. A valid record is one whose entities are all related: taken together, they describe the same single item in the document. If one or more entities belong to a different item than the others, the record as a whole is not valid, even though each of those entities may be a genuine value of the document. Do not judge whether an individual entity is real, and do not judge entities one by one; judge the entities of the record as a whole, i.e. whether they all belong together.
 
-Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Give one verdict for the whole record. Ignore fields whose value is null.
+Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear — unclear evidence is a failed criterion. Give one verdict for the whole record.
 
 Answer with exactly one line: `related: true` if all the entities of the record belong together as one item, or `related: false` if they do not."""
 

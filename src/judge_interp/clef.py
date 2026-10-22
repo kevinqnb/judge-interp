@@ -5,14 +5,12 @@ allowed option per question, so ``P(true)`` of a ``noul`` question is a probabil
 straight from the model. The model runs through its own release code
 (``joint_schema_model.py``, pinned by ``revision``).
 
-Tasks:
-- ``clef_entity_row``: one record per row selected by ``entity_detection.build_items``
-  (state = context text + the row), one ``noul`` question per non-null field.
-- ``clef_relation_row``: rows selected by ``relation_detection.build_items``; from each row,
-  random subsets of its non-null fields are drawn (``draw_samples``) and class-balanced
-  (``balance``) with one ``default_rng([seed, subset_rng_stream])``. One record per subset
-  (state = context text + only the subset's fields), one ``noul`` question; a subset is valid
-  iff every field in it is valid.
+Tasks (rows selected by ``entity_detection.build_items`` / ``relation_detection.build_items``,
+the same rows the Qwen/Llama tasks judge; a null field is not shown, as there):
+- ``clef_entity_row``: one record per row (state = context text + the row's non-null fields),
+  one ``noul`` question per non-null field.
+- ``clef_relation_row``: one record per row (state as above), one ``noul`` question for the
+  whole row: do all its values describe the same item. A row is valid iff every field in it is.
 
 Pipeline: ``entity_units`` / ``relation_units`` build records, ``filter_overlong`` handles
 records that do not fit ``max_length`` (``overlong_docs``: ``"exclude"`` drops and records
@@ -28,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import itertools
 import json
 import sys
 from collections import defaultdict
@@ -46,10 +43,7 @@ _COMMON_PARAMS = (
     "data_root", "model_config", "dataset_config", "split", "device", "overlong_docs", "context_control",
     "determinism_check_n", "known_answer_check", "error_types", "rows_per_stratum",
 )
-TASK_PARAMS: dict[str, tuple[str, ...]] = {
-    "clef_entity_row": _COMMON_PARAMS,
-    "clef_relation_row": _COMMON_PARAMS + ("samples_per_row", "min_subset_size", "n_per_class", "subset_rng_stream"),
-}
+TASK_PARAMS: dict[str, tuple[str, ...]] = {"clef_entity_row": _COMMON_PARAMS, "clef_relation_row": _COMMON_PARAMS}
 OVERLONG_MODES = ("exclude", "error")
 CONTEXT_CONTROLS = ("none", "other_document")
 _DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
@@ -60,15 +54,14 @@ Is this value present in the CONTEXT (the {context_description}) and of the corr
 
 {criteria}
 
-Judge only against the CONTEXT; unclear evidence fails a criterion. Judge this field on its own, independently of the record's other fields."""
+Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence fails a criterion. Judge this field on its own, independently of the record's other fields."""
 
-# TODO(wording): relation question wording is a first draft, to be reviewed before a full run.
 _RELATION_QUESTION = """The EXTRACTED RECORD of the state is {record_description}, listed as one `field: value` per line. The fields present are:
 {types}
 
-Are all of these values correctly related? That is: does every value genuinely serve as the field it is listed under, and do all the values together describe the same single item in the CONTEXT (the {context_description})? Answer false if any value belongs to a different item or to another part of the document, or is not what its field denotes. A value being present in the CONTEXT is not enough; judge whether the values belong together.
+The document may describe many items of the kind this record describes. Are all of these values related? That is: taken together, do they describe the same single item in the CONTEXT (the {context_description})? If one or more values belong to a different item than the others, answer false, even though each of those values may be a genuine value of the document. Do not judge whether an individual value is real, and do not judge values one by one; judge the record as a whole, i.e. whether they all belong together.
 
-Judge only against the CONTEXT; unclear evidence means false."""
+Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence means false."""
 
 
 # ----------------------------------------------------------------------
@@ -79,12 +72,13 @@ def render_record_text(values: dict[str, str | None], fields: list[str]) -> str:
     """Render a record as one ``field: <json>`` line per field.
 
     Args:
-        values: field -> value (``None`` is rendered as ``null``).
+        values: field -> value; every field in ``fields`` must have a ``str`` value.
         fields: the fields to render, in output order.
 
     Returns:
         The newline-joined record text.
     """
+    assert fields and all(isinstance(values[f], str) for f in fields), fields
     return "\n".join(f"{f}: {json.dumps(values[f])}" for f in fields)
 
 
@@ -121,7 +115,7 @@ def entity_question(field: str, spec: DatasetSpec) -> dict:
 
 
 def relation_question(fields: list[str], spec: DatasetSpec) -> dict:
-    """Build the ``noul`` question asking whether a subset of line fields belongs together.
+    """Build the ``noul`` question asking whether a record's values belong together.
 
     Args:
         fields: at least two distinct fields of ``spec`` present in the record.
@@ -170,9 +164,9 @@ def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str])
     units = []
     for it in items:
         values = item_values(it, spec)
-        rec_text = render_record_text(values, spec.fields)
         fields = [sp["field"] for sp in it["spans"]]
-        assert all(values[f] is not None for f in fields)
+        assert all(values[f] is not None for f in fields) and set(fields) == {f for f in spec.fields if values[f] is not None}
+        rec_text = render_record_text(values, fields)
         units.append({
             "doc_id": it["document_id"],
             "row_ordinal": it["row_ordinal"],
@@ -187,188 +181,48 @@ def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str])
 
 
 # ----------------------------------------------------------------------
-# Relation subsets
+# Relation rows
 
 
-def flatten_items(items: list[dict]) -> dict[str, np.ndarray]:
-    """Flatten items' spans into parallel arrays.
-
-    Args:
-        items: items from ``relation_detection.build_items``, sorted by
-            ``(document_id, row_ordinal)``.
-
-    Returns:
-        Arrays, one entry per span, in ``(document, row_ordinal, field_position)`` order:
-        ``doc_ids``, ``row_ordinal``, ``field``, ``field_position``, ``label_valid``,
-        ``row_error_type``, ``field_error_type``, ``value``, ``line_index``, ``row_k``.
-    """
-    cols: dict[str, list] = defaultdict(list)
-    keys = []
-    for it in items:
-        for sp in it["spans"]:
-            keys.append((it["document_id"], it["row_ordinal"], sp["field_position"]))
-            cols["doc_ids"].append(it["document_id"])
-            cols["row_ordinal"].append(it["row_ordinal"])
-            for k in ("field", "field_position", "label_valid", "row_error_type", "field_error_type",
-                      "value", "line_index", "row_k"):
-                cols[k].append(sp[k])
-    assert keys == sorted(keys), "items are not in (document, row_ordinal, field_position) order"
-    return {k: np.array(v) for k, v in cols.items()}
-
-
-def group_rows(split: dict, spec: DatasetSpec) -> list[dict]:
-    """Group span indices by row.
+def relation_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str]) -> list[dict]:
+    """Build one Clef unit per row for the relation task.
 
     Args:
-        split: flat arrays from ``flatten_items``.
-        spec: the dataset.
-
-    Returns:
-        One dict per ``(document, row_ordinal)`` with ``doc``, ``ordinal``, ``rows`` (span
-        indices in ``field_position`` order), ``fields`` and ``error_type``.
-    """
-    by_key: dict[tuple[str, int], list[int]] = defaultdict(list)
-    for i, (d, o) in enumerate(zip(split["doc_ids"].tolist(), split["row_ordinal"].tolist())):
-        by_key[(d, o)].append(i)
-    groups = []
-    for (d, o), rows in by_key.items():
-        rows = sorted(rows, key=lambda i: int(split["field_position"][i]))
-        fields = [str(split["field"][i]) for i in rows]
-        assert len(set(fields)) == len(fields) and set(fields) <= set(spec.fields), (d, o, fields)
-        ets = {str(split["row_error_type"][i]) for i in rows}
-        assert len(ets) == 1, f"{d}/{o}: row_error_type varies within a row: {ets}"
-        groups.append({"doc": d, "ordinal": o, "rows": rows, "fields": fields, "error_type": ets.pop()})
-    return groups
-
-
-def draw_samples(groups: list[dict], label_valid: np.ndarray, samples_per_row: int, min_subset_size: int,
-                 rng: np.random.Generator, max_fields: int) -> dict:
-    """Draw random subsets of each row's non-null fields.
-
-    Args:
-        groups: output of ``group_rows``.
-        label_valid: per-span validity, indexed by the span indices in ``groups``.
-        samples_per_row: subsets drawn per row (fewer if the row has fewer subsets).
-        min_subset_size: smallest subset size, at least 2.
-        rng: generator used for all draws.
-        max_fields: number of fields of the dataset; ``rows`` is padded to this width.
-
-    Returns:
-        Arrays, one entry per sample: ``rows`` (span indices padded with -1 to ``max_fields``), ``label`` (all fields valid), ``size``, ``doc``, ``ordinal``,
-        ``error_type``; plus ``stats`` (counts of rows skipped or short of subsets).
-    """
-    assert min_subset_size >= 2, "a subset needs at least two fields"
-    out: dict[str, list] = defaultdict(list)
-    stats = {"n_rows": len(groups), "n_rows_too_small": 0, "n_rows_fewer_subsets_than_requested": 0}
-    for g in groups:
-        n = len(g["rows"])
-        if n < min_subset_size:
-            stats["n_rows_too_small"] += 1
-            continue
-        subsets = [c for r in range(min_subset_size, n + 1) for c in itertools.combinations(range(n), r)]
-        take = min(samples_per_row, len(subsets))
-        if take < samples_per_row:
-            stats["n_rows_fewer_subsets_than_requested"] += 1
-        for j in rng.choice(len(subsets), size=take, replace=False):
-            rows = [g["rows"][k] for k in subsets[int(j)]]
-            out["rows"].append(rows + [-1] * (max_fields - len(rows)))
-            out["label"].append(bool(label_valid[rows].all()))
-            out["size"].append(len(rows))
-            out["doc"].append(g["doc"])
-            out["ordinal"].append(g["ordinal"])
-            out["error_type"].append(g["error_type"])
-    assert out["rows"], "no samples drawn"
-    res = {k: np.array(v) for k, v in out.items()}
-    res["stats"] = stats
-    assert res["rows"].shape[1] == max_fields and (res["rows"] >= 0).sum(axis=1).tolist() == res["size"].tolist()
-    assert not ((res["error_type"] == "") & ~res["label"]).any(), "invalid sample from a clean row"
-    return res
-
-
-def balance(samples: dict, n_per_class: int, rng: np.random.Generator) -> dict:
-    """Subsample to ``n_per_class`` valid and ``n_per_class`` invalid samples.
-
-    Args:
-        samples: output of ``draw_samples``.
-        n_per_class: samples kept per class.
-        rng: generator used for the draws.
-
-    Returns:
-        ``samples`` restricted to the kept samples (original order), with ``stats`` kept.
-
-    Raises:
-        ValueError: a class has fewer than ``n_per_class`` samples.
-    """
-    assert isinstance(n_per_class, int) and n_per_class >= 1
-    label = samples["label"]
-    keep = []
-    for lab, name in ((True, "valid"), (False, "invalid")):
-        pool = np.flatnonzero(label == lab)
-        if len(pool) < n_per_class:
-            raise ValueError(f"only {len(pool)} {name} samples available, {n_per_class} requested")
-        keep.append(rng.choice(pool, size=n_per_class, replace=False))
-    keep = np.sort(np.concatenate(keep))
-    res = {k: v[keep] for k, v in samples.items() if k != "stats"}
-    res["stats"] = samples["stats"]
-    assert int(res["label"].sum()) == n_per_class and int((~res["label"]).sum()) == n_per_class
-    return res
-
-
-def draw_relation_samples(flat: dict, p: dict, seed: int, spec: DatasetSpec) -> dict:
-    """Draw and class-balance relation samples with one generator.
-
-    Args:
-        flat: output of ``flatten_items``.
-        p: config params with ``subset_rng_stream``, ``samples_per_row``, ``min_subset_size``
-            and ``n_per_class``.
-        seed: run seed; the generator is ``default_rng([seed, subset_rng_stream])``.
-        spec: the dataset.
-
-    Returns:
-        The balanced samples (see ``draw_samples``).
-    """
-    rng = np.random.default_rng([seed, p["subset_rng_stream"]])
-    s = draw_samples(group_rows(flat, spec), flat["label_valid"], p["samples_per_row"], p["min_subset_size"], rng,
-                     len(spec.fields))
-    return balance(s, p["n_per_class"], rng)
-
-
-def relation_units(flat: dict, samples: dict, contexts: dict[str, str], spec: DatasetSpec) -> list[dict]:
-    """Build one Clef unit per relation sample.
-
-    Args:
-        flat: output of ``flatten_items``.
-        samples: balanced samples from ``draw_relation_samples``.
+        items: items from ``relation_detection.build_items``.
+        spec: the dataset; must support the relation tasks.
         contexts: document_id -> the context text shown for that document.
-        spec: the dataset.
 
     Returns:
-        One dict per sample with ``doc_id``, ``row_ordinal``, ``sample_index``, ``rows``,
-        ``fields``, ``invalid_fields``, ``label_valid``, ``row_error_type``, ``line_index``
-        and ``record`` (one ``related`` question over the subset's fields).
+        One dict per row with ``doc_id``, ``row_ordinal``, ``rows`` (indices into
+        ``spec.fields`` of the row's non-null fields, padded with -1 to ``len(spec.fields)``),
+        ``fields``, ``invalid_fields``, ``label_valid`` (every field valid), ``row_error_type``,
+        ``line_index`` and ``record`` (one ``related`` question over the row's fields).
     """
     units = []
-    for i in range(len(samples["label"])):
-        rows = [int(r) for r in samples["rows"][i] if r >= 0]
-        fields = [str(flat["field"][r]) for r in rows]
-        assert fields == sorted(fields, key=spec.fields.index), "subset not in canonical field order"
-        doc = str(samples["doc"][i])
-        assert all(flat["doc_ids"][r] == doc for r in rows)
-        values = {str(flat["field"][r]): str(flat["value"][r]) for r in rows}
-        bad = [str(flat["field"][r]) for r in rows if not flat["label_valid"][r]]
-        assert (not bad) == bool(samples["label"][i]), "subset label != all-valid"
+    for it in items:
+        spans = it["spans"]
+        values = item_values(it, spec)
+        fields = [sp["field"] for sp in spans]
+        assert fields == sorted(fields, key=spec.fields.index), "spans not in canonical field order"
+        etypes = {sp["row_error_type"] for sp in spans}
+        lines = {sp["line_index"] for sp in spans}
+        assert len(etypes) == 1 and len(lines) == 1, (it["document_id"], it["row_ordinal"], etypes, lines)
+        bad = [sp["field"] for sp in spans if not sp["label_valid"]]
+        label = not bad
+        assert label == (etypes == {""}), f"{it['document_id']}/{it['row_ordinal']}: row_error_type {etypes} vs field labels"
+        idx = [spec.fields.index(f) for f in fields]
+        doc = it["document_id"]
         units.append({
             "doc_id": doc,
-            "row_ordinal": int(samples["ordinal"][i]),
-            "sample_index": i,
-            "rows": samples["rows"][i],
+            "row_ordinal": it["row_ordinal"],
+            "rows": np.array(idx + [-1] * (len(spec.fields) - len(idx))),
             "fields": fields,
             "invalid_fields": bad,
-            "label_valid": bool(samples["label"][i]),
-            "row_error_type": str(samples["error_type"][i]),
-            "line_index": int(flat["line_index"][rows[0]]),
+            "label_valid": label,
+            "row_error_type": etypes.pop(),
+            "line_index": lines.pop(),
             "record": {
-                "id": f"{doc}|{int(samples['ordinal'][i])}|{i}",
+                "id": f"{doc}|{it['row_ordinal']}",
                 "state": build_state(contexts[doc], render_record_text(values, fields)),
                 "questions": {"related": relation_question(fields, spec)},
             },
@@ -628,14 +482,14 @@ def _entity_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
 
 
 def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndarray]:
-    """Flatten relation units and scores to one array entry per sample.
+    """Flatten relation units and scores to one array entry per row.
 
     Args:
         units: output of ``relation_units`` after ``filter_overlong``, with ``context_doc``.
         results: ``_score_units`` output, parallel to ``units``.
 
     Returns:
-        Arrays ``doc_ids``, ``row_ordinal``, ``sample_index``, ``line_index``, ``rows``,
+        Arrays ``doc_ids``, ``row_ordinal``, ``line_index``, ``rows``,
         ``size``, ``fields``, ``invalid_fields``, ``n_invalid_fields``, ``label_valid``,
         ``row_error_type``, ``context_doc``, ``p_true``, ``logit_true``, ``logit_false``
         and ``n_tokens``.
@@ -644,7 +498,6 @@ def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.nd
     for u, r in zip(units, results):
         cols["doc_ids"].append(u["doc_id"])
         cols["row_ordinal"].append(u["row_ordinal"])
-        cols["sample_index"].append(u["sample_index"])
         cols["line_index"].append(u["line_index"])
         cols["rows"].append(u["rows"])
         cols["size"].append(len(u["fields"]))
@@ -677,7 +530,7 @@ def validate_params(p: dict) -> None:
 
 
 def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Path) -> tuple[list[dict], dict]:
-    """Select rows and build one Clef unit per entity row or relation sample (no model needed).
+    """Select rows and build one Clef unit per row (no model needed).
 
     Args:
         task: ``clef_entity_row`` or ``clef_relation_row``.
@@ -688,7 +541,7 @@ def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Pat
 
     Returns:
         ``(units, metrics)``: the units, each with ``context_doc`` set, and the counts
-        (``n_items``, ``sample_*``, ``n_units_before_filter``) known before scoring.
+        (``n_items``, ``n_units_before_filter``) known before scoring.
     """
     assert task in TASKS, task
     item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
@@ -710,11 +563,7 @@ def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Pat
     if task == "clef_entity_row":
         units = entity_units(items, spec, shown)
     else:
-        flat = flatten_items(items)
-        samples = draw_relation_samples(flat, p, seed, spec)
-        for k, v in samples["stats"].items():
-            metrics[f"sample_{k}"] = int(v)
-        units = relation_units(flat, samples, shown, spec)
+        units = relation_units(items, spec, shown)
     for u in units:
         u["context_doc"] = context_doc[u["doc_id"]]
     metrics["n_units_before_filter"] = len(units)
