@@ -222,6 +222,12 @@ __marimo__/
 notes
 CLAUDE.local.md
 
-# VRDU dataset: structured files (directory.json, main/, line/) are committed;
-# the regenerable OCR text is not — rebuild with data/vrdu/build_vrdu_dataset.py.
+# VRDU dataset: the base files, directory.json, invalids.json and manifest.json are committed;
+# the regenerable OCR text and the large invalid-row files are not. Rebuild with
+# data/vrdu/build_vrdu_dataset.py (ocr/) and data/vrdu/build_vrdu_invalids.py (the four
+# {main,line}/{train,test}.json); the committed manifest.json holds their sha256.
 /data/vrdu/ocr/
+/data/vrdu/main/train.json
+/data/vrdu/main/test.json
+/data/vrdu/line/train.json
+/data/vrdu/line/test.json

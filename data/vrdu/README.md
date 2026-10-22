@@ -13,7 +13,10 @@ every row is one extraction, either **valid** (copied from the annotations) or *
 Build configs live in `build-configs/` (one per invalids version, `-01` to `-04`; only the newest
 describes the data on disk). Run each script directly (local data prep, no cluster job), e.g.
 `uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
-Output is deterministic for a fixed seed. Numbers from earlier invalids configs (`-01`..`-03`) do
+Output is deterministic for a fixed seed. The large row files (`{main,line}/{train,test}.json`,
+~110 MB) and `ocr/` are **gitignored**: regenerate them with the commands above, then check them
+against the committed `manifest.json`, which stores the sha256 of each split file
+(`build_vrdu_manifest.load_manifest_split` raises if a regenerated file differs). Numbers from earlier invalids configs (`-01`..`-03`) do
 not carry over to `-04`.
 
 ## Two datasets
