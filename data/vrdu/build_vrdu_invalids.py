@@ -343,19 +343,27 @@ def _choose_fields(feasible_nondate, date_fields, date_feasibility, k, rng):
     return sorted([*chosen_nondate, *chosen_dates])
 
 
-def pick_fragment_neutral(eligible, pool, is_fragment, rng):
-    """Pick one of ``eligible`` (a subset of ``pool``) without over-selecting OCR fragments.
+def fragment_rate(rows, date_fields, year_pivot):
+    """Share of the non-null date values of ``rows`` that are OCR fragments (do not parse)."""
+    values = [r[f] for r in rows for f in date_fields if r[f] is not None]
+    assert values, "no date values to take a fragment rate from"
+    return sum(1 for v in values if parse_date(v, year_pivot) is None) / len(values)
 
-    A fragment passes every order filter and a real date only sometimes does, so a
-    uniform pick from the order-feasible values draws fragments far above their rate in
-    the pool -- which would make "is a fragment" predict "was corrupted". Instead the
-    class (fragment / real) is drawn at the pool's own fragment rate, then a value
-    uniformly within it. Only when one class has no feasible value is the other forced.
+
+def pick_fragment_neutral(eligible, rate, is_fragment, rng):
+    """Pick one of ``eligible`` so OCR fragments are drawn at ``rate``, not at their eligible share.
+
+    A fragment passes every order filter and a real date only sometimes does, and the
+    cross_type / intra_document pools (a document's own dates, minus values already valid for
+    the target) are skewed toward fragments -- either would make "is a fragment" predict "was
+    corrupted". So the class (fragment / real) is drawn at ``rate`` (the split's fragment rate
+    among its valid date values, from ``fragment_rate``), then a value uniformly within it.
+    Only when one class has no feasible value is the other forced.
     """
+    assert 0.0 <= rate <= 1.0, rate
     fragments = [x for x in eligible if is_fragment(x)]
     reals = [x for x in eligible if not is_fragment(x)]
     if fragments and reals:
-        rate = sum(1 for x in pool if is_fragment(x)) / len(pool)
         chosen = fragments if rng.random() < rate else reals
     else:
         chosen = fragments or reals
@@ -363,7 +371,7 @@ def pick_fragment_neutral(eligible, pool, is_fragment, rng):
     return chosen[rng.randrange(len(chosen))]
 
 
-def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, rng, eq):
+def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, rng, eq, frag_rate):
     """Assign new value(s) to the chosen date field(s), keeping ``from <= to`` where both parse.
 
     Feasibility has already guaranteed a valid choice exists; the assertions here
@@ -380,20 +388,19 @@ def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, r
     def is_fragment(v):
         return parsed(v) is None
 
-    def pick(eligible, field, orig):
-        pool = [v for v in pools[field] if eq(field, v) != orig]
-        return pick_fragment_neutral(eligible, pool, is_fragment, rng)
+    def pick(eligible):
+        return pick_fragment_neutral(eligible, frag_rate, is_fragment, rng)
 
     if chosen_dates == frozenset([from_field]):
         new_row[from_field] = pick([
             v for v in pools[from_field]
             if eq(from_field, v) != orig_s and pair_ok(parsed(v), parsed_e)
-        ], from_field, orig_s)
+        ])
     elif chosen_dates == frozenset([to_field]):
         new_row[to_field] = pick([
             w for w in pools[to_field]
             if eq(to_field, w) != orig_e and pair_ok(parsed_s, parsed(w))
-        ], to_field, orig_e)
+        ])
     else:
         to_c = _date_candidates(row, to_field, pools, year_pivot, eq)
         to_free = None in to_c
@@ -402,16 +409,16 @@ def _corrupt_dates(new_row, chosen_dates, row, date_fields, pools, year_pivot, r
             v for v in pools[from_field]
             if eq(from_field, v) != orig_s
             and (parsed(v) is None or to_free or parsed(v) <= latest_to)
-        ], from_field, orig_s)
+        ])
         parsed_from = parsed(new_from)
         new_to = pick([
             w for w in pools[to_field]
             if eq(to_field, w) != orig_e and pair_ok(parsed_from, parsed(w))
-        ], to_field, orig_e)
+        ])
         new_row[from_field], new_row[to_field] = new_from, new_to
 
 
-def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq):
+def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq, frag_rate):
     """Build one invalid row from ``base_row``. Returns ``(new_row, invalid_fields)`` or None.
 
     On the main-dataset path ``k`` may exceed what the row supports, in which
@@ -432,7 +439,7 @@ def make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot,
             new_row[field] = sample_new(pools[field], base_row[field], rng, eq, field)
     chosen_dates = frozenset(f for f in chosen if f in date_fields)
     if chosen_dates:
-        _corrupt_dates(new_row, chosen_dates, base_row, date_fields, pools, year_pivot, rng, eq)
+        _corrupt_dates(new_row, chosen_dates, base_row, date_fields, pools, year_pivot, rng, eq, frag_rate)
 
     changed = sorted(f for f in base_row if new_row[f] != base_row[f])
     assert changed == chosen, f"changed {changed} != chosen {chosen} ({base_row.get('document_id')})"
@@ -479,7 +486,7 @@ def tag_row(row, fields, id_keys, k, valid, invalid_fields, error_type, sources)
 
 
 def generate_split(base_rows, fields, target_fields, id_keys, k_range,
-                   pool_for_row, date_fields, year_pivot, rng, source_for, eq):
+                   pool_for_row, date_fields, year_pivot, rng, source_for, eq, frag_rate):
     """Return ``(output_rows, skipped, capped)`` for one main-dataset split.
 
     All emitted invalid rows are ``inter_document``; ``source_for(field, value)``
@@ -499,7 +506,7 @@ def generate_split(base_rows, fields, target_fields, id_keys, k_range,
         row_id = {key: base_row[key] for key in id_keys}
         row_caps, produced = [], 0
         for k in range(k_lo, k_hi + 1):
-            result = make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq)
+            result = make_invalid_row(base_row, k, target_fields, date_fields, pools, year_pivot, rng, eq, frag_rate)
             if result is None:
                 row_caps.append({**row_id, "k": k, "realized": 0})
                 continue
@@ -639,7 +646,7 @@ def _intra_feasible(base_row, current_row, other_rows, other_tuples, target_fiel
     return feasible
 
 
-def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_pivot, k_hi, rng, eq):
+def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_pivot, k_hi, rng, eq, frag_rate):
     """Grow ``base_row`` into up to ``k_hi`` intra-document invalid variants.
 
     Each successive field corruption draws its value from a distinct,
@@ -667,11 +674,8 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
         feasible_fields = [f for f in target_fields if f in feasible]
         field = feasible_fields[rng.randrange(len(feasible_fields))]
         if field in date_fields:
-            every_donor = [i for i, d in enumerate(other_rows)
-                           if i not in used_donors and d[field] is not None
-                           and eq(field, d[field]) != eq(field, base_row[field])]
             donor_idx = pick_fragment_neutral(
-                feasible[field], every_donor,
+                feasible[field], frag_rate,
                 lambda i: parse_date(other_rows[i][field], year_pivot) is None, rng)
         else:
             donor_idx = feasible[field][rng.randrange(len(feasible[field]))]
@@ -692,12 +696,12 @@ def build_intra_chain(base_row, other_rows, target_fields, date_fields, year_piv
     return results
 
 
-def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_range, rng, eq):
+def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_range, rng, eq, frag_rate):
     """One invalid row per achievable num_invalid_fields for the inter-document type."""
     targets = achievable_targets(row, target_fields, date_fields, pool, year_pivot, k_range, eq)
     rows = []
     for k in targets:
-        result = make_invalid_row(row, k, target_fields, date_fields, pool, year_pivot, rng, eq)
+        result = make_invalid_row(row, k, target_fields, date_fields, pool, year_pivot, rng, eq, frag_rate)
         assert result is not None and len(result[1]) == k, (
             f"k={k} came from achievable_targets so it must be exactly realizable"
         )
@@ -705,7 +709,7 @@ def line_inter_document(row, pool, target_fields, date_fields, year_pivot, k_ran
     return rows
 
 
-def generate_line_split(line_base, date_fields, year_pivot, k_range, rng, eq):
+def generate_line_split(line_base, date_fields, year_pivot, k_range, rng, eq, frag_rate):
     """Build inter- and intra-document invalid line rows for one split.
 
     Returns ``(output_rows, skipped, capped)`` where ``skipped``/``capped`` are
@@ -731,7 +735,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng, eq):
         for row in rows:
             row_id = {"document_id": row["document_id"], "line_index": row["line_index"]}
 
-            inter_rows = line_inter_document(row, inter_pools[doc_id], LINE_FIELDS, date_fields, year_pivot, k_range, rng, eq)
+            inter_rows = line_inter_document(row, inter_pools[doc_id], LINE_FIELDS, date_fields, year_pivot, k_range, rng, eq, frag_rate)
             if not inter_rows:
                 skipped["inter_document"].append(row_id)
             else:
@@ -744,7 +748,7 @@ def generate_line_split(line_base, date_fields, year_pivot, k_range, rng, eq):
                                        {f: {"scope": "other_document"} for f in invalid_fields}))
 
             other_rows = [r for r in rows if r is not row]
-            chain = build_intra_chain(row, other_rows, LINE_FIELDS, date_fields, year_pivot, k_hi, rng, eq)
+            chain = build_intra_chain(row, other_rows, LINE_FIELDS, date_fields, year_pivot, k_hi, rng, eq, frag_rate)
             chain = [(r, fields, donors) for r, fields, donors in chain if len(fields) >= k_lo]
             if not chain:
                 skipped["intra_document"].append(row_id)
@@ -905,7 +909,7 @@ def mark_exchanges(sources, dataset, row):
 
 
 def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, line_by_doc, truth,
-                             kinds, date_fields, year_pivot, k_range, rng, eq):
+                             kinds, date_fields, year_pivot, k_range, rng, eq, frag_rate):
     """cross_type invalid rows for one dataset/split: one per achievable ``k`` in ``k_range``.
 
     Returns ``(rows, skipped, capped, stats)``. ``rng`` must be this
@@ -945,7 +949,7 @@ def generate_cross_type_rows(dataset, base_rows, fields, id_keys, main_by_doc, l
         if ks[-1] < k_hi:
             capped.append({**row_id, "reached": ks[-1]})
         for k in ks:
-            result = make_invalid_row(base, k, targets, date_fields, pools, year_pivot, rng, eq)
+            result = make_invalid_row(base, k, targets, date_fields, pools, year_pivot, rng, eq, frag_rate)
             assert result is not None and len(result[1]) == k, "k came from achievable_targets"
             new_row, invalid_fields = result
             sources = {f: dict(rng.choice(sources_by_value[f][new_row[f]])) for f in invalid_fields}
@@ -1105,6 +1109,7 @@ def main(argv=None):
         "line_intra_donor_counts": {},
         "line_inter_coincidental_overlap": {},
         "date_fragment_rates": {"main": {}, "line": {}},
+        "fragment_target_rate": {},
     }
 
     for split in ("train", "test"):
@@ -1118,11 +1123,14 @@ def main(argv=None):
 
         # --- main dataset (inter_document generation unchanged; cross_type appended) ---
         pools_main = main_pools(main_base)
+        main_frag_rate = fragment_rate(main_base, main_date_fields, year_pivot)
+        line_frag_rate = fragment_rate(line_base, line_date_fields, year_pivot)
+        provenance["fragment_target_rate"][split] = {"main": main_frag_rate, "line": line_frag_rate}
         provenance["main_pool_sizes"][split] = {f: len(p) for f, p in pools_main.items()}
         out_rows, skipped, capped = generate_split(
             main_base, MAIN_FIELDS, MAIN_FIELDS, ["document_id"], main_k_range,
             lambda _r, _p=pools_main: _p, main_date_fields, year_pivot, rng,
-            lambda _field, _value: {"scope": "other_document"}, eq,
+            lambda _field, _value: {"scope": "other_document"}, eq, main_frag_rate,
         )
 
         line_by_doc = {}
@@ -1135,7 +1143,7 @@ def main(argv=None):
         cross_rng = random.Random(f"{seed}:{split}:main:{CROSS_TYPE}")
         cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
             "main", main_base, MAIN_FIELDS, ["document_id"], main_by_id, line_by_doc, truth, kinds,
-            main_date_fields, year_pivot, cross_k["main"], cross_rng, eq,
+            main_date_fields, year_pivot, cross_k["main"], cross_rng, eq, main_frag_rate,
         )
         out_rows = out_rows + cross_rows
         base_by_id = {(r["document_id"],): r for r in main_base}
@@ -1187,11 +1195,11 @@ def main(argv=None):
             "docs_with_no_donor": sum(1 for c in donor_counts if c == 0),
         }
 
-        out_rows, skipped, capped = generate_line_split(line_base, line_date_fields, year_pivot, line_k_range, rng, eq)
+        out_rows, skipped, capped = generate_line_split(line_base, line_date_fields, year_pivot, line_k_range, rng, eq, line_frag_rate)
         cross_rng = random.Random(f"{seed}:{split}:line:{CROSS_TYPE}")
         cross_rows, cross_skipped, cross_capped, cross_stats = generate_cross_type_rows(
             "line", line_base, LINE_FIELDS, ["document_id", "line_index"], main_by_id, line_by_doc, truth,
-            kinds, line_date_fields, year_pivot, cross_k["line"], cross_rng, eq,
+            kinds, line_date_fields, year_pivot, cross_k["line"], cross_rng, eq, line_frag_rate,
         )
         out_rows = out_rows + cross_rows
         base_by_id_line = {(r["document_id"], r["line_index"]): r for r in line_base}

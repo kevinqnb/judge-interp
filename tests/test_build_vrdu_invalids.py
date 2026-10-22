@@ -52,6 +52,7 @@ DATE_FIELDS = ["program_start_date", "program_end_date"]
 KIND_OF = {"flight_from": "date", "flight_to": "date", "program_start_date": "date",
            "program_end_date": "date", "gross_amount": "amount", "sub_amount": "amount"}
 EQ = b.make_eq(KIND_OF, PIVOT)
+FRAG_RATE = 0.2
 
 
 # --- parse_date ------------------------------------------------------------
@@ -226,7 +227,7 @@ def test_make_invalid_row_caps_when_only_one_date_field_can_change():
     shared = ["02/01/20", "02/05/20"]
     pools = {"channel": ["9"], "program_desc": ["Solo"], "sub_amount": ["$9"],
              "program_start_date": shared, "program_end_date": shared}
-    new_row, changed = b.make_invalid_row(row, 3, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(1), EQ)
+    new_row, changed = b.make_invalid_row(row, 3, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(1), EQ, FRAG_RATE)
     assert len(changed) == 1 and changed[0] in DATE_FIELDS
     assert b.parse_date(new_row["program_start_date"], PIVOT) <= b.parse_date(new_row["program_end_date"], PIVOT)
 
@@ -236,7 +237,7 @@ def test_make_invalid_row_returns_none_when_nothing_feasible():
            "program_start_date": "04/10/20", "program_end_date": "04/10/20", "sub_amount": "$5"}
     pools = {"channel": ["7"], "program_desc": ["x"], "sub_amount": ["$5"],
              "program_start_date": ["04/10/20"], "program_end_date": ["04/10/20"]}
-    assert b.make_invalid_row(row, 2, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(0), EQ) is None
+    assert b.make_invalid_row(row, 2, b.LINE_FIELDS, DATE_FIELDS, pools, PIVOT, random.Random(0), EQ, FRAG_RATE) is None
 
 
 # --- build_intra_chain ---------------------------------------------------
@@ -265,7 +266,7 @@ def test_build_intra_chain_reaches_max_with_fully_distinct_donors():
     base = {"channel": "1", "program_desc": "Base Show",
             "program_start_date": "05/01/20", "program_end_date": "05/10/20", "sub_amount": "$100.00"}
     donors = _l6_style_donors()
-    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ, FRAG_RATE)
     assert [len(fields) for _row, fields, _donors in chain] == [1, 2, 3, 4, 5]
     # nested: each step's fields are a superset of the previous step's
     for i in range(len(chain) - 1):
@@ -282,14 +283,14 @@ def test_build_intra_chain_caps_at_donor_scarcity():
     base = {"channel": "8", "program_desc": "Cap Base",
             "program_start_date": "07/01/20", "program_end_date": "07/10/20", "sub_amount": "$700.00"}
     donors = _l6_style_donors()[:2]  # only 2 distinct donors available
-    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
+    chain = b.build_intra_chain(base, donors, b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ, FRAG_RATE)
     assert [len(fields) for _row, fields, _donors in chain] == [1, 2]  # stops at 2, not assumed to be 5
 
 
 def test_build_intra_chain_no_donors_is_empty():
     base = {"channel": "1", "program_desc": "d",
             "program_start_date": "01/01/20", "program_end_date": "01/05/20", "sub_amount": "$1"}
-    assert b.build_intra_chain(base, [], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ) == []
+    assert b.build_intra_chain(base, [], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ, FRAG_RATE) == []
 
 
 def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising():
@@ -300,7 +301,7 @@ def test_build_intra_chain_declines_a_would_be_duplicate_pair_instead_of_raising
             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
     donor = {"channel": "2", "program_desc": "A", "line_index": 1,
              "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
-    chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
+    chain = b.build_intra_chain(base, [donor], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ, FRAG_RATE)
     assert chain == []
 
 
@@ -320,7 +321,7 @@ def test_build_intra_chain_never_reproduces_a_near_duplicate_donor():
                "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
     donor_b = {"channel": "9", "program_desc": "Z", "line_index": 2,
                "program_start_date": "09/01/20", "program_end_date": "09/10/20", "sub_amount": "$9"}
-    chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ)
+    chain = b.build_intra_chain(base, [donor_a, donor_b], b.LINE_FIELDS, DATE_FIELDS, PIVOT, 5, random.Random(0), EQ, FRAG_RATE)
     assert chain  # progress is still made via donor_b despite donor_a's collision risk
     for row, _fields, _donors in chain:
         got = tuple(row[f] for f in b.LINE_FIELDS)
@@ -722,40 +723,37 @@ def test_provenance_records_fragment_rates_for_every_dataset_and_split(built):
             assert "valid" in cells and set(cells) <= {"valid", "inter_document", "intra_document", "cross_type"}
 
 
-def test_pick_fragment_neutral_draws_fragments_at_the_pool_rate_not_the_eligible_rate():
-    # Pool: 8 real dates + 2 fragments (rate 0.2). Order filtering leaves 1 real + both fragments
-    # eligible; a uniform pick would take a fragment 2/3 of the time.
-    pool = [f"r{i}" for i in range(8)] + ["/01/20", "/02/20"]
+def test_pick_fragment_neutral_draws_fragments_at_the_target_rate_not_the_eligible_rate():
+    # Order filtering leaves 1 real + 2 fragments eligible; a uniform pick would take a fragment 2/3
+    # of the time. The class is drawn at the target rate (0.2) instead.
     eligible = ["r0", "/01/20", "/02/20"]
     frag = lambda v: v.startswith("/")
     rng = random.Random(0)
     n = 3000
-    hits = sum(frag(b.pick_fragment_neutral(eligible, pool, frag, rng)) for _ in range(n))
+    hits = sum(frag(b.pick_fragment_neutral(eligible, 0.2, frag, rng)) for _ in range(n))
     assert 0.15 < hits / n < 0.25      # expected 0.20, sd ~0.007
 
 
 def test_pick_fragment_neutral_forces_the_only_available_class():
     frag = lambda v: v.startswith("/")
-    pool = ["r0", "r1", "/01/20"]
     rng = random.Random(0)
-    assert {b.pick_fragment_neutral(["/01/20"], pool, frag, rng) for _ in range(20)} == {"/01/20"}
-    assert {b.pick_fragment_neutral(["r1"], pool, frag, rng) for _ in range(20)} == {"r1"}
+    assert {b.pick_fragment_neutral(["/01/20"], 0.2, frag, rng) for _ in range(20)} == {"/01/20"}
+    assert {b.pick_fragment_neutral(["r1"], 0.9, frag, rng) for _ in range(20)} == {"r1"}
     with pytest.raises(AssertionError):
-        b.pick_fragment_neutral([], pool, frag, rng)
+        b.pick_fragment_neutral([], 0.2, frag, rng)
+    with pytest.raises(AssertionError):
+        b.pick_fragment_neutral(["r1"], 1.5, frag, rng)
 
 
-def test_null_fill_is_true_exactly_when_the_valid_row_had_no_value(built):
-    seen = {True: 0, False: 0}
-    for ds, id_keys in (("main", ["document_id"]), ("line", ["document_id", "line_index"])):
-        for split in ("train", "test"):
-            base = {tuple(r[k] for k in id_keys): r
-                    for r in json.loads((built["data_root"] / ds / f"{split}_base.json").read_text())}
-            for row in built[f"{ds}_{split}"]:
-                for f, entry in row["field_errors"].items():
-                    if entry is None:
-                        continue
-                    flag = entry["source"]["null_fill"]
-                    assert flag is (base[tuple(row[k] for k in id_keys)][f] is None), (ds, split, row["document_id"], f)
-                    seen[flag] += 1
-    # m1's agency is null in the fixture, so null-fills exist; every other corrupted entity replaces a value.
-    assert seen[True] >= 1 and seen[False] >= 1
+def test_fragment_rate_is_the_share_of_non_null_date_values_that_do_not_parse():
+    rows = [{"program_start_date": "01/01/20", "program_end_date": "/05/20"},
+            {"program_start_date": "02/01/", "program_end_date": None},
+            {"program_start_date": "03/01/20", "program_end_date": "03/09/20"}]
+    assert b.fragment_rate(rows, DATE_FIELDS, PIVOT) == 2 / 5     # "/05/20" and "02/01/" of 5 values
+    with pytest.raises(AssertionError):
+        b.fragment_rate([{"program_start_date": None, "program_end_date": None}], DATE_FIELDS, PIVOT)
+
+
+def test_provenance_records_the_fragment_target_rate_per_split(built):
+    rates = built["provenance"]["fragment_target_rate"]
+    assert set(rates) == {"train", "test"} and all(0.0 <= v <= 1.0 for r in rates.values() for v in r.values())
