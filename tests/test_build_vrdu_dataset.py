@@ -1,4 +1,4 @@
-"""Unit + tiny end-to-end tests for scripts/build_vrdu_dataset.py.
+"""Unit + tiny end-to-end tests for data/vrdu/build_vrdu_dataset.py.
 
 The fixture in tests/fixtures/vrdu_mini/ is a hand-built 3-document corpus whose
 expected output can be checked by inspection:
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data" / "vrdu"))
 import build_vrdu_dataset as b  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_mini"

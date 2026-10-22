@@ -1,14 +1,14 @@
 """Dataset config: VRDU ad-buy-form, line items (many rows per document).
 
 Defines ``DATASET`` for ``judge_interp.dataset_spec.load_dataset_spec``. The field list
-comes from ``scripts/build_vrdu_dataset.py`` (single source of truth for the schema); the
+comes from ``data/vrdu/build_vrdu_dataset.py`` (single source of truth for the schema); the
 descriptions, wording and file layout below are this dataset's. Rows are line items, so the
 relation tasks apply: the entities of a row should all belong to the same line item.
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "data" / "vrdu"))
 
 import build_vrdu_dataset as schema  # noqa: E402
 

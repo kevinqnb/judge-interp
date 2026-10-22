@@ -86,7 +86,7 @@ their order) unless they hold equal dates, which the eligibility rule excludes.
 
 No cluster job: this is local data preparation. Run it directly:
 
-    uv run --python 3.12 python scripts/build_vrdu_invalids.py \
+    uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py \
         --config configs/2026-09-15-vrdu-invalids-02.yaml
 """
 
@@ -97,7 +97,6 @@ import json
 import random
 import re
 import statistics
-import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -902,18 +901,6 @@ def verify_cross_type_rows(rows, dataset, base_by_id, id_keys, main_by_doc, line
 # --- Config / IO --------------------------------------------------------------
 
 
-def _git(*args):
-    result = subprocess.run(
-        ["git", *args], capture_output=True, text=True, cwd=Path(__file__).resolve().parent
-    )
-    assert result.returncode == 0, f"git {' '.join(args)} failed: {result.stderr.strip()}"
-    return result.stdout
-
-
-def git_state():
-    return _git("rev-parse", "HEAD").strip(), bool(_git("status", "--porcelain").strip())
-
-
 def load_config(path):
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
     for key in ("id", "project", "seed", "params"):
@@ -1158,7 +1145,7 @@ def main(argv=None):
             f"{len(capped['inter_document'])}/intra {len(capped['intra_document'])}/cross {len(cross_capped)})"
         )
 
-    sha, dirty = git_state()
+    sha, dirty = base_builder.git_state()
     (data_root / "invalids.json").write_text(
         json.dumps(
             {"build": {
@@ -1166,7 +1153,7 @@ def main(argv=None):
                 "git_sha": sha,
                 "git_dirty": dirty,
                 "python": sys.version.split()[0],  # random.sample order is not guaranteed stable across CPython
-                "script": "scripts/build_vrdu_invalids.py",
+                "script": "data/vrdu/build_vrdu_invalids.py",
                 "config_id": config["id"],
                 "config_snapshot": config,
                 "seed": seed,

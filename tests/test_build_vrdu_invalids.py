@@ -1,4 +1,4 @@
-"""Unit + tiny end-to-end tests for scripts/build_vrdu_invalids.py.
+"""Unit + tiny end-to-end tests for data/vrdu/build_vrdu_invalids.py.
 
 The fixture in tests/fixtures/vrdu_invalids_mini/ is a hand-built mini corpus.
 Line documents also have a main row (the builder cross-checks every line
@@ -42,7 +42,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data" / "vrdu"))
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"

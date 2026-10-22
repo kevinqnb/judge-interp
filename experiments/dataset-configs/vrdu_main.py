@@ -1,13 +1,13 @@
 """Dataset config: VRDU ad-buy-form, document-level fields (one row per document).
 
 Defines ``DATASET`` for ``judge_interp.dataset_spec.load_dataset_spec``. The field list
-comes from ``scripts/build_vrdu_dataset.py`` (single source of truth for the schema); the
+comes from ``data/vrdu/build_vrdu_dataset.py`` (single source of truth for the schema); the
 descriptions, wording and file layout below are this dataset's.
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "data" / "vrdu"))
 
 import build_vrdu_dataset as schema  # noqa: E402
 

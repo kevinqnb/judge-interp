@@ -6,7 +6,7 @@ bounding-box annotations) and writes, under ``--out-dir``:
     directory.json            split assignment + per-document metadata
     ocr/<document_id>.txt      raw OCR text, one file per document
     main/{train,test}_base.json   one datapoint per document (9 document-level fields)
-    line/{train,test}_base.json   one datapoint per line item (6 carried fields + 5 line fields)
+    line/{train,test}_base.json   one datapoint per line item (5 line fields)
 
 Every datapoint written here is a *correct* extraction, so it gets ``valid: true``.
 Invalid datapoints (deliberately corrupted values) are added by later steps, not here.
@@ -360,7 +360,7 @@ def main(argv=None):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "git_sha": sha,
             "git_dirty": dirty,
-            "script": "scripts/build_vrdu_dataset.py",
+            "script": "data/vrdu/build_vrdu_dataset.py",
             "source": str(args.dataset_jsonl.resolve()),
             "seed": args.seed,
             "test_frac": args.test_frac,
