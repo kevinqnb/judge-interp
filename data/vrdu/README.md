@@ -122,27 +122,48 @@ order, for the chain-rule factorisation P(f1..fn) = P(fn|f1..fn-1)...P(f2|f1)P(f
 of its fields is in the row's `invalid_fields`**, so a subset of an invalid row that avoids every
 corrupted field is a valid sample. Per source row, `samples_per_row` distinct *unordered* subsets of size
 >= `min_subset_size` are drawn uniformly, then each gets a uniformly random permutation (ordered tuples
-are not enumerated; that would weight a subset by n!). Each replicate is cut to exactly `n_per_class`
-valid and invalid samples. Replicate r of a split uses `default_rng([seed, split index, r])`, so replicates
-are independent and raising `n_replicates` leaves the earlier ones unchanged. The source rows are
-`manifest.json`'s rows (`source: manifest`) or all rows (`all_rows`); `params.subsets` in the config holds
-every value (currently 5 replicates, 4 subsets per row, size >= 2, 3,800 / 950 per class train / test).
+are not enumerated; that would weight a subset by n!). The source rows are `manifest.json`'s rows
+(`source: manifest`) or all rows (`all_rows`). Replicate r of a split uses `default_rng([seed, split index,
+r])`, so replicates are independent and raising `n_replicates` leaves the earlier ones unchanged.
+`params.subsets` in the config holds every value (currently 5 replicates, 4 subsets per row, size >= 2,
+3,800 / 950 per class train / test).
+
+**Balancing (`balance_by`).** Each replicate has exactly `n_per_class` valid and invalid samples. With
+`balance_by: none` only the class totals are fixed, and then the label is predictable from the sample's
+shape: a larger subset is more likely to contain a corrupted field (train P(valid) = 0.60 / 0.46 / 0.31 /
+0.21 at 2 / 3 / 4 / 5 fields), and the fields present differ too (`sub_amount`, filled in by corruption, marks
+a corrupted row more often). A logistic regression on the test split reaches AUROC 0.63 from size alone and
+0.65 from which fields are present (first field: 0.52), without reading the document. The committed file uses
+`balance_by: field_set`: both classes get **exactly the same number of samples for every set of fields** (so
+the same sizes), and those baselines drop to 0.50 (checked for replicates 0 and 1; first field 0.49 to 0.50).
+A set's target share is its share among *all* subsets (size >= `min_subset_size`, equal weight) of the source
+*valid* rows. It therefore depends only on which fields real line items have, not on the corruption, the error
+types or `samples_per_row` (the draw cap alone moves the full-set share from 3.3% to 2.7%). Sizes 2 / 3 / 4 / 5
+get 41.7% / 37.9% / 17.3% / 3.1%. Counts use largest-remainder rounding, and a set whose valid or invalid pool is
+too small raises. Train ceiling is ~7,900 and test ~1,340 samples per class (the full 5-field set binds), so
+3,800 / 950 fits; raising `samples_per_row` (up to 26 for a 5-field row) enlarges the pool.
 
 The file stores `sample_id` strings, `doc|line_index|error_type or valid|k|f1+f2+...` (the order is part
-of the id), plus the sha256 of every input. Read it only through `subsets.load_subsets(data_root, split,
-replicate)`: it refuses a stale file, re-derives each sample's row, fields and label, and checks the class
-balance. Run it from the repo root, after the manifest:
+of the id), plus the sha256 of every input and per-replicate `stats`. Read it only through
+`subsets.load_subsets(data_root, split, replicate)`: it refuses a stale file, re-derives each sample's row,
+fields and label, and checks the class balance, the equal per-set counts and the error-type shares. Run it
+from the repo root, after the manifest:
 `uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
 
 Caveats:
-- **Subset size leaks the label.** A larger subset is more likely to contain a corrupted field. In
-  replicate 0 (train) 58% of valid samples have 2 fields against 39% of invalid ones. Report per-size
-  results or a size-only baseline.
-- **Most valid samples come from corrupted rows** (e.g. 1,420 of 3,800 train valid samples in replicate 0
-  are from valid rows), so "valid" mixes clean rows with the clean parts of corrupted ones.
-- Source rows from the manifest carry its selection bias (see Known limitations); `n_rows_too_small`
-  and `n_rows_fewer_subsets_than_requested` per replicate are in the file's `stats`.
-- Replicates overlap very little (pairwise Jaccard of ids ~0.005), partly because the order is part of the id.
+- **Error types are only approximately equal.** The manifest gives every error type the same number of
+  rows, and random selection keeps the invalid class near an equal share (largest deviation 0.024 over all
+  10 replicates; train ~0.01). `max_error_type_share_deviation` (0.03) is asserted by the builder and loader.
+  `cross_type` never touches `channel` or `program_desc`, so a sample made only of those two fields can never be a
+  cross_type error: within that set the invalid class is inter / intra only.
+- **The valid class is a mixture.** A subset of a corrupted row that avoids every corrupted field is a valid
+  sample (its values are the originals). 45% of the valid samples come from clean rows (37% with `none`), the
+  rest from corrupted rows, so a per-error-type breakdown of the valid class is meaningless.
+- **Equal field sets does not remove every tell.** The values themselves (a filled `sub_amount`, an OCR fragment) can
+  still differ between classes; keep a baseline in every report.
+- Source rows from the manifest carry its selection bias (see Known limitations); `n_rows_too_small` and
+  `n_rows_fewer_subsets_than_requested` per replicate are in the file's `stats`.
+- Replicates overlap very little (pairwise Jaccard of ids ~0.004), partly because the order is part of the id.
 - A row's samples, and the rows of one base row, are not independent; resample by document.
 
 ## Known limitations

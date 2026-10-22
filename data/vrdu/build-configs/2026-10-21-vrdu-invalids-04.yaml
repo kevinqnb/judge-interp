@@ -72,6 +72,12 @@ params:
   # fields), each given a uniformly random field order; a sample is valid iff none of its fields is in
   # the row's invalid_fields. Each replicate is then cut to exactly n_per_class valid and n_per_class
   # invalid samples. Replicate r of split s uses rng [seed, split index, r].
+  # balance_by: `none` = balance the classes only (subset size and field presence then predict the label:
+  #   test AUROC ~0.63 / ~0.65 for a size-only / presence-only logistic regression);
+  #   `field_set` = both classes get the same number of samples for every set of fields. A set's share is
+  #   its share among all subsets of the source valid rows (equal weight per subset).
+  # max_error_type_share_deviation: the invalid class must keep every error type within this much of an
+  #   equal share (the manifest gives each type the same number of rows); asserted by the builder and loader.
   # source: `manifest` = the rows of manifest.json (equal cells per error type and k);
   #         `all_rows` = every row of {train,test}.json.
   subsets:
@@ -81,3 +87,5 @@ params:
     samples_per_row: 4
     min_subset_size: 2
     n_per_class: {train: 3800, test: 950}
+    balance_by: field_set
+    max_error_type_share_deviation: 0.03

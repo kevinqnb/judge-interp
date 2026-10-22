@@ -16,6 +16,7 @@ rows.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 from build_vrdu_dataset import LINE_FIELDS
@@ -24,7 +25,9 @@ from build_vrdu_manifest import MANIFEST_FILE, SPLITS, row_key, sha256_of
 SUBSETS_FILE = "subsets.json"
 VALID_TOKEN = "valid"
 SOURCES = ("manifest", "all_rows")
-REQUIRED_PARAMS = {"seed", "source", "n_replicates", "samples_per_row", "min_subset_size", "n_per_class"}
+BALANCE_MODES = ("none", "field_set")
+REQUIRED_PARAMS = {"seed", "source", "n_replicates", "samples_per_row", "min_subset_size", "n_per_class", "balance_by",
+                   "max_error_type_share_deviation"}
 
 
 def make_sample_id(row: dict, fields: list[str]) -> str:
@@ -46,6 +49,27 @@ def parse_sample_id(sample_id: str) -> dict:
 def sample_label_valid(row: dict, fields: list[str]) -> bool:
     """True iff no field of the sample is corrupted in ``row``."""
     return not (set(fields) & set(row["invalid_fields"]))
+
+
+def invalid_error_type_shares(error_types: list[str]) -> dict[str, float]:
+    """Share of each error type among the (non-null) error types of a class's samples, sorted by type."""
+    assert error_types and all(e is not None for e in error_types)
+    c = Counter(error_types)
+    return {e: c[e] / len(error_types) for e in sorted(c)}
+
+
+def check_error_type_shares(error_types: list[str], expected: list[str], tolerance: float) -> dict[str, float]:
+    """Assert the invalid class has every expected error type, each within ``tolerance`` of an equal share.
+
+    The manifest gives every error type the same number of rows, so equal shares are the design; a random
+    draw keeps them only approximately. Returns the shares.
+    """
+    shares = invalid_error_type_shares(error_types)
+    assert set(shares) <= set(expected), (sorted(shares), expected)
+    for e in expected:
+        dev = abs(shares.get(e, 0.0) - 1 / len(expected))
+        assert dev <= tolerance, f"invalid-class share of {e} is {shares.get(e, 0.0):.3f}, {dev:.3f} from equal (tolerance {tolerance})"
+    return shares
 
 
 def _check_sample(sample: dict, row: dict, min_subset_size: int) -> None:
@@ -76,7 +100,7 @@ def load_subsets(data_root, split: str, replicate: int) -> list[dict]:
     assert set(blob) == {"build", "line"}, sorted(blob)
     build = blob["build"]
     params = build["subsets_params"]
-    assert set(params) == REQUIRED_PARAMS and params["source"] in SOURCES, params
+    assert set(params) == REQUIRED_PARAMS and params["source"] in SOURCES and params["balance_by"] in BALANCE_MODES, params
     assert isinstance(replicate, int) and 0 <= replicate < params["n_replicates"], (replicate, params["n_replicates"])
 
     rel = f"line/{split}.json"
@@ -105,6 +129,11 @@ def load_subsets(data_root, split: str, replicate: int) -> list[dict]:
     n = params["n_per_class"][split]
     assert sum(s["label_valid"] for s in samples) == n and sum(not s["label_valid"] for s in samples) == n, "class balance"
     assert not any(s["error_type"] is None and not s["label_valid"] for s in samples), "invalid sample from a valid row"
+    if params["balance_by"] == "field_set":   # both classes have the same number of samples for every field set
+        hist = {lab: Counter(frozenset(s["fields"]) for s in samples if s["label_valid"] == lab) for lab in (True, False)}
+        assert hist[True] == hist[False], "field-set histograms of the two classes differ"
+    check_error_type_shares([s["error_type"] for s in samples if not s["label_valid"]], build["error_types"],
+                            params["max_error_type_share_deviation"])
     # one unordered subset per row at most once: orders of the same set must not both appear
     keys = [(s["document_id"], s["line_index"], s["error_type"], s["k"], frozenset(s["fields"])) for s in samples]
     assert len(set(keys)) == len(keys), "the same unordered subset of a row appears twice"
