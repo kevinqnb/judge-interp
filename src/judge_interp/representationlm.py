@@ -27,6 +27,9 @@ _TORCH_DTYPES: dict[str, "torch.dtype"] = {
     "bfloat16": torch.bfloat16,
 }
 
+# Stands in for the user message while the chat template is applied; see ``_chat_text``.
+_CONTENT_PLACEHOLDER = "@@judge-interp-content@@"
+
 _PROMPT_TEMPLATE = (
     "## INSTRUCTIONS:\n{instructions}\n\n"
     "## CONTEXT:\n{context}\n\n"
@@ -123,6 +126,30 @@ class RepresentationLM:
                 f"collecting layers {self.layers}"
             )
 
+    def _chat_text(self, content: str) -> str:
+        """Apply the chat template to a user message without letting it change the message.
+
+        Some templates (Llama-3.1) strip leading and trailing whitespace from the message,
+        which would remove the newline that ends the last line of the query and give the
+        last entity a different closing token than every other entity. The template is
+        therefore applied to a placeholder and the real content is spliced in untouched.
+
+        Args:
+            content: the user message.
+
+        Returns:
+            The chat-templated string (generation prompt included) containing ``content`` verbatim.
+        """
+        assert _CONTENT_PLACEHOLDER not in content
+        formatted = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": _CONTENT_PLACEHOLDER}], tokenize=False, add_generation_prompt=True
+        )
+        assert isinstance(formatted, str), (
+            f"apply_chat_template(tokenize=False) returned {type(formatted)}, not str"
+        )
+        assert formatted.count(_CONTENT_PLACEHOLDER) == 1, "placeholder not found exactly once in the template"
+        return formatted.replace(_CONTENT_PLACEHOLDER, content)
+
     def _build_prompt(self, instructions: str, context: str, query: str) -> list[int]:
         """Tokenize the chat-templated prompt.
 
@@ -141,14 +168,7 @@ class RepresentationLM:
         content = _PROMPT_TEMPLATE.format(
             instructions=instructions, context=context, query=query
         )
-        formatted = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        assert isinstance(formatted, str), (
-            f"apply_chat_template(tokenize=False) returned {type(formatted)}, not str"
-        )
+        formatted = self._chat_text(content)
         input_ids = self.tokenizer(formatted, add_special_tokens=False)["input_ids"]
         return list(input_ids)
 
@@ -335,12 +355,7 @@ class RepresentationLM:
         )
         query_shift = content.index(query)
 
-        formatted = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
-        )
-        assert isinstance(formatted, str), (
-            f"apply_chat_template(tokenize=False) returned {type(formatted)}, not str"
-        )
+        formatted = self._chat_text(content)
         assert formatted.count(content) == 1, (
             f"content occurs {formatted.count(content)} time(s) in the chat-templated string, "
             "not exactly once -- span offsets would be ambiguous"
