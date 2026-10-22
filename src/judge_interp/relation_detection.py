@@ -47,16 +47,6 @@ Judge only against the context. Do not use outside knowledge about the entities 
 
 Answer with exactly one line: `related: true` if all the entities of the record belong together as one item, or `related: false` if they do not."""
 
-# Span metadata columns, in shard order. All values are str / int / bool.
-SPAN_META_KEYS = (
-    "dataset", "row_ordinal", "line_index", "row_error_type", "row_k", "field", "field_position",
-    "value", "label_valid", "field_error_type", "source_scope", "source_dataset", "source_field",
-    "source_line_index", "exchanged_with",
-)
-# Per-span columns the model side adds.
-_MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "exact_end_alignment", "prompt_n_tokens")
-
-
 def build_instructions(spec: DatasetSpec) -> str:
     """Build the instruction block, which is fixed for a run.
 
@@ -74,8 +64,6 @@ def build_instructions(spec: DatasetSpec) -> str:
     return _HEADER.format(
         record_description=spec.record_description, context_description=spec.context_description, types=types,
     )
-
-
 
 
 def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
