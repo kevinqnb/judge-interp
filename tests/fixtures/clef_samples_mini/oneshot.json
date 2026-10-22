@@ -1,0 +1,80 @@
+[
+ {
+  "sample_id": "o1",
+  "document_id": "doc-a",
+  "error_type": "",
+  "entities": [
+   {
+    "field": "sub_amount",
+    "value": "$100.00",
+    "valid": true
+   },
+   {
+    "field": "channel",
+    "value": "7",
+    "valid": true
+   },
+   {
+    "field": "program_desc",
+    "value": "Movie",
+    "valid": true
+   }
+  ]
+ },
+ {
+  "sample_id": "o2",
+  "document_id": "doc-a",
+  "error_type": "inter_document",
+  "entities": [
+   {
+    "field": "channel",
+    "value": "9",
+    "valid": false
+   },
+   {
+    "field": "program_start_date",
+    "value": "01/11/20",
+    "valid": true
+   }
+  ]
+ },
+ {
+  "sample_id": "o3",
+  "document_id": "doc-b",
+  "error_type": "",
+  "entities": [
+   {
+    "field": "program_end_date",
+    "value": "02/09/20",
+    "valid": true
+   },
+   {
+    "field": "program_start_date",
+    "value": "02/02/20",
+    "valid": true
+   }
+  ]
+ },
+ {
+  "sample_id": "o4",
+  "document_id": "doc-a",
+  "error_type": "intra_document",
+  "entities": [
+   {
+    "field": "program_end_date",
+    "value": "01/20/20",
+    "valid": false
+   },
+   {
+    "field": "sub_amount",
+    "value": "$250.00",
+    "valid": false
+   },
+   {
+    "field": "channel",
+    "value": "7",
+    "valid": true
+   }
+  ]
+ }
+]

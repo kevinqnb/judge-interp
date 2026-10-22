@@ -1,18 +1,27 @@
-"""Clef-flash as a direct judge for entity and relation detection; no layer representations.
+"""Clef-flash as a direct judge for entity, conditional relation and one-shot record validity; no layer representations.
 
 ``Cloudflare/clef-flash`` takes a ``state`` and typed questions and returns one logit per
 allowed option per question, so ``P(true)`` of a ``noul`` question is a probability read
 straight from the model. The model runs through its own release code
 (``joint_schema_model.py``, pinned by ``revision``).
 
-Tasks (rows selected by ``entity_detection.build_items`` / ``relation_detection.build_items``,
-the same rows the Qwen/Llama tasks judge; a null field is not shown, as there):
-- ``clef_entity_row``: one record per row (state = context text + the row's non-null fields),
-  one ``noul`` question per non-null field.
-- ``clef_relation_row``: one record per row (state as above), one ``noul`` question for the
-  whole row: do all its values describe the same item. A row is valid iff every field in it is.
+Tasks:
+- ``clef_entity_row``: rows selected by ``entity_detection.build_items``, the same rows the
+  Qwen/Llama tasks judge (a null field is not shown, as there). One record per row (state =
+  context text + the row's non-null fields), one ``noul`` question per non-null field.
+- ``clef_relation_conditional`` and ``clef_record_oneshot`` judge *samples* read from a samples
+  file (``params.samples_path``, see ``load_samples``), not rows: a sample is a document id, an
+  ordered list of entities (field, value, whether the value is valid) and, for the conditional
+  task, an explicit split into one primary entity and its conditions. Nothing about where the
+  samples came from (which dataset, how they were drawn) is known here.
+  - conditional: one record per sample, one ``noul`` question: is the primary entity correctly
+    associated, in the document, with all of the conditions? Label: true iff the primary and every
+    condition is valid (a valid primary with a corrupted condition is false).
+  - one-shot: one record per sample, one ``noul`` question: is the whole record valid, i.e. is
+    every entity present and of the right type, and are they all related? Label: true iff every
+    entity is valid.
 
-Pipeline: ``entity_units`` / ``relation_units`` build records, ``filter_overlong`` handles
+Pipeline: ``entity_units`` / ``conditional_units`` / ``oneshot_units`` build records, ``filter_overlong`` handles
 records that do not fit ``max_length`` (``overlong_docs``: ``"exclude"`` drops and records
 them, ``"error"`` raises), ``ClefScorer`` scores records one at a time, and ``run`` writes
 ``artifacts/clef_predictions.npz`` and returns flat metrics. ``context_control`` can swap
@@ -34,16 +43,21 @@ from pathlib import Path
 import numpy as np
 
 from judge_interp import entity_detection as edr
-from judge_interp import relation_detection as rdr
 from judge_interp.dataset_spec import DatasetSpec, load_dataset_spec
+from judge_interp.prompts import load_context
 
 OPTION_IDS = ("true", "false")  # joint_schema_model.question_options order for a noul question
-TASKS = ("clef_entity_row", "clef_relation_row")
+SAMPLE_TASKS = ("clef_relation_conditional", "clef_record_oneshot")
+TASKS = ("clef_entity_row", *SAMPLE_TASKS)
 _COMMON_PARAMS = (
-    "data_root", "model_config", "dataset_config", "split", "device", "overlong_docs", "context_control",
-    "determinism_check_n", "known_answer_check", "error_types", "rows_per_stratum",
+    "data_root", "model_config", "dataset_config", "device", "overlong_docs", "context_control",
+    "determinism_check_n", "known_answer_check",
 )
-TASK_PARAMS: dict[str, tuple[str, ...]] = {"clef_entity_row": _COMMON_PARAMS, "clef_relation_row": _COMMON_PARAMS}
+_ROW_PARAMS = (*_COMMON_PARAMS, "split", "error_types", "rows_per_stratum")
+_SAMPLE_PARAMS = (*_COMMON_PARAMS, "samples_path")
+TASK_PARAMS: dict[str, tuple[str, ...]] = {
+    "clef_entity_row": _ROW_PARAMS, "clef_relation_conditional": _SAMPLE_PARAMS, "clef_record_oneshot": _SAMPLE_PARAMS,
+}
 OVERLONG_MODES = ("exclude", "error")
 CONTEXT_CONTROLS = ("none", "other_document")
 _DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
@@ -56,12 +70,27 @@ Is this value present in the CONTEXT (the {context_description}) and of the corr
 
 Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence fails a criterion. Judge this field on its own, independently of the record's other fields."""
 
-_RELATION_QUESTION = """The EXTRACTED RECORD of the state is {record_description}, listed as one `field: value` per line. The fields present are:
-{types}
+_CONDITIONAL_QUESTION = """The state has a PRIMARY ENTITY and CONDITIONS, which together come from {record_description}. Each is listed as one `field: value` per line.
 
-The document may describe many items of the kind this record describes. Are all of these values related? That is: taken together, do they describe the same single item in the CONTEXT (the {context_description})? If one or more values belong to a different item than the others, answer false, even though each of those values may be a genuine value of the document. Do not judge whether an individual value is real, and do not judge values one by one; judge the record as a whole, i.e. whether they all belong together.
+The primary entity is the field `{primary}`: {primary_desc}.
+The conditions are:
+{conditions}
+
+The document may describe many items of the kind this record describes. Taking the CONDITIONS as given, is the PRIMARY ENTITY correctly associated with them in the CONTEXT (the {context_description})? That is: does the primary entity belong to the same single item as every one of the conditions? Answer true only if it is related to all of them. Answer false if it is not related to one or more of them, for example because it belongs to a different item than they do. A value that does not appear in the CONTEXT cannot be associated with anything in it.
 
 Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence means false."""
+
+_ONESHOT_QUESTION = """The EXTRACTED RECORD of the state is {record_description}, listed as one `field: value` per line. The fields present are:
+{types}
+
+Is the ENTIRE record valid? It is valid only if ALL of the following hold:
+
+{criteria}
+(3) Relation. All the values must be related: taken together they describe the same single item in the CONTEXT (the {context_description}). The document may describe many items of the kind this record describes. If one or more values belong to a different item than the others, this criterion fails, even though each of those values may be a genuine value of the document.
+
+Criteria (1) and (2) apply to every value of the record; criterion (3) applies to the record as a whole. If any value fails (1) or (2), or the values are not all related, answer false. Answer true only if the whole record is valid.
+
+Judge only against the CONTEXT. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence fails a criterion."""
 
 
 # ----------------------------------------------------------------------
@@ -95,6 +124,20 @@ def build_state(context: str, record_text: str) -> str:
     return f"## CONTEXT\n{context}\n\n## EXTRACTED RECORD\n{record_text}"
 
 
+def build_conditional_state(context: str, primary_text: str, conditions_text: str) -> str:
+    """Assemble the Clef ``state`` of a conditional record.
+
+    Args:
+        context: context text of the document.
+        primary_text: rendered primary entity (see ``render_record_text``).
+        conditions_text: rendered conditions, in order.
+
+    Returns:
+        The state with ``## CONTEXT``, ``## PRIMARY ENTITY`` and ``## CONDITIONS`` sections.
+    """
+    return f"## CONTEXT\n{context}\n\n## PRIMARY ENTITY\n{primary_text}\n\n## CONDITIONS\n{conditions_text}"
+
+
 def entity_question(field: str, spec: DatasetSpec) -> dict:
     """Build the ``noul`` question asking whether one field's value is valid.
 
@@ -114,8 +157,29 @@ def entity_question(field: str, spec: DatasetSpec) -> dict:
     }
 
 
-def relation_question(fields: list[str], spec: DatasetSpec) -> dict:
-    """Build the ``noul`` question asking whether a record's values belong together.
+def conditional_question(primary: str, conditions: list[str], spec: DatasetSpec) -> dict:
+    """Build the ``noul`` question asking whether the primary entity is related to all conditions.
+
+    Args:
+        primary: the primary field.
+        conditions: the condition fields: at least one, distinct, none equal to ``primary``.
+        spec: the dataset; must support the relation tasks.
+
+    Returns:
+        A ``{"type": "noul", "instructions": str}`` question.
+    """
+    spec.require_relation()
+    assert conditions and len({primary, *conditions}) == len(conditions) + 1 and {primary, *conditions} <= set(spec.fields), (
+        primary, conditions)
+    return {"type": "noul", "instructions": _CONDITIONAL_QUESTION.format(
+        record_description=spec.record_description, context_description=spec.context_description,
+        primary=primary, primary_desc=spec.field_descriptions[primary],
+        conditions="\n".join(f"- `{f}`: {spec.field_descriptions[f]}" for f in conditions),
+    )}
+
+
+def oneshot_question(fields: list[str], spec: DatasetSpec) -> dict:
+    """Build the ``noul`` question asking whether the whole record is valid.
 
     Args:
         fields: at least two distinct fields of ``spec`` present in the record.
@@ -125,10 +189,11 @@ def relation_question(fields: list[str], spec: DatasetSpec) -> dict:
         A ``{"type": "noul", "instructions": str}`` question.
     """
     spec.require_relation()
-    assert set(fields) <= set(spec.fields) and len(set(fields)) == len(fields) >= 2, fields
-    types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in fields)
-    return {"type": "noul", "instructions": _RELATION_QUESTION.format(
-        record_description=spec.record_description, context_description=spec.context_description, types=types,
+    assert len(set(fields)) == len(fields) >= 2 and set(fields) <= set(spec.fields), fields
+    return {"type": "noul", "instructions": _ONESHOT_QUESTION.format(
+        record_description=spec.record_description, context_description=spec.context_description,
+        types="\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in fields),
+        criteria=edr.build_criteria(spec, edr.QWEN_DESCRIBED),
     )}
 
 
@@ -136,7 +201,7 @@ def item_values(item: dict, spec: DatasetSpec) -> dict[str, str | None]:
     """Recover a row's field values from an item's spans.
 
     Args:
-        item: an item from ``entity_detection.build_items`` or ``relation_detection.build_items``.
+        item: an item from ``entity_detection.build_items``.
         spec: the dataset.
 
     Returns:
@@ -181,52 +246,125 @@ def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str])
 
 
 # ----------------------------------------------------------------------
-# Relation rows
+# Samples (conditional and one-shot tasks)
+
+ENTITY_KEYS = {"field", "value", "valid"}
+SAMPLE_KEYS = {
+    "clef_relation_conditional": {"sample_id", "document_id", "error_type", "primary", "conditions"},
+    "clef_record_oneshot": {"sample_id", "document_id", "error_type", "entities"},
+}
 
 
-def relation_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str]) -> list[dict]:
-    """Build one Clef unit per row for the relation task.
+def _check_entity(e: dict, spec: DatasetSpec, where: str) -> None:
+    assert isinstance(e, dict) and set(e) == ENTITY_KEYS, f"{where}: entity keys {sorted(e) if isinstance(e, dict) else e!r}"
+    assert e["field"] in spec.fields, f"{where}: field {e['field']!r} is not a field of dataset {spec.name!r}"
+    assert isinstance(e["value"], str) and isinstance(e["valid"], bool), f"{where}/{e['field']}: value/valid types"
+
+
+def load_samples(path: Path, spec: DatasetSpec, task: str) -> list[dict]:
+    """Read and validate a samples file.
+
+    The file is a JSON list. Every sample has ``sample_id`` (unique), ``document_id``,
+    ``error_type`` (``""`` if none; carried through to the predictions) and entities, each
+    ``{"field", "value", "valid"}`` (``valid``: whether the value is correct for its field in the
+    document, the ground truth). A conditional sample has ``primary`` (one entity) and
+    ``conditions`` (a non-empty list of entities); a one-shot sample has ``entities`` (a list of at
+    least two). The order given is the order shown to the judge. A field occurs at most once per
+    sample. Nothing here depends on how the samples were drawn.
 
     Args:
-        items: items from ``relation_detection.build_items``.
+        path: the samples file.
+        spec: the dataset; supplies the field set.
+        task: ``clef_relation_conditional`` or ``clef_record_oneshot``.
+
+    Returns:
+        The samples, unchanged, in file order.
+
+    Raises:
+        AssertionError: the file is empty or malformed.
+    """
+    assert task in SAMPLE_TASKS, task
+    samples = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert isinstance(samples, list) and samples, f"{path}: expected a non-empty list"
+    ids = [s.get("sample_id") if isinstance(s, dict) else None for s in samples]
+    assert all(isinstance(i, str) and i for i in ids) and len(set(ids)) == len(ids), f"{path}: sample_id missing or not unique"
+    for s in samples:
+        where = s["sample_id"]
+        assert set(s) == SAMPLE_KEYS[task], f"{where}: keys {sorted(s)} != {sorted(SAMPLE_KEYS[task])}"
+        assert isinstance(s["document_id"], str) and s["document_id"] and isinstance(s["error_type"], str), where
+        ents = [s["primary"], *s["conditions"]] if task == "clef_relation_conditional" else s["entities"]
+        assert isinstance(ents, list) and len(ents) >= 2, f"{where}: needs at least two entities"
+        for e in ents:
+            _check_entity(e, spec, where)
+        fields = [e["field"] for e in ents]
+        assert len(set(fields)) == len(fields), f"{where}: a field occurs twice: {fields}"
+    return samples
+
+
+def _sample_unit(s: dict, ents: list[dict], state: str, question: dict) -> dict:
+    """The unit fields the two sample tasks share (``fields`` are in the order shown)."""
+    bad = [e["field"] for e in ents if not e["valid"]]
+    return {
+        "sample_id": s["sample_id"],
+        "doc_id": s["document_id"],
+        "error_type": s["error_type"],
+        "fields": [e["field"] for e in ents],
+        "invalid_fields": bad,
+        "label_valid": not bad,
+        "record": {"id": s["sample_id"], "state": state, "questions": {"q": question}},
+    }
+
+
+def conditional_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str, str]) -> list[dict]:
+    """Build one Clef unit per conditional sample.
+
+    Args:
+        samples: output of ``load_samples`` for ``clef_relation_conditional``.
+        spec: the dataset; must support the relation tasks.
+        contexts: document_id -> the context text shown for that document (its own unless the
+            context control swapped it).
+
+    Returns:
+        One dict per sample with ``sample_id``, ``doc_id``, ``error_type``, ``primary``,
+        ``conditions``, ``fields`` (primary first, then the conditions in order),
+        ``primary_valid``, ``invalid_conditions``, ``invalid_fields``, ``label_valid`` (primary
+        and every condition valid) and ``record`` (one ``noul`` question).
+    """
+    units = []
+    for s in samples:
+        prim, conds = s["primary"], s["conditions"]
+        assert conds, s["sample_id"]
+        values = {e["field"]: e["value"] for e in [prim, *conds]}
+        state = build_conditional_state(
+            contexts[s["document_id"]], render_record_text(values, [prim["field"]]),
+            render_record_text(values, [e["field"] for e in conds]))
+        u = _sample_unit(s, [prim, *conds], state, conditional_question(prim["field"], [e["field"] for e in conds], spec))
+        u.update(primary=prim["field"], conditions=[e["field"] for e in conds], primary_valid=prim["valid"],
+                 invalid_conditions=[e["field"] for e in conds if not e["valid"]])
+        assert u["label_valid"] == (u["primary_valid"] and not u["invalid_conditions"])
+        units.append(u)
+    return units
+
+
+def oneshot_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str, str]) -> list[dict]:
+    """Build one Clef unit per one-shot sample.
+
+    Args:
+        samples: output of ``load_samples`` for ``clef_record_oneshot``.
         spec: the dataset; must support the relation tasks.
         contexts: document_id -> the context text shown for that document.
 
     Returns:
-        One dict per row with ``doc_id``, ``row_ordinal``, ``rows`` (indices into
-        ``spec.fields`` of the row's non-null fields, padded with -1 to ``len(spec.fields)``),
-        ``fields``, ``invalid_fields``, ``label_valid`` (every field valid), ``row_error_type``,
-        ``line_index`` and ``record`` (one ``related`` question over the row's fields).
+        One dict per sample with ``sample_id``, ``doc_id``, ``error_type``, ``fields`` (in the
+        order shown), ``invalid_fields``, ``label_valid`` (every entity valid) and ``record``
+        (one ``noul`` question over the whole record).
     """
     units = []
-    for it in items:
-        spans = it["spans"]
-        values = item_values(it, spec)
-        fields = [sp["field"] for sp in spans]
-        assert fields == sorted(fields, key=spec.fields.index), "spans not in canonical field order"
-        etypes = {sp["row_error_type"] for sp in spans}
-        lines = {sp["line_index"] for sp in spans}
-        assert len(etypes) == 1 and len(lines) == 1, (it["document_id"], it["row_ordinal"], etypes, lines)
-        bad = [sp["field"] for sp in spans if not sp["label_valid"]]
-        label = not bad
-        assert label == (etypes == {""}), f"{it['document_id']}/{it['row_ordinal']}: row_error_type {etypes} vs field labels"
-        idx = [spec.fields.index(f) for f in fields]
-        doc = it["document_id"]
-        units.append({
-            "doc_id": doc,
-            "row_ordinal": it["row_ordinal"],
-            "rows": np.array(idx + [-1] * (len(spec.fields) - len(idx))),
-            "fields": fields,
-            "invalid_fields": bad,
-            "label_valid": label,
-            "row_error_type": etypes.pop(),
-            "line_index": lines.pop(),
-            "record": {
-                "id": f"{doc}|{it['row_ordinal']}",
-                "state": build_state(contexts[doc], render_record_text(values, fields)),
-                "questions": {"related": relation_question(fields, spec)},
-            },
-        })
+    for s in samples:
+        ents = s["entities"]
+        fields = [e["field"] for e in ents]
+        state = build_state(contexts[s["document_id"]], render_record_text({e["field"]: e["value"] for e in ents}, fields))
+        units.append(_sample_unit(s, ents, state, oneshot_question(fields, spec)))
     return units
 
 
@@ -481,37 +619,43 @@ def _entity_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
     return out
 
 
-def _relation_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndarray]:
-    """Flatten relation units and scores to one array entry per row.
+def _sample_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndarray]:
+    """Flatten sample units and scores to one array entry per sample.
 
     Args:
-        units: output of ``relation_units`` after ``filter_overlong``, with ``context_doc``.
+        units: output of ``conditional_units`` / ``oneshot_units`` after ``filter_overlong``, with ``context_doc``.
         results: ``_score_units`` output, parallel to ``units``.
 
     Returns:
-        Arrays ``doc_ids``, ``row_ordinal``, ``line_index``, ``rows``,
-        ``size``, ``fields``, ``invalid_fields``, ``n_invalid_fields``, ``label_valid``,
-        ``row_error_type``, ``context_doc``, ``p_true``, ``logit_true``, ``logit_false``
-        and ``n_tokens``.
+        Arrays ``sample_id``, ``doc_ids``, ``error_type``, ``size``, ``fields`` (``|``-joined, in
+        the order shown), ``invalid_fields``, ``n_invalid_fields``, ``label_valid``,
+        ``context_doc``, ``p_true``, ``logit_true``, ``logit_false`` and ``n_tokens``; for
+        conditional units also ``primary``, ``conditions``, ``primary_valid`` and ``invalid_conditions``.
     """
     cols: dict[str, list] = defaultdict(list)
     for u, r in zip(units, results):
+        assert len(r["p_true"]) == 1
+        cols["sample_id"].append(u["sample_id"])
         cols["doc_ids"].append(u["doc_id"])
-        cols["row_ordinal"].append(u["row_ordinal"])
-        cols["line_index"].append(u["line_index"])
-        cols["rows"].append(u["rows"])
+        cols["error_type"].append(u["error_type"])
         cols["size"].append(len(u["fields"]))
         cols["fields"].append("|".join(u["fields"]))
         cols["invalid_fields"].append("|".join(u["invalid_fields"]))
         cols["n_invalid_fields"].append(len(u["invalid_fields"]))
         cols["label_valid"].append(u["label_valid"])
-        cols["row_error_type"].append(u["row_error_type"])
+        if "primary" in u:
+            cols["primary"].append(u["primary"])
+            cols["conditions"].append("|".join(u["conditions"]))
+            cols["primary_valid"].append(u["primary_valid"])
+            cols["invalid_conditions"].append("|".join(u["invalid_conditions"]))
         cols["context_doc"].append(u["context_doc"])
         cols["p_true"].append(r["p_true"][0])
         cols["logit_true"].append(r["logits"][0, 0])
         cols["logit_false"].append(r["logits"][0, 1])
         cols["n_tokens"].append(r["n_tokens"])
-    return {k: np.array(v) for k, v in cols.items()}
+    out = {k: np.array(v) for k, v in cols.items()}
+    assert all(len(v) == len(units) for v in out.values())
+    return out
 
 
 def validate_params(p: dict) -> None:
@@ -530,28 +674,29 @@ def validate_params(p: dict) -> None:
 
 
 def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Path) -> tuple[list[dict], dict]:
-    """Select rows and build one Clef unit per row (no model needed).
+    """Load the task's input and build one Clef unit per row or sample (no model needed).
 
     Args:
-        task: ``clef_entity_row`` or ``clef_relation_row``.
+        task: one of ``TASKS``.
         p: the config ``params``.
         seed: run seed.
         spec: the dataset.
-        repo_root: directory that ``p["data_root"]`` is relative to.
+        repo_root: directory that ``p["data_root"]`` (and ``p["samples_path"]``) is relative to.
 
     Returns:
         ``(units, metrics)``: the units, each with ``context_doc`` set, and the counts
         (``n_items``, ``n_units_before_filter``) known before scoring.
     """
     assert task in TASKS, task
-    item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
-    item_params["context_token_limit"] = None  # over-length handling is Clef's own (overlong_docs)
     if task == "clef_entity_row":
+        item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
+        item_params["context_token_limit"] = None  # over-length handling is Clef's own (overlong_docs)
         items = edr.build_items(spec, item_params, seed, repo_root, None)
+        contexts = {it["document_id"]: it["context"] for it in items}
     else:
-        items = rdr.build_items(spec, item_params, seed, repo_root, None)
+        items = load_samples(repo_root / p["samples_path"], spec, task)
+        contexts = {d: load_context(repo_root / p["data_root"], spec, d) for d in sorted({s["document_id"] for s in items})}
 
-    contexts = {it["document_id"]: it["context"] for it in items}
     shown = swap_contexts(contexts, seed) if p["context_control"] == "other_document" else contexts
     context_doc = {d: d for d in contexts}
     if p["context_control"] == "other_document":
@@ -562,8 +707,11 @@ def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Pat
     metrics: dict = {"n_items": len(items)}
     if task == "clef_entity_row":
         units = entity_units(items, spec, shown)
+    elif task == "clef_relation_conditional":
+        units = conditional_units(items, spec, shown)
     else:
-        units = relation_units(items, spec, shown)
+        units = oneshot_units(items, spec, shown)
+    assert len(units) == len(items), "unit count != input count"
     for u in units:
         u["context_doc"] = context_doc[u["doc_id"]]
     metrics["n_units_before_filter"] = len(units)
@@ -574,7 +722,7 @@ def summarize(cols: dict[str, np.ndarray]) -> dict:
     """Flat scalar metrics of a prediction table.
 
     Args:
-        cols: output of ``_entity_columns`` or ``_relation_columns``.
+        cols: output of ``_entity_columns`` or ``_sample_columns``.
 
     Returns:
         Prediction, class and token counts and mean ``P(true)`` per class (``None`` for an empty class).
@@ -624,7 +772,7 @@ def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg:
     results = _score_units(scorer, units, p["determinism_check_n"])
     metrics["determinism_check_n"] = p["determinism_check_n"]
 
-    cols = _entity_columns(units, results) if task == "clef_entity_row" else _relation_columns(units, results)
+    cols = _entity_columns(units, results) if task == "clef_entity_row" else _sample_columns(units, results)
     np.savez_compressed(run_dir / "artifacts" / "clef_predictions.npz", **cols)
     metrics.update(summarize(cols))
     return metrics

@@ -1,0 +1,26 @@
+id: 2026-10-22-clef-oneshot-smoke-01
+project: judge-interp
+task: clef_record_oneshot
+description: >-
+  Smoke for the clef_record_oneshot task over the hand-built samples in tests/fixtures/clef_samples_mini/oneshot.json
+  (contexts from tests/fixtures/relation_detection_mini, line). Confirms model load, encoding, scoring and
+  bookkeeping only; no result is interpreted. Expected bookkeeping: n_items = n_units_before_filter =
+  n_predictions = 4, n_valid = 2, n_invalid = 2, n_excluded_overlong = 0.
+seed: 0
+params:
+  data_root: tests/fixtures/relation_detection_mini
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  samples_path: tests/fixtures/clef_samples_mini/oneshot.json
+  device: cuda
+  overlong_docs: error
+  context_control: none
+  determinism_check_n: 2
+  known_answer_check: true
+
+  # -- scripts/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"

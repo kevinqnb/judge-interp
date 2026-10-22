@@ -25,8 +25,11 @@ Tasks
 ``relation_detection`` (``judge_interp.relation_detection``): the same read-out with
     instructions asking whether a row's values belong to the same item; the dataset must
     have ``supports_relation``.
-``clef_entity_row`` / ``clef_relation_row`` (``judge_interp.clef``): the Cloudflare
-    clef-flash model as a direct judge; no representations are collected.
+``clef_entity_row`` / ``clef_relation_conditional`` / ``clef_record_oneshot`` (``judge_interp.clef``):
+    the Cloudflare clef-flash model as a direct judge; no representations are collected. The
+    entity task judges dataset rows; the other two judge the samples of a samples file
+    (conditional: is a primary entity related to all its conditions; one-shot: is the whole
+    record valid). The dataset must have ``supports_relation`` for the latter two.
 
 Each task module exposes ``TASK_PARAMS`` (its required params) and
 ``run(cfg, spec, run_dir, repo_root, model_cfg)``, which returns the metrics; the runner owns
@@ -55,8 +58,7 @@ config loading, snapshots, the manifest (``status`` is ``success`` or ``failed``
                        ``error_types``; n is null (all rows) or an int >= 1, and a
                        stratum smaller than n is a hard error. Drawn with ``seed``.
 
-``params`` of the two Clef tasks: ``data_root``, ``dataset_config``, ``split``, ``error_types``
-and ``rows_per_stratum`` as above, plus
+``params`` of the three Clef tasks: ``data_root`` and ``dataset_config`` as above, plus
     model_config       repo-relative path of a model config
                        (e.g. ``experiments/model-configs/clef.yaml``: model, pinned revision,
                        release-code hash, dtype, ``max_length``)
@@ -64,7 +66,9 @@ and ``rows_per_stratum`` as above, plus
     overlong_docs      "exclude" | "error"; records over the model config's ``max_length``
     context_control    "none" | "other_document"
     determinism_check_n, known_answer_check   sanity controls (see ``judge_interp.clef``)
-(``clef_relation_row`` takes the same keys: one record and one question per row.)
+and, for ``clef_entity_row``, ``split``, ``error_types`` and ``rows_per_stratum`` as above; for the
+two sample tasks instead ``samples_path`` (repo-relative samples file, see ``clef.load_samples``;
+the context of each sample's document is read from ``data_root``).
 """
 from __future__ import annotations
 
@@ -94,7 +98,8 @@ _TASK_MODULES = {
     "entity_detection": entity_detection,
     "relation_detection": relation_detection,
     "clef_entity_row": clef,
-    "clef_relation_row": clef,
+    "clef_relation_conditional": clef,
+    "clef_record_oneshot": clef,
 }
 _TASK_PARAMS: dict[str, tuple[str, ...]] = {
     task: module.TASK_PARAMS[task] for task, module in _TASK_MODULES.items()
@@ -159,7 +164,7 @@ def load_config(path: Path) -> dict:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
     spec = load_dataset_spec(REPO_ROOT / params["dataset_config"])
-    if task in ("relation_detection", "clef_relation_row"):
+    if task in ("relation_detection", *clef.SAMPLE_TASKS):
         spec.require_relation()
     return cfg
 

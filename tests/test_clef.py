@@ -15,7 +15,6 @@ import pytest
 
 from judge_interp import clef
 from judge_interp import entity_detection as edr
-from judge_interp import relation_detection as rdr
 from dataset_specs import LINE, SPECS
 from judge_interp.model_config import load_clef_model_config
 
@@ -23,7 +22,6 @@ LINE_FIELDS = list(LINE.fields)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_CFG = load_clef_model_config(REPO_ROOT / "experiments" / "model-configs" / "clef.yaml")
-ALL_LINE = ["inter_document", "intra_document", "cross_type"]
 
 def _entity_items(dataset):
     strata = {"valid": None, "inter_document": None, "cross_type": None}
@@ -32,12 +30,6 @@ def _entity_items(dataset):
     p = dict(data_root="tests/fixtures/entity_detection_mini", split="train",
              error_types=["inter_document", "cross_type"], rows_per_stratum=strata, context_token_limit=None)
     return edr.build_items(SPECS[dataset], p, 0, REPO_ROOT, None)
-
-
-def _relation_items():
-    p = dict(data_root="tests/fixtures/relation_detection_mini", split="train", error_types=ALL_LINE,
-             rows_per_stratum={"valid": None, **{t: None for t in ALL_LINE}}, context_token_limit=None)
-    return rdr.build_items(LINE, p, 0, REPO_ROOT, None)
 
 
 class FakeTokenizer:
@@ -76,41 +68,6 @@ def test_entity_units_one_question_per_nonnull_field():
     assert "`property`" in q and SPECS["main"].field_descriptions["property"] in q
 
 
-# ------------------------------------------------------------------ relation rows
-def test_relation_units_hand_worked():
-    # relation_detection_mini line train, in item order (doc, line, stratum, k):
-    #   doc-a line 0: cross_type (end date wrong), intra_document (end date + amount wrong), valid
-    #   doc-a line 1: inter_document (channel wrong), valid -- program_desc is null in both
-    #   doc-b line 0: valid
-    items = _relation_items()
-    contexts = {it["document_id"]: it["context"] for it in items}
-    units = clef.relation_units(items, LINE, contexts)
-    assert [u["label_valid"] for u in units] == [False, False, True, False, True, True]
-    assert [u["row_error_type"] for u in units] == ["cross_type", "intra_document", "", "inter_document", "", ""]
-    assert [u["invalid_fields"] for u in units] == [
-        ["program_end_date"], ["program_end_date", "sub_amount"], [], ["channel"], [], []]
-    assert [len(u["fields"]) for u in units] == [5, 5, 5, 4, 4, 5]
-    for u in units:
-        lines = u["record"]["state"].split("## EXTRACTED RECORD\n")[1].split("\n")
-        assert [ln.split(":")[0] for ln in lines] == u["fields"]  # every non-null field, canonical order, no null line
-        assert "null" not in u["record"]["state"].split("## EXTRACTED RECORD\n")[1]
-        assert list(u["record"]["questions"]) == ["related"]
-        text = u["record"]["questions"]["related"]["instructions"]
-        for f in LINE_FIELDS:
-            assert (f"- {f}:" in text) == (f in u["fields"])
-        assert [int(i) for i in u["rows"] if i >= 0] == [LINE_FIELDS.index(f) for f in u["fields"]]
-        assert len(u["rows"]) == len(LINE_FIELDS)
-        if u["row_error_type"] == "":
-            assert u["label_valid"]
-    assert "program_desc" not in units[3]["record"]["state"]  # null field omitted
-
-
-def test_relation_question_matches_the_qwen_framing():
-    text = clef.relation_question(["channel", "sub_amount"], LINE)["instructions"]
-    assert "same single item" in text and "Do not judge whether an individual value is real" in text
-    assert "serves as the field" not in text and "not what its field denotes" not in text
-
-
 def test_criterion_two_points_at_the_field_list_only_where_there_is_one():
     clef_q = clef.entity_question("property", SPECS["main"])["instructions"]
     assert "as this field is described" in clef_q and "list of fields" not in clef_q
@@ -125,6 +82,136 @@ def test_entity_question_forbids_outside_knowledge_and_state_has_no_null_line():
         assert "null" not in u["record"]["state"].split("## EXTRACTED RECORD\n")[1]
         for q in u["record"]["questions"].values():
             assert "Do not use outside knowledge" in q["instructions"]
+
+
+# ------------------------------------------------------------------ conditional / one-shot samples
+# tests/fixtures/clef_samples_mini (hand-built over relation_detection_mini): sample order, and who is
+# valid, are stated in the files. doc-a's lines: 0 = (7, Movie, 01/05/20, 01/10/20, $100.00),
+# 1 = (8, -, 01/11/20, 01/20/20, $250.00).
+SAMPLES = REPO_ROOT / "tests" / "fixtures" / "clef_samples_mini"
+SAMPLE_DATA_ROOT = "tests/fixtures/relation_detection_mini"
+
+
+def _contexts(samples):
+    from judge_interp.prompts import load_context
+    return {d: load_context(REPO_ROOT / SAMPLE_DATA_ROOT, LINE, d) for d in {s["document_id"] for s in samples}}
+
+
+def test_conditional_units_hand_worked():
+    samples = clef.load_samples(SAMPLES / "conditional.json", LINE, "clef_relation_conditional")
+    units = clef.conditional_units(samples, LINE, _contexts(samples))
+    assert [u["sample_id"] for u in units] == ["c1", "c2", "c3", "c4"]
+    # label = primary AND every condition valid; c3 pins "valid primary, corrupted condition" -> false
+    assert [u["label_valid"] for u in units] == [True, False, False, True]
+    assert [u["primary_valid"] for u in units] == [True, False, True, True]
+    assert [u["invalid_conditions"] for u in units] == [[], [], ["program_end_date"], []]
+    assert [u["invalid_fields"] for u in units] == [[], ["sub_amount"], ["program_end_date"], []]
+    # shown order: primary first, then the conditions in the order given (not canonical order)
+    assert [u["fields"] for u in units][2] == ["channel", "sub_amount", "program_end_date"]
+    assert [u["fields"] for u in units][3] == ["program_desc", "program_end_date", "channel"]
+    u = units[2]
+    state = u["record"]["state"]
+    assert samples[2]["document_id"] == "doc-a" and _contexts(samples)["doc-a"] in state
+    assert state.split("## PRIMARY ENTITY\n")[1] == (
+        'channel: "7"\n\n## CONDITIONS\nsub_amount: "$100.00"\nprogram_end_date: "01/05/20"')
+    assert list(u["record"]["questions"]) == ["q"] and u["record"]["questions"]["q"]["type"] == "noul"
+    assert u["primary"] == "channel" and u["conditions"] == ["sub_amount", "program_end_date"]
+
+
+def test_oneshot_units_hand_worked():
+    samples = clef.load_samples(SAMPLES / "oneshot.json", LINE, "clef_record_oneshot")
+    units = clef.oneshot_units(samples, LINE, _contexts(samples))
+    assert [u["label_valid"] for u in units] == [True, False, True, False]
+    assert [u["invalid_fields"] for u in units] == [[], ["channel"], [], ["program_end_date", "sub_amount"]]
+    assert units[0]["fields"] == ["sub_amount", "channel", "program_desc"]  # order given, not canonical
+    assert units[0]["record"]["state"].split("## EXTRACTED RECORD\n")[1] == 'sub_amount: "$100.00"\nchannel: "7"\nprogram_desc: "Movie"'
+    assert [u["error_type"] for u in units] == ["", "inter_document", "", "intra_document"]
+
+
+def test_conditional_question_names_primary_and_lists_conditions():
+    text = clef.conditional_question("channel", ["sub_amount", "program_end_date"], LINE)["instructions"]
+    assert f"`channel`: {LINE.field_descriptions['channel']}" in text
+    assert f"- `sub_amount`: {LINE.field_descriptions['sub_amount']}" in text and "- `program_end_date`:" in text
+    assert "- `program_start_date`" not in text and "- `channel`" not in text  # only the present conditions
+    assert "same single item as every one of the conditions" in text and "not related to one or more" in text
+    assert "Do not use outside knowledge" in text and "unclear evidence means false" in text
+    for bad in (["channel"], [], ["sub_amount", "sub_amount"], ["nope"]):
+        with pytest.raises(AssertionError):
+            clef.conditional_question("channel", bad, LINE)
+
+
+def test_oneshot_question_has_entity_criteria_and_relation_and_points_at_the_field_list():
+    text = clef.oneshot_question(["channel", "sub_amount"], LINE)["instructions"]
+    assert "ENTIRE record" in text and "(1) Explicit support" in text and "(2) Type correspondence" in text
+    assert "(3) Relation" in text and "same single item" in text
+    assert "as described in the list of fields above" in text and "as this field is described" not in text
+    assert text.index("- channel:") < text.index("(1) Explicit support")  # the list it points at comes before
+    assert "- program_desc:" not in text and "Do not use outside knowledge" in text and "unclear evidence fails" in text
+    with pytest.raises(AssertionError):
+        clef.oneshot_question(["channel"], LINE)
+
+
+def test_load_samples_refuses_malformed_files(tmp_path):
+    import json
+    good = json.loads((SAMPLES / "oneshot.json").read_text())
+
+    def bad(mutate, match):
+        data = json.loads(json.dumps(good))
+        mutate(data)
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps(data))
+        with pytest.raises(AssertionError, match=match):
+            clef.load_samples(path, LINE, "clef_record_oneshot")
+
+    bad(lambda d: d.append(dict(d[0])), "not unique")
+    bad(lambda d: d[0]["entities"].append(dict(d[0]["entities"][0])), "occurs twice")
+    bad(lambda d: d[0]["entities"][0].update(field="nope"), "not a field")
+    bad(lambda d: d[0]["entities"][0].update(valid="yes"), "types")
+    bad(lambda d: d[0]["entities"].pop() and d[0]["entities"].pop(), "at least two")
+    bad(lambda d: d[0].pop("error_type"), "keys")
+    bad(lambda d: d.clear(), "non-empty")
+    cond = SAMPLES / "conditional.json"
+    with pytest.raises(AssertionError, match="keys"):  # a conditional file under the one-shot task
+        clef.load_samples(cond, LINE, "clef_record_oneshot")
+
+
+def test_sample_columns_hand_worked():
+    samples = clef.load_samples(SAMPLES / "conditional.json", LINE, "clef_relation_conditional")
+    units = clef.conditional_units(samples, LINE, _contexts(samples))
+    for u in units:
+        u["context_doc"] = u["doc_id"]
+    results = [{"logits": np.array([[l, 0.0]], dtype=np.float32), "p_true": np.array([1 / (1 + np.exp(-l))]), "n_tokens": 10 + i}
+               for i, l in enumerate([2.0, -1.0, 0.5, 3.0])]
+    cols = clef._sample_columns(units, results)
+    assert list(cols["sample_id"]) == ["c1", "c2", "c3", "c4"]
+    assert list(cols["label_valid"]) == [True, False, False, True]
+    assert list(cols["primary_valid"]) == [True, False, True, True]
+    assert list(cols["invalid_conditions"]) == ["", "", "program_end_date", ""]
+    assert list(cols["fields"])[2] == "channel|sub_amount|program_end_date" and list(cols["size"]) == [3, 3, 3, 3]
+    assert list(cols["n_invalid_fields"]) == [0, 1, 1, 0] and list(cols["n_tokens"]) == [10, 11, 12, 13]
+    s = clef.summarize(cols)
+    assert (s["n_valid"], s["n_invalid"]) == (2, 2) and s["mean_p_true_valid"] > s["mean_p_true_invalid"]
+
+
+@pytest.mark.parametrize("task,fname", [("clef_relation_conditional", "conditional.json"), ("clef_record_oneshot", "oneshot.json")])
+def test_build_units_sample_tasks_and_context_control(task, fname):
+    p = dict(data_root=SAMPLE_DATA_ROOT, samples_path=f"tests/fixtures/clef_samples_mini/{fname}", context_control="none")
+    units, m = clef.build_units(task, p, 0, LINE, REPO_ROOT)
+    assert m == {"n_items": 4, "n_units_before_filter": 4}
+    assert all(u["context_doc"] == u["doc_id"] for u in units)
+    ctx = _contexts([{"document_id": "doc-a"}, {"document_id": "doc-b"}])
+    assert all(ctx[u["doc_id"]] in u["record"]["state"] for u in units)
+    swapped, _ = clef.build_units(task, {**p, "context_control": "other_document"}, 0, LINE, REPO_ROOT)
+    for u, w in zip(units, swapped):
+        assert w["context_doc"] != w["doc_id"] and ctx[w["context_doc"]] in w["record"]["state"] and ctx[w["doc_id"]] not in w["record"]["state"]
+        assert w["label_valid"] == u["label_valid"] and w["sample_id"] == u["sample_id"]
+
+
+def test_task_params_are_exact():
+    assert clef.TASKS == ("clef_entity_row", "clef_relation_conditional", "clef_record_oneshot")
+    assert "clef_relation_row" not in clef.TASK_PARAMS
+    assert "samples_path" in clef.TASK_PARAMS["clef_record_oneshot"] and "rows_per_stratum" not in clef.TASK_PARAMS["clef_record_oneshot"]
+    assert "samples_path" not in clef.TASK_PARAMS["clef_entity_row"]
 
 
 # ------------------------------------------------------------------ context control

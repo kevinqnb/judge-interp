@@ -1,0 +1,90 @@
+[
+ {
+  "sample_id": "c1",
+  "document_id": "doc-a",
+  "error_type": "",
+  "primary": {
+   "field": "program_start_date",
+   "value": "01/05/20",
+   "valid": true
+  },
+  "conditions": [
+   {
+    "field": "channel",
+    "value": "7",
+    "valid": true
+   },
+   {
+    "field": "sub_amount",
+    "value": "$100.00",
+    "valid": true
+   }
+  ]
+ },
+ {
+  "sample_id": "c2",
+  "document_id": "doc-a",
+  "error_type": "intra_document",
+  "primary": {
+   "field": "sub_amount",
+   "value": "$250.00",
+   "valid": false
+  },
+  "conditions": [
+   {
+    "field": "channel",
+    "value": "7",
+    "valid": true
+   },
+   {
+    "field": "program_start_date",
+    "value": "01/05/20",
+    "valid": true
+   }
+  ]
+ },
+ {
+  "sample_id": "c3",
+  "document_id": "doc-a",
+  "error_type": "cross_type",
+  "primary": {
+   "field": "channel",
+   "value": "7",
+   "valid": true
+  },
+  "conditions": [
+   {
+    "field": "sub_amount",
+    "value": "$100.00",
+    "valid": true
+   },
+   {
+    "field": "program_end_date",
+    "value": "01/05/20",
+    "valid": false
+   }
+  ]
+ },
+ {
+  "sample_id": "c4",
+  "document_id": "doc-b",
+  "error_type": "",
+  "primary": {
+   "field": "program_desc",
+   "value": "Weather",
+   "valid": true
+  },
+  "conditions": [
+   {
+    "field": "program_end_date",
+    "value": "02/09/20",
+    "valid": true
+   },
+   {
+    "field": "channel",
+    "value": "9",
+    "valid": true
+   }
+  ]
+ }
+]
