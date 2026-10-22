@@ -1,7 +1,7 @@
 """Clef-flash judge analysis: calibration, discrimination and per-error-type accuracy of its
 direct ``P(true)`` on the entity-detection and relation-detection tasks.
 
-Usage: ``uv run --python 3.12 --extra analysis python analysis/clef.py configs/<id>.yaml``
+Usage: ``uv run --python 3.12 --extra analysis python analysis/clef.py analysis/configs/<type>/<id>.yaml``
 (every value lives in the config's ``params``; a missing key is a KeyError).
 
 Reads ``clef_entity_row`` / ``clef_relation_row`` runs (``src/judge_interp/clef.py``; one

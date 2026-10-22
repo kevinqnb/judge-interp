@@ -1,0 +1,31 @@
+id: 2026-10-14-qwen7b-relrow-pairs-line-analysis-03
+project: judge-interp
+description: >-
+  Time-bounded (target <= 15 min) subsample of the pair-based relation-row analysis, line dataset: first 150 documents
+  of the train split (of 445; ~5.7k pairs vs 17.9k full) and all 107 documents of the test split (4,642 pairs), 10
+  shuffled-label fits instead of 30. Everything else as relrow-pairs-line-analysis-02 (layer 20, C=0.01, thread caps
+  from experiments/_run_experiment_job.sh). NOT the full-data result: the train set is the first 150 documents, not a
+  random sample. PREDICTIONS (stated before the run): wall time ~6 min (tiny-02: 558 s for 33 fits at 3.8k train pairs;
+  here ~13 fits at ~5.7k); CPU/wall <= 16; exit 0; mean shuffled AUROC within 0.03 of 0.5 (std of the mean ~0.006);
+  test AUROC near tiny-02's 0.835.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-relrow-line-train-01
+  test_run_id: 2026-10-14-qwen7b-relrow-line-test-01
+  # same layer as the smoke/tiny runs; one of [0, 8, 14, 20, 24, 28], 0 is rejected
+  layer: 20
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  run_controls: true
+  # test AUROC is averaged over n_shuffles permuted-train-label fits
+  n_shuffles: 10
+  shuffled_label_auroc_tolerance: 0.03
+  # -- experiments/submit.sh --analysis resources (CPU only) --
+  omp: 16
+  walltime: "00:30:00"
+  max_docs: 150

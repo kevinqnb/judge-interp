@@ -1,7 +1,7 @@
 """Row-based entity detection: PCA of per-entity activations, then a single-entity logistic
 validity probe with calibration and per-error-type accuracy.
 
-Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py configs/<id>.yaml``
+Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py analysis/configs/<type>/<id>.yaml``
 (every value lives in the config's ``params``; a missing key is a KeyError).
 
 Reads the ``entity_detection`` train and test runs named in the config

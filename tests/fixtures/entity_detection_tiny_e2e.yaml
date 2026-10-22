@@ -2,7 +2,7 @@ id: entity_detection_tiny_e2e
 project: judge-interp
 task: entity_detection
 description: >-
-  Tiny end-to-end fixture for scripts/run_experiment.py's entity_detection
+  Tiny end-to-end fixture for experiments/run_experiment.py's entity_detection
   task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/entity_detection_mini, main
   dataset, every row (see tests/test_entity_detection.py for the hand-worked
   rows). Exercises plumbing and determinism only. Expected: n_prompts = 4,

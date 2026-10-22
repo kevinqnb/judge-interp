@@ -3,7 +3,7 @@
     "ask": [
       "Edit(src/judge_interp/instruction_prompts.py)",
       "Edit(src/judge_interp/representationlm.py)",
-      "Edit(scripts/run_experiment.py)",
+      "Edit(experiments/run_experiment.py)",
       "Edit(analysis/entity_detection.py)",
       "Edit(analysis/entity_detection_row.py)",
       "Edit(analysis/relation_detection_row.py)",

@@ -1,0 +1,36 @@
+id: 2026-10-14-qwen7b-entityrow-main-analysis-01
+project: judge-interp
+description: >-
+  Entity-row analysis, main dataset (Qwen2.5-7B-Instruct, full train/test entityrow runs): per-document
+  mean-centred last-layer (28, post-final-norm) closing-quote activations, train PCA coloured by validity, single-entity
+  logistic validity probe (small C = strong regularisation), smECE / Brier skill score / AUROC on test, per-error-type
+  accuracy (inter_document and cross_type), field-identity baseline and controls.
+seed: 0
+params:
+  train_run_id: 2026-10-14-qwen7b-entityrow-main-train-01
+  test_run_id: 2026-10-14-qwen7b-entityrow-main-test-01
+  # one of the runs' layers [0, 8, 14, 20, 24, 28]; 28 = last block, post-final-norm. 0 is the constant null control and is rejected
+  layer: 28
+  # PCA / scatter
+  pca_n_components: 2
+  pca_svd_solver: randomized
+  max_scatter_points: 20000
+  # logistic regression (lbfgs; ConvergenceWarning is promoted to an error).
+  # lr_C is sklearn's INVERSE regularisation strength: "fairly small regularization parameter" is read as
+  # small C = strong L2 penalty (3584 dimensions vs ~4.5k train spans is close to separable).
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  # smooth ECE (relplot) + bootstrap for its CI
+  ece_n_boot: 2000
+  # controls
+  run_controls: true
+  # test AUROC is averaged over n_shuffles permuted-train-label fits (one permutation is too noisy)
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  # -- experiments/submit.sh --analysis resources (CPU only; walltime is a placeholder) --
+  omp: 8
+  walltime: "03:00:00"
+  # restrict each split to its first N documents (null = all)
+  max_docs: null

@@ -1,0 +1,29 @@
+id: 2026-10-14-clef-entity-smoke-01
+project: judge-interp
+task: clef_entity_row
+description: >-
+  Smoke for the clef_entity_row task over the hand-built tests/fixtures/entity_row_mini (main, every row).
+  Confirms model load, encoding, scoring and bookkeeping only; no result is interpreted.
+seed: 0
+params:
+  data_root: tests/fixtures/entity_row_mini
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  model_config: experiments/model-configs/clef.yaml
+  split: train
+  device: cuda
+  overlong_docs: error
+  context_control: none
+  determinism_check_n: 2
+  known_answer_check: true
+  error_types: [inter_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+
+  # -- experiments/submit.sh resources --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"

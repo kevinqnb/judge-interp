@@ -1,0 +1,35 @@
+id: 2026-10-14-clef-relation-tiny-01
+project: judge-interp
+task: clef_relation_row
+description: >-
+  Tiny end-to-end for clef_relation_row on the real line test split: 30 rows per stratum, 20 valid + 20
+  invalid random subsets, the document's own OCR text. Prediction (stated before the run): test AUROC well
+  above 0.5, known-answer check passes, no records excluded or only a few. Paired with
+  2026-10-14-clef-relation-tiny-ablation-01, identical except the OCR text is another document's.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  split: test
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 3
+  known_answer_check: true
+  error_types: [inter_document, intra_document]
+  rows_per_stratum:
+    valid: 30
+    inter_document: 30
+    intra_document: 30
+  samples_per_row: 8
+  min_subset_size: 2
+  n_per_class: 20
+  subset_rng_stream: 1
+
+  # -- experiments/submit.sh resources (smoke wallclock was ~1 min for 6 short records) --
+  gpu_type:
+  gpu_memory: 40G
+  gpu_c: 7.0
+  omp: 8
+  walltime: "00:30:00"

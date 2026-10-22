@@ -1,10 +1,10 @@
-"""Unit tests for scripts/run_experiment.py's config loading (required keys, task set)."""
+"""Unit tests for experiments/run_experiment.py's config loading (required keys, task set)."""
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
 import run_experiment as run  # noqa: E402
 
 
@@ -61,7 +61,9 @@ def test_removed_tasks_are_rejected(tmp_path, task):
         run.load_config(p)
 
 
-CLEF_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "2026-10-22-clef-conditional-smoke-01.yaml"
+CONFIG_ROOT = Path(__file__).resolve().parent.parent / "experiments" / "experiment-configs"
+CLEF_CONFIG = CONFIG_ROOT / "relation-detection" / "clef" / "2026-10-22-clef-conditional-smoke-01.yaml"
+CLEF_ONESHOT_CONFIG = CONFIG_ROOT / "one-shot" / "clef" / "2026-10-22-clef-oneshot-smoke-01.yaml"
 
 
 def test_clef_config_requires_model_config_and_rejects_inline_model_keys(tmp_path):
@@ -89,7 +91,7 @@ def test_every_task_module_implements_the_task_interface():
 def test_clef_sample_task_params_and_removed_relation_row(tmp_path):
     import yaml
 
-    cfg = run.load_config(CLEF_CONFIG.with_name("2026-10-22-clef-oneshot-smoke-01.yaml"))
+    cfg = run.load_config(CLEF_ONESHOT_CONFIG)
     assert cfg["task"] == "clef_record_oneshot"
     p = tmp_path / f"{cfg['id']}.yaml"
     for drop, match in (("samples_path", "samples_path"),):

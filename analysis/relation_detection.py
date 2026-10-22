@@ -1,7 +1,7 @@
 """Row-based relation detection: a validity probe on the concatenated activations of a pair of
 fields from one line-item row.
 
-Usage: ``uv run --python 3.12 --extra analysis python analysis/relation_detection.py configs/<id>.yaml``
+Usage: ``uv run --python 3.12 --extra analysis python analysis/relation_detection.py analysis/configs/<type>/<id>.yaml``
 (every value lives in the config's ``params``; a missing key is a KeyError).
 
 Reads the ``relation_detection`` train and test runs named in the config

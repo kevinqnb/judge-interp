@@ -17,7 +17,7 @@ it is the source of truth for the config standard, the experiment ID scheme, wha
 run writes, and the `/develop` `/devlog` `/experiment` `/explog` `/debrief` loop.
 
 **No magic numbers.** Every value that would change between runs lives in a
-`configs/<id>.yaml` `params` block (or the repo's own committed source-of-truth
+`experiments/experiment-configs/<group>/<id>.yaml` `params` block (or the repo's own committed source-of-truth
 config for fixed, repo-wide values) — never hardcoded in runner code.
 
 **Public devlog.** `<repo>/devlog/<id>.md` is the committed, curated record of

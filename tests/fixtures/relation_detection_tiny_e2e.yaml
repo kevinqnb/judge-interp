@@ -2,7 +2,7 @@ id: relation_detection_tiny_e2e
 project: judge-interp
 task: relation_detection
 description: >-
-  Tiny end-to-end fixture for scripts/run_experiment.py's relation_detection
+  Tiny end-to-end fixture for experiments/run_experiment.py's relation_detection
   task: Qwen2.5-0.5B-Instruct on CPU over tests/fixtures/relation_detection_mini, line
   dataset, every row (see tests/test_relation_detection.py for the hand-worked
   rows). Exercises plumbing and determinism only. Expected: n_prompts = 6,
