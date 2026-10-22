@@ -94,21 +94,13 @@ scoring. Rows from one base row at different `k` are not independent (and intra 
 
 ## OCR-fragment dates
 
-About 20% of line date values (17.6% main train, 12.3% main test) are OCR fragments that do not
-parse as a date, e.g. `/08/20` or `02/21/`. They are valid ground truth and sit in the valid rows.
-If corruptions only ever produced clean dates, "is a fragment" would predict "is correct", so
-fragments are ordinary values in every pool and every error type:
-
-- they are candidates like any other value, and order is only enforced between two **parseable**
-  dates (a fragment has no position in time);
-- order filtering would still over-select them (a fragment always passes), so the fragment/real
-  class is drawn first at the split's own fragment rate among valid dates
-  (`fragment_target_rate` in `invalids.json`), then a value within the class;
-- `date_fragment_rates` records corrupted vs kept fragment rates per type. They match for main
-  and for line `inter_document` / `intra_document`. **Known residual:** line `cross_type`
-  corrupts to a fragment 27.7% of the time (train) / 33.2% (test) vs ~18-20% kept, because the
-  document's own dates minus values already valid for the target often leave only fragments.
-  Treat a fragment as weakly predictive of "corrupted" there.
+About 20% of line date values (12-18% in main) are OCR fragments that don't parse as a date, e.g.
+`/08/20` or `02/21/`. They are valid ground truth. To keep "is a fragment" from predicting "is correct",
+corruptions can also produce fragments, at the same rate they occur in the valid rows, and date order
+(`from <= to`) is only enforced when both dates parse. The corrupted and kept fragment rates are recorded
+per error type in `invalids.json` (`date_fragment_rates`) and match everywhere except one place:
+**line `cross_type` over-produces fragments** (~28-33% of corrupted dates vs ~18-20% kept), so there a
+fragment is weakly predictive of "corrupted".
 
 ## Matched subset (`manifest.json`)
 
@@ -125,6 +117,9 @@ selection; it is not yet wired into `row_detection`.
 
 - `inter_document` values almost never occur in the document text (by design); `intra` and
   `cross` values do. Report types separately.
-- The common-support selection favours documents with several varied line items.
+- The matched subset is not a random sample. A line row qualifies only if intra and cross reach k=3, which
+  needs several other line items with varied values, so only ~32% of line base rows (train) and ~30%
+  (test) qualify, skewed toward longer, more varied line-item tables. Main keeps ~99%. Results on the
+  manifest describe those documents, not the whole corpus.
 - ~5% of test line rows are identical (all fields) to a train line row, and many test advertisers
   also occur in train; documents are split, but contracts recur.
