@@ -45,8 +45,14 @@ One invalid row is emitted per achievable `k` (never a requested `k` the row can
 | type | datasets | where the wrong value comes from |
 |---|---|---|
 | `inter_document` | main, line | another document of the same split (main: any row's value for that field; line: any other document's line rows). Not in this document's text by construction. This is intended, so it tests whether the judge checks the value against the document. |
-| `intra_document` | line | other line items of the **same** document, one distinct donor item per corrupted field. A chain: fields and donors are drawn one at a time until `k` is reached or no eligible pair is left. |
+| `intra_document` | line | the **same field** taken from other line items of the **same** document (a same-type error: line A's `program_start_date` gets line B's `program_start_date`), one distinct donor item per corrupted field. A chain: fields and donors are drawn one at a time until `k` is reached or no eligible pair is left. |
 | `cross_type` | main, line | a real value of this document that belongs to a **different field of the same kind** (name: advertiser, agency, property, tv_address, product; date: the four date fields; amount: gross_amount, sub_amount), in either dataset. The value is genuine but filed under the wrong type. `contract_num`, `channel`, `program_desc` have no kind and are never touched. Two fields that pull each other's values are marked `exchanged_with`. |
+
+`intra_document` and `cross_type` never overlap: `intra_document` keeps the field's type (same field, another
+line item), `cross_type` changes it (a different field). A `cross_type` value may not already be valid for
+its target field anywhere in the document, which excludes exactly the same-field values `intra_document` uses.
+In a row's `field_errors`, an intra source has `field` equal to the corrupted field, a cross source a
+different one.
 
 Rules that apply to every type:
 
