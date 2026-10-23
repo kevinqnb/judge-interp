@@ -1,14 +1,17 @@
 {
   "permissions": {
     "ask": [
-      "Edit(src/judge_interp/instruction_prompts.py)",
       "Edit(src/judge_interp/representationlm.py)",
-      "Edit(experiments/run_experiment.py)",
-      "Edit(analysis/entity_detection.py)",
-      "Edit(analysis/entity_detection_row.py)",
-      "Edit(analysis/relation_detection_row.py)",
+      "Edit(src/judge_interp/row_detection.py)",
       "Edit(src/judge_interp/clef.py)",
-      "Edit(analysis/clef.py)"
+      "Edit(experiments/run_experiment.py)",
+      "Edit(experiments/clef_samples.py)",
+      "Edit(analysis/entity_detection.py)",
+      "Edit(analysis/relation_detection.py)",
+      "Edit(analysis/clef.py)",
+      "Edit(data/vrdu/build_vrdu_invalids.py)",
+      "Edit(data/vrdu/build_vrdu_subsets.py)",
+      "Edit(data/vrdu/subsets.py)"
     ]
   }
 }
