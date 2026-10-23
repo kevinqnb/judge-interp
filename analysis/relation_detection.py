@@ -1,33 +1,18 @@
-"""Row-based relation detection: a validity probe on the concatenated activations of a pair of
-fields from one line-item row.
+"""Row-based relation detection: a validity probe on the concatenated activations of two fields
+of one line-item row.
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/relation_detection.py analysis/configs/<type>/<id>.yaml``
-(every value lives in the config's ``params``; a missing key is a KeyError).
 
-Reads the ``relation_detection`` train and test runs named in the config
-(``src/judge_interp/relation_detection.py``: one prompt per ``(document, line row)``, one
-activation per non-null field, read at the field's closing quote) and does, in order:
+Reads the ``relation_detection`` train and test runs named in the config, then:
 
-1. **Load** one layer (``layer``) as ``X`` and subtract each document's mean row -- nothing
-   else (as in ``analysis/entity_detection.py``).
-2. **Pairs.** A *source row* is a ``(doc_id, row_ordinal)`` prompt. Every unordered pair of
-   non-null fields of a source row is one sample (no subsampling, no balancing). Its feature is
-   ``[X[a], X[b]]``, the two activations concatenated with the fields in ``LINE_FIELDS`` order.
-3. **Pair label** (positive class = valid). Both fields valid -> valid; exactly one invalid ->
-   invalid. A pair with *both* fields invalid is **dropped** (its label is ambiguous: two values
-   copied from one donor row do co-occur there). The dropped count is reported
-   (``n_*_pairs_dropped_both_invalid``).
-4. **Logistic regression** (train -> test) on the concatenated activations, exactly as
-   ``entity_detection``: smECE (+ bootstrap CI), Brier score, Brier skill score (reference =
-   constant forecast at the train valid rate), AUROC, accuracy, smoothed reliability diagram, and
-   the per-error-type report (error type = the source row's). ``lr_C`` is sklearn's inverse
-   regularisation strength: a small value is a strong penalty.
-5. **Controls.** A field-pair-identity baseline (one-hot over the 10 field pairs -> LR, reported);
-   mean test AUROC over ``n_shuffles`` shuffled-train-label fits ~ 0.5 (asserted); same-seed refit
-   gives identical probabilities (asserted).
+1. Load one layer and subtract each document's mean activation.
+2. Every unordered pair of non-null fields of a row is a sample; feature ``[X[a], X[b]]``.
+3. Label (valid = positive): the data's label rule (``build_vrdu_invalids.matches_item``) on the two
+   shown values, checked against the row file the run judged.
+4. Logistic regression, train -> test, with the metrics of ``analysis/entity_detection.py``.
+5. Controls: field-pair baseline, shuffled-label AUROC ~ 0.5 (asserted), seed determinism (asserted).
 
-Figures go to ``analysis/figures/<id>/`` (with a copy of ``metrics.json``); ``metrics.json``, ``config.snapshot.yaml`` and
-``artifacts/test_predictions.npz`` go to ``$RUNS_ROOT/<id>/``.
+Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
 from __future__ import annotations
 
@@ -37,7 +22,7 @@ import json
 import os
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -46,29 +31,28 @@ from sklearn.metrics import roc_auc_score
 
 from judge_interp.dataset_spec import load_dataset_spec
 
-# The VRDU line-item field order (formerly judge_interp.prompts.LINE_FIELDS).
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "data" / "vrdu"))
+from build_vrdu_invalids import matches_item  # noqa: E402
+from subsets import equivalence_from_invalids, items_by_document, make_sample_eq  # noqa: E402
+
 LINE_FIELDS = list(
     load_dataset_spec(Path(__file__).resolve().parents[1] / "experiments" / "dataset-configs" / "vrdu_line.py").fields
 )
 
 _spec = importlib.util.spec_from_file_location("analysis_entity_detection", Path(__file__).parent / "entity_detection.py")
 er = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(er)  # reused unchanged: loader, metrics, error-type report, plots
+_spec.loader.exec_module(er)  # shared loader, metrics and plots
 
 FIGURES_DIR = Path(__file__).parent / "figures"
-# Field pairs, unordered, in LINE_FIELDS order: the baseline's categories.
+# Unordered field pairs (the baseline's categories).
 PAIRS = list(itertools.combinations(LINE_FIELDS, 2))
 PAIR_INDEX = {pr: i for i, pr in enumerate(PAIRS)}
 
 
 # ------------------------------------------------------------------------ source rows
 def group_rows(split: dict) -> list[dict]:
-    """One entry per ``(doc_id, row_ordinal)`` prompt: ``{doc, ordinal, rows, fields, error_type}``.
-
-    ``rows`` are indices into the split's arrays, in ``LINE_FIELDS`` order. Asserted: fields
-    distinct and line fields, the row error type constant within a row. (Labels are per entity, so
-    only the error type is row-level.)
-    """
+    """One entry per ``(doc_id, row_ordinal)`` prompt: ``{doc, ordinal, rows, fields, error_type}``."""
     by_key: dict[tuple[str, int], list[int]] = defaultdict(list)
     for i, (d, o) in enumerate(zip(split["doc_ids"].tolist(), split["row_ordinal"].tolist())):
         by_key[(d, o)].append(i)
@@ -83,32 +67,55 @@ def group_rows(split: dict) -> list[dict]:
     return groups
 
 
-def build_pairs(split: dict, groups: list[dict]) -> dict:
-    """All unordered field pairs of every source row. Arrays, one entry per pair: ``i``, ``j``
-    (span indices, ``field[i]`` before ``field[j]`` in ``LINE_FIELDS``), ``label`` (valid),
-    ``pair`` (index into ``PAIRS``), ``error_type`` (the source row's), ``doc``, ``ordinal``;
-    plus ``n_dropped`` (both-invalid pairs, not included)."""
+def load_line_data(run_id: str, runs_root: Path, repo_root: Path) -> dict:
+    """The row file a run judged (via its ``config.snapshot.yaml``): ``{items, rows, eq}``."""
+    params = yaml.safe_load((runs_root / run_id / "config.snapshot.yaml").read_text())["params"]
+    spec = load_dataset_spec(repo_root / params["dataset_config"])
+    assert spec.name == "line" and tuple(spec.fields) == tuple(LINE_FIELDS), (run_id, spec.name)
+    path = repo_root / params["data_root"] / spec.split_path.format(split=params["split"])
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    by_key = {(r["document_id"], r["line_index"], r["error_type"] or "", r["k"]): r for r in rows}
+    assert len(by_key) == len(rows), f"{path}: row keys are not unique"
+    return {"items": items_by_document(rows), "rows": by_key,
+            "eq": make_sample_eq(equivalence_from_invalids(path.parent.parent))}
+
+
+def build_pairs(split: dict, groups: list[dict], data: dict) -> dict:
+    """Every unordered field pair of every row, labelled by ``matches_item``.
+
+    Arrays ``i, j, label, pair, error_type, doc, ordinal``, plus ``relabelled``: counts of pairs whose
+    label differs from the old per-entity rule.
+    """
+    for i in itertools.chain.from_iterable(g["rows"] for g in groups):   # spans must match the row file
+        key = (str(split["doc_ids"][i]), int(split["line_index"][i]), str(split["row_error_type"][i]), int(split["row_k"][i]))
+        assert key in data["rows"], f"span {i}: no row {key} in the row file (a run on other data?)"
+        assert data["rows"][key][str(split["field"][i])] == str(split["value"][i]), (
+            f"span {i}: value {split['value'][i]!r} != row file's {data['rows'][key][str(split['field'][i])]!r} for {key}")
     out: dict[str, list] = defaultdict(list)
-    n_dropped = 0
-    valid = split["label_valid"]
+    relabelled: Counter = Counter()
+    valid, eq = split["label_valid"], data["eq"]
     for g in groups:
+        items = data["items"][g["doc"]]
         for i, j in itertools.combinations(g["rows"], 2):
             fi, fj = str(split["field"][i]), str(split["field"][j])
             assert LINE_FIELDS.index(fi) < LINE_FIELDS.index(fj), (g["doc"], g["ordinal"], fi, fj)
-            if not valid[i] and not valid[j]:
-                n_dropped += 1
-                continue
+            label = matches_item({fi: str(split["value"][i]), fj: str(split["value"][j])}, items, eq)
+            if valid[i] and valid[j]:
+                assert label, (g["doc"], g["ordinal"], fi, fj, "two correct entities that are no item's")
+            old = "valid" if valid[i] and valid[j] else "invalid" if valid[i] or valid[j] else "dropped"
+            if old != ("valid" if label else "invalid"):
+                relabelled[f"{g['error_type']}_{old}_to_{'valid' if label else 'invalid'}"] += 1
             out["i"].append(i)
             out["j"].append(j)
-            out["label"].append(bool(valid[i] and valid[j]))
+            out["label"].append(label)
             out["pair"].append(PAIR_INDEX[(fi, fj)])
             out["error_type"].append(g["error_type"])
             out["doc"].append(g["doc"])
             out["ordinal"].append(g["ordinal"])
     assert out["i"], "no pairs"
     res = {k: np.array(v) for k, v in out.items()}
-    res["n_dropped"] = n_dropped
-    assert len(res["i"]) + n_dropped == sum(len(g["rows"]) * (len(g["rows"]) - 1) // 2 for g in groups)
+    res["relabelled"] = dict(sorted(relabelled.items()))
+    assert len(res["i"]) == sum(len(g["rows"]) * (len(g["rows"]) - 1) // 2 for g in groups)
     assert len(set(zip(res["i"].tolist(), res["j"].tolist()))) == len(res["i"]), "a pair listed twice"
     assert (split["doc_ids"][res["i"]] == split["doc_ids"][res["j"]]).all()
     assert (split["row_ordinal"][res["i"]] == split["row_ordinal"][res["j"]]).all()
@@ -134,15 +141,16 @@ def run(cfg: dict, runs_root: Path) -> dict:
     layer, thr = p["layer"], p["decision_threshold"]
     assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
 
-    tr = er.load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "relation_detection")
-    te = er.load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "relation_detection")
+    tr = er.load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "relation_detection", ("line_index", "value"))
+    te = er.load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "relation_detection", ("line_index", "value"))
     assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
     for s in (tr, te):
         assert set(np.unique(s["field"]).tolist()) <= set(LINE_FIELDS), "non-line field in the relation run"
     er.center_per_document(tr["X"], tr["doc_ids"])
     er.center_per_document(te["X"], te["doc_ids"])
 
-    z_tr, z_te = build_pairs(tr, group_rows(tr)), build_pairs(te, group_rows(te))
+    z_tr = build_pairs(tr, group_rows(tr), load_line_data(p["train_run_id"], runs_root, REPO_ROOT))
+    z_te = build_pairs(te, group_rows(te), load_line_data(p["test_run_id"], runs_root, REPO_ROOT))
     f_tr, f_te = pair_features(tr["X"], z_tr), pair_features(te["X"], z_te)
     y_tr, y_te = z_tr["label"], z_te["label"]
     for y in (y_tr, y_te):
@@ -156,7 +164,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
         "layer": layer, "n_train": int(len(y_tr)), "n_test": int(len(y_te)),
         "train_valid_rate": ref_rate, "test_valid_rate": float(y_te.mean()),
         "n_train_docs": len(set(z_tr["doc"].tolist())), "n_test_docs": len(set(z_te["doc"].tolist())),
-        "n_train_pairs_dropped_both_invalid": z_tr["n_dropped"], "n_test_pairs_dropped_both_invalid": z_te["n_dropped"],
+        **{f"n_train_pairs_relabelled_{k}": v for k, v in z_tr["relabelled"].items()},
+        **{f"n_test_pairs_relabelled_{k}": v for k, v in z_te["relabelled"].items()},
     }
 
     clf = er.fit_logreg(f_tr, y_tr, p, seed)

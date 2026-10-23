@@ -1,37 +1,17 @@
-"""Row-based entity detection: PCA of per-entity activations, then a single-entity logistic
-validity probe with calibration and per-error-type accuracy.
+"""Row-based entity detection: PCA of per-entity activations and a single-entity logistic validity probe.
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py analysis/configs/<type>/<id>.yaml``
-(every value lives in the config's ``params``; a missing key is a KeyError).
 
-Reads the ``entity_detection`` train and test runs named in the config
-(``src/judge_interp/entity_detection.py``: one prompt per ``(document, row)``, one
-activation per non-null field, read at the field's closing quote) and does, in order:
+Reads the ``entity_detection`` train and test runs named in the config, then:
 
-1. **Load** one layer (``layer``, an int in the run's ``layers``) as ``X``. Each sample is
-   ``(activation, source row, row field, error type if invalid)``: ``X[i]`` with
-   ``(doc_id, row_ordinal)``, ``field``, and ``field_error_type`` (empty if valid).
-   The layer-0 activation is the token embedding of the closing quote, identical for every
-   span (asserted), so unlike ``analysis/entity_detection.py`` there is no ``rep_L - rep_0``:
-   it would be a constant shift that step 2 removes anyway.
-2. **Preprocess**: subtract each *document's* mean row -- nothing else. No field-type
-   normalisation, no global mean, no standardisation. (Field priors therefore stay in ``X``;
-   the field-identity baseline in step 4 measures how much of the probe is just that.)
-3. **PCA** fit on the train ``X``, scatter coloured by validity.
-4. **Logistic regression** (train -> test) on a *single* entity's activation. Positive class
-   = valid. ``lr_C`` is sklearn's inverse regularisation strength: a small value is a strong
-   penalty. Reports smECE (+ bootstrap CI half-width), Brier score, Brier skill score
-   (reference = constant forecast at the *train* valid rate, scored on test), AUROC, accuracy,
-   and the smoothed reliability diagram.
-5. **Per-error-type report** (test): for each error type T present, the detection rate on
-   invalid spans of type T (fraction predicted invalid), accuracy on valid spans in clean rows
-   and on valid spans inside corrupted rows of type T, and AUROC of T-invalid vs all valid.
-6. **Controls**: field-identity baseline (one-hot ``field`` -> LR); mean test AUROC over
-   ``n_shuffles`` shuffled-train-label fits ~ 0.5 (a single permutation is too noisy to assert,
-   see ``shuffled_label_auroc``); same-seed refit gives identical probabilities.
+1. Load one layer and subtract each document's mean activation (nothing else).
+2. PCA on train, coloured by validity.
+3. Logistic regression on one entity's activation, train -> test: smECE, Brier (skill), AUROC,
+   accuracy, reliability diagram.
+4. Per-error-type report on test.
+5. Controls: field-identity baseline, shuffled-label AUROC ~ 0.5, seed determinism.
 
-Figures go to ``analysis/figures/<id>/`` (with a copy of ``metrics.json``); ``metrics.json``, ``config.snapshot.yaml`` and
-``artifacts/test_predictions.npz`` go to ``$RUNS_ROOT/<id>/``.
+Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
 from __future__ import annotations
 
@@ -140,12 +120,11 @@ REQUIRED_META = (
 
 
 # --------------------------------------------------------------------------- loading
-def load_split(run_id: str, runs_root: Path, layer: int, max_docs: int | None, expected_task: str) -> dict:
-    """Load one row-task run: ``X = rep_<layer>`` (float32, uncentred) plus per-span metadata.
+def load_split(run_id: str, runs_root: Path, layer: int, max_docs: int | None, expected_task: str,
+               extra_meta: tuple[str, ...]) -> dict:
+    """Load one row-task run: ``X = rep_<layer>`` plus per-span metadata (``extra_meta``: extra columns).
 
-    Gates: run.json status/task; ``layer`` is one of the run's layers; ``rep_0`` is identical for
-    every span (the producer's null-control claim); when the full split is loaded
-    (``max_docs is None``) the span and valid/invalid/per-error-type counts equal ``metrics.json``.
+    Checks run status/task, that ``rep_0`` is constant, and (full split) counts against ``metrics.json``.
     """
     run_dir = runs_root / run_id
     manifest = json.loads((run_dir / "run.json").read_text())
@@ -168,7 +147,8 @@ def load_split(run_id: str, runs_root: Path, layer: int, max_docs: int | None, e
         if max_docs is not None:
             keep = np.isin(doc_ids, list(dict.fromkeys(doc_ids.tolist()))[:max_docs])
         meta = {"doc_ids": doc_ids[keep]}
-        for name in REQUIRED_META:
+        assert not set(extra_meta) & set(REQUIRED_META), extra_meta
+        for name in (*REQUIRED_META, *extra_meta):
             col = z[name]
             assert col.shape[0] == n_all, (run_id, name, col.shape)
             meta[name] = col[keep]
@@ -205,15 +185,9 @@ def brier_skill_score(y_true: np.ndarray, probs: np.ndarray, ref_rate: float) ->
 
 def error_type_report(y_valid: np.ndarray, probs: np.ndarray, threshold: float, invalid_type: np.ndarray,
                       row_type: np.ndarray, types: list[str]) -> dict:
-    """Flat per-error-type metrics (positive class = valid; "detected" = predicted invalid).
+    """Per-error-type metrics: detection rate and AUROC per type, valid accuracy in clean and corrupted rows.
 
-    ``invalid_type[i]``: error type of item ``i`` if it is invalid (ignored where valid);
-    ``row_type[i]``: error type of the source row, ``""`` for a clean row. Keys:
-
-    - ``valid_acc_clean_rows`` / ``n_valid_clean_rows``: valid items from clean rows predicted valid;
-    - per T: ``detect_<T>`` / ``n_invalid_<T>`` (fraction of T-invalid predicted invalid),
-      ``valid_acc_in_<T>_rows`` / ``n_valid_in_<T>_rows`` (valid items inside T-corrupted rows
-      predicted valid; omitted if there are none), ``auroc_<T>_vs_valid`` (T-invalid vs all valid).
+    ``invalid_type``: each invalid item's error type; ``row_type``: its row's (``""`` if clean).
     """
     assert y_valid.dtype == bool and probs.shape == y_valid.shape == invalid_type.shape == row_type.shape
     pred_valid = probs > threshold
@@ -239,13 +213,7 @@ def error_type_report(y_valid: np.ndarray, probs: np.ndarray, threshold: float, 
 
 def shuffled_label_auroc(x_tr: np.ndarray, y_tr: np.ndarray, x_te: np.ndarray, y_te: np.ndarray, p: dict,
                          seed: int) -> tuple[float, float]:
-    """``(mean, std)`` of test AUROC over ``p["n_shuffles"]`` fits on permuted train labels.
-
-    A probe fit on permuted labels is a random direction; its chance overlap with a strong planted
-    or real signal moves a *single* permutation's test AUROC well off 0.5 with a random sign (std
-    ~0.1 in 64-d), so one permutation cannot be asserted against a tight tolerance. The mean over
-    many permutations is ~0.5 unless something leaks.
-    """
+    """``(mean, std)`` test AUROC over ``n_shuffles`` fits on permuted train labels (a single one is too noisy)."""
     rng = np.random.default_rng(seed)
     aucs = [float(roc_auc_score(y_te, fit_logreg(x_tr, rng.permutation(y_tr), p, seed).predict_proba(x_te)[:, 1]))
             for _ in range(p["n_shuffles"])]
@@ -315,8 +283,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
     layer, thr = p["layer"], p["decision_threshold"]
     assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
 
-    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection")
-    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection")
+    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ())
+    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ())
     assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
     types = sorted(set(np.unique(tr["field_error_type"][~tr["label_valid"]]).tolist()))
     assert types == sorted(set(np.unique(te["field_error_type"][~te["label_valid"]]).tolist())), (

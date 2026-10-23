@@ -135,26 +135,26 @@ def write_run(root: Path, run_id: str, task: str = "entity_detection", rep0_cons
 
 def test_load_split_roundtrip(tmp_path):
     write_run(tmp_path, "r")
-    s = er.load_split("r", tmp_path, 8, None, "entity_detection")
+    s = er.load_split("r", tmp_path, 8, None, "entity_detection", ())
     np.testing.assert_array_equal(s["X"], np.arange(20, dtype=np.float32).reshape(5, 4))  # raw rep_8, no rep_0 subtraction
     assert s["label_valid"].tolist() == [True, False, True, True, False]
 
 
 def test_load_split_max_docs(tmp_path):
     write_run(tmp_path, "r")
-    s = er.load_split("r", tmp_path, 8, 1, "entity_detection")
+    s = er.load_split("r", tmp_path, 8, 1, "entity_detection", ())
     assert s["doc_ids"].tolist() == ["a"] * 3 and s["X"].shape == (3, 4)
 
 
 def test_load_split_rejects_wrong_task_layer_and_nonconstant_layer0(tmp_path):
     write_run(tmp_path, "r")
     with pytest.raises(AssertionError):
-        er.load_split("r", tmp_path, 8, None, "relation_detection")
+        er.load_split("r", tmp_path, 8, None, "relation_detection", ())
     with pytest.raises(AssertionError):
-        er.load_split("r", tmp_path, 14, None, "entity_detection")
+        er.load_split("r", tmp_path, 14, None, "entity_detection", ())
     write_run(tmp_path, "bad", rep0_constant=False)
     with pytest.raises(AssertionError, match="layer-0"):
-        er.load_split("bad", tmp_path, 8, None, "entity_detection")
+        er.load_split("bad", tmp_path, 8, None, "entity_detection", ())
 
 
 def test_load_split_rejects_count_mismatch(tmp_path):
@@ -163,7 +163,7 @@ def test_load_split_rejects_count_mismatch(tmp_path):
     m["n_valid_spans"] = 4
     (tmp_path / "r" / "metrics.json").write_text(json.dumps(m))
     with pytest.raises(AssertionError):
-        er.load_split("r", tmp_path, 8, None, "entity_detection")
+        er.load_split("r", tmp_path, 8, None, "entity_detection", ())
 
 
 # --- shared preprocessing and probe fit ---------------------------------------------------
