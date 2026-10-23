@@ -7,18 +7,18 @@ every row is one extraction, either **valid** (copied from the annotations) or *
 | script | writes | config |
 |---|---|---|
 | `build_vrdu_dataset.py` | `main/`, `line/` `*_base.json` (valid rows only), `ocr/`, `directory.json` | CLI args (split ratio, seed 0) |
-| `build_vrdu_invalids.py` | `main/`, `line/` `{train,test}.json`, `invalids.json` | `data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml` |
+| `build_vrdu_invalids.py` | `main/`, `line/` `{train,test}.json`, `invalids.json` | `data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml` |
 | `build_vrdu_manifest.py` | `manifest.json` (matched evaluation subset) | `params.manifest` in the same config |
 | `build_vrdu_subsets.py` | `subsets.json` (shared random field subsets, line only) | `params.subsets` in the same config |
 
-Build configs live in `build-configs/` (one per invalids version, `-01` to `-04`; only the newest
+Build configs live in `build-configs/` (one per invalids version, `-01` to `-05`; only the newest
 describes the data on disk). Run each script directly (local data prep, no cluster job), e.g.
-`uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
+`uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py --config data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml`.
 Output is deterministic for a fixed seed. The large row files (`{main,line}/{train,test}.json`,
 ~110 MB) and `ocr/` are **gitignored**: regenerate them with the commands above, then check them
 against the committed `manifest.json`, which stores the sha256 of each split file
-(`build_vrdu_manifest.load_manifest_split` raises if a regenerated file differs). Numbers from earlier invalids configs (`-01`..`-03`) do
-not carry over to `-04`.
+(`build_vrdu_manifest.load_manifest_split` raises if a regenerated file differs). Numbers from earlier invalids configs (`-01`..`-04`) do
+not carry over to `-05`.
 
 ## Two datasets
 
@@ -47,7 +47,8 @@ One invalid row is emitted per achievable `k` (never a requested `k` the row can
 |---|---|---|
 | `inter_document` | main, line | another document of the same split (main: any row's value for that field; line: any other document's line rows). Not in this document's text by construction. This is intended, so it tests whether the judge checks the value against the document. |
 | `intra_document` | line | the **same field** taken from other line items of the **same** document (a same-type error: line A's `program_start_date` gets line B's `program_start_date`), one distinct donor item per corrupted field. A chain: fields and donors are drawn one at a time until `k` is reached or no eligible pair is left. |
-| `cross_type` | main, line | a real value of this document that belongs to a **different field of the same kind** (name: advertiser, agency, property, tv_address, product; date: the four date fields; amount: gross_amount, sub_amount), in either dataset. The value is genuine but filed under the wrong type. `contract_num`, `channel`, `program_desc` have no kind and are never touched. Two fields that pull each other's values are marked `exchanged_with`. |
+| `cross_type` | main, line | a real value of this document that belongs to a **different field of the same kind** (name: advertiser, agency, property, tv_address, product; date: the four date fields; amount: gross_amount, sub_amount), in either dataset, never from a line row's own item. The value is genuine but filed under the wrong type. `contract_num`, `channel`, `program_desc` have no kind and are never touched. Two fields that pull each other's values are marked `exchanged_with`. |
+| `cross_item` | line, subsets only | two shown fields of a clean line-item subset swap values (any kinds, k=2). |
 
 `intra_document` and `cross_type` never overlap: `intra_document` keeps the field's type (same field, another
 line item), `cross_type` changes it (a different field). A `cross_type` value may not already be valid for
@@ -59,9 +60,10 @@ Rules that apply to every type:
 
 - **A corruption must change the value.** "Same value" is judged by an equivalence key (parsed
   date, numeric amount, case- and whitespace-folded text), so `2/18/20` -> `02/18/20` or
-  `ISSUE` -> `Issue` is never an error. An intra/cross row also may not reproduce another valid
-  row of the document, and a cross value may not already be valid for its target field anywhere
-  in the document.
+  `ISSUE` -> `Issue` is never an error. A cross value may not already be valid for its target field
+  anywhere in the document.
+- **Label rule.** Shown values are valid iff they are one valid line item's (`matches_item`; nulls are
+  not shown). Invalid rows and subsets that match an item are excluded or dropped.
 - **Null fields can be filled; values are never nulled.** Filling a null adds an entity that
   was absent; every corrupted source carries `null_fill` (true/false) so it can be stratified
   (13-22% of corrupted entities in `inter`/`cross`, 5% in `intra`).
@@ -74,17 +76,17 @@ Rules that apply to every type:
 | dataset | valid | inter_document | intra_document | cross_type |
 |---|---|---|---|---|
 | main | 513 / 128 | 4,617 / 1,152 | - | 3,836 / 944 |
-| line | 7,732 / 1,431 | 38,660 / 7,155 | 24,893 / 4,633 | 18,009 / 3,118 |
+| line | 7,732 / 1,431 | 38,651 / 7,152 | 24,805 / 4,614 | 17,939 / 3,097 |
 
-Rows per `k` (train; test has the same shape, e.g. line intra 1,278 / 1,257 / 1,040 / 853 / 205):
+Rows per `k` (train; test has the same shape, e.g. line intra 1,275 / 1,254 / 1,028 / 848 / 209):
 
 | | k=1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
 |---|---|---|---|---|---|---|---|---|---|
 | main inter_document | 513 | 513 | 513 | 513 | 513 | 513 | 513 | 513 | 513 |
 | main cross_type | 513 | 513 | 513 | 513 | 512 | 507 | 484 | 281 | - |
-| line inter_document | 7,732 | 7,732 | 7,732 | 7,732 | 7,732 | - | - | - | - |
-| line intra_document | 7,334 | 7,146 | 5,560 | 3,992 | 861 | - | - | - | - |
-| line cross_type | 7,728 | 6,566 | 3,715 | - | - | - | - | - | - |
+| line inter_document | 7,723 | 7,732 | 7,732 | 7,732 | 7,732 | - | - | - | - |
+| line intra_document | 7,295 | 7,109 | 5,552 | 3,987 | 862 | - | - | - | - |
+| line cross_type | 7,723 | 6,514 | 3,702 | - | - | - | - | - | - |
 
 The types differ in reach: inter always reaches every `k`, intra and cross only where the
 document has enough donors (line cross is capped at k=3, its three kinded fields). Cells at high
@@ -109,7 +111,7 @@ The full set is not comparable across types (sizes and documents differ, above).
 fixes that: a base row qualifies only if **every** error type of its dataset has a row at
 **every** `k` in `k_values`; each selected base row contributes its valid row plus one row per
 (error type, `k`). Every (error type, `k`) cell then has the same size, the same documents and the
-same exact `k`. `k_values`: main 1-6 (507 / 126 base rows), line 1-3 (2,509 / 428 base rows).
+same exact `k`. `k_values`: main 1-6 (507 / 126 base rows), line 1-3 (2,499 / 418 base rows).
 The manifest records the invalids config id and sha256 of each split file, and
 `load_manifest_split` refuses one that is stale. `data/vrdu/build_vrdu_manifest.py` documents the
 selection; it is not yet wired into `row_detection`.
@@ -121,31 +123,30 @@ independent random evaluation set; metrics are averaged over the 5.
 
 | per replicate | train | test |
 |---|---|---|
-| samples | 7,600 (3,800 valid + 3,800 invalid) | 1,900 (950 + 950) |
-| source rows (manifest) | 25,090 (2,509 line items) | 4,280 (428 line items) |
+| samples | 10,128 (5,064 valid + 5,064 invalid) | 2,528 (1,264 + 1,264) |
+| source rows (manifest) | 24,990 (2,499 line items) | 4,180 (418 line items) |
 
-That is 10 sets and 47,500 samples; replicates reuse the same rows but draw different subsets.
+Replicates reuse the same rows but draw different subsets.
 
 **A sample** is a random subset of 2 to 5 of a line item's non-null fields, in a random order (for the chain
-rule P(f1..fn) = P(fn|f1..fn-1)...P(f1)). It is valid iff none of its fields is corrupted, so a subset of a
-corrupted row that avoids the corrupted fields is valid. Per source row, 4 distinct unordered subsets are drawn,
-then each is permuted.
+rule P(f1..fn) = P(fn|f1..fn-1)...P(f1)). It is valid iff its shown values are one real line item's (label rule above). Per source row, 6 distinct
+unordered subsets are drawn, then each is permuted. `cross_item` samples swap two shown values of a clean subset.
 
 **Balancing.** Both classes get exactly the same number of samples for every set of fields (`balance_by:
-field_set`), so subset size and field presence say nothing about the label. Without this, size alone gave
+field_set_error_type`), so subset size and field presence say nothing about the label. Without this, size alone gave
 test AUROC 0.63 and field presence 0.65; now 0.50. A set's share is its share among all subsets of the source
-valid rows (sizes 2 / 3 / 4 / 5: 42% / 38% / 17% / 3%). The invalid class is about a third each
-`inter_document`, `intra_document` and `cross_type` (asserted within 0.03).
+valid rows (sizes 2 / 3 / 4 / 5: 42% / 38% / 17% / 3%). Each of the four error types is ~25% of the
+invalid class (asserted within 0.03).
 
 **Use.** Read it only through `subsets.load_subsets(data_root, split, replicate)`, which refuses a stale file
-and re-checks every sample against its row. `sample_id` is `doc|line_index|error_type|k|f1+f2+...`; the
+and re-checks every sample against its row. `sample_id` is `doc|line_index|error_type|k|f1+f2+...` (`cross_item` adds `|a~b`); the
 field order is part of the id. Rebuild (repo root, after the manifest), with all values in `params.subsets` of
 the config:
-`uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-21-vrdu-invalids-04.yaml`.
+`uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml`.
 Replicate r uses `default_rng([seed, split index, r])`; raising `n_replicates` leaves earlier ones unchanged.
 
 Caveats:
-- 45% of valid samples come from clean rows, the rest from the uncorrupted parts of corrupted rows, so a
+- Many valid samples come from the uncorrupted parts of corrupted rows, so a
   per-error-type breakdown of the valid class is meaningless.
 - `cross_type` never touches `channel` or `program_desc`, so a sample of only those two is never a
   cross_type error.

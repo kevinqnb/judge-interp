@@ -1,24 +1,16 @@
-"""Turn the shared random field subsets (``data/vrdu/subsets.json``) into Clef samples files.
+"""Turn the line subsets (``data/vrdu/subsets.json``) into Clef samples files.
 
-``judge_interp.clef.load_samples`` reads a plain samples file and knows nothing about how its samples
-were drawn; this is the one place that routes the line dataset's evaluation subsets to the two sample
-tasks. A subset's ``fields`` list is in the random order drawn at build time, and that order is used as is:
+- ``clef_relation_conditional``: the first field is the primary entity, the rest are conditions.
+- ``clef_record_oneshot``: all fields, in order, are the entities of one record.
 
-- ``clef_relation_conditional``: the first field is the primary entity, every other field a condition.
-- ``clef_record_oneshot``: the fields, in order, are the entities of one record.
+An entity is ``{field, value, valid}`` (the sample's shown value; ``valid`` iff the field is not corrupted).
 
-An entity is ``{field, value, valid}``: the value is the row's value for that field, and it is valid iff
-the field is not in the row's ``invalid_fields``. A sample is valid iff all its entities are; this is
-re-asserted against the subset's own label. ``error_type`` is the source row's (``""`` for a valid row),
-as in the subsets themselves, so a valid sample drawn from a corrupted row still carries that row's type.
-
-Usage (repo root; every value is an argument, the output is deterministic and gitignored)::
+Usage (repo root)::
 
     uv run --python 3.12 python experiments/clef_samples.py --data-root data/vrdu --split test \\
         --replicates 0 1 2 3 4 --out-dir experiments/clef-samples
 
-writes ``<out-dir>/{conditional,oneshot}-<split>-rep<r>.json`` and ``<out-dir>/provenance.json``
-(sha256 of ``subsets.json``, of the split file, and of every output).
+Writes ``<out-dir>/{conditional,oneshot}-<split>-rep<r>.json`` and ``provenance.json``.
 """
 from __future__ import annotations
 
@@ -36,25 +28,16 @@ TASK_FILE_PREFIX = {"clef_relation_conditional": "conditional", "clef_record_one
 
 
 def entities(sample: dict) -> list[dict]:
-    """The entities of one ``load_subsets`` sample, in the sample's field order."""
-    row = sample["row"]
-    ents = [{"field": f, "value": row[f], "valid": f not in row["invalid_fields"]} for f in sample["fields"]]
+    """The entities of one ``load_subsets`` sample, in field order."""
+    assert list(sample["values"]) == sample["fields"], (sample["sample_id"], "values not in field order")
+    ents = [{"field": f, "value": v, "valid": f not in sample["invalid_fields"]} for f, v in sample["values"].items()]
     assert all(isinstance(e["value"], str) for e in ents), (sample["sample_id"], "a null value in a sample")
     assert all(e["valid"] for e in ents) == sample["label_valid"], (sample["sample_id"], "entity validity != subset label")
     return ents
 
 
 def to_sample(sample: dict, task: str) -> dict:
-    """One ``load_subsets`` sample as a ``clef.load_samples`` sample of ``task``.
-
-    Args:
-        sample: an element of ``subsets.load_subsets`` output.
-        task: ``clef_relation_conditional`` (first field primary, the rest conditions) or
-            ``clef_record_oneshot`` (all fields are entities).
-
-    Returns:
-        The samples-file entry.
-    """
+    """One ``load_subsets`` sample as a samples-file entry for ``task``."""
     assert task in TASK_FILE_PREFIX, task
     ents = entities(sample)
     assert len(ents) >= 2, (sample["sample_id"], "fewer than two fields")

@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data" / "vrdu")
 import build_vrdu_invalids as b
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "vrdu_invalids_mini"
-CONFIG = Path(__file__).resolve().parent.parent / "data" / "vrdu" / "build-configs" / "2026-10-21-vrdu-invalids-04.yaml"
+CONFIG = Path(__file__).resolve().parent.parent / "data" / "vrdu" / "build-configs" / "2026-10-22-vrdu-invalids-05.yaml"
 PIVOT = 50
 DATE_FIELDS = ["program_start_date", "program_end_date"]
 KIND_OF = {"flight_from": "date", "flight_to": "date", "program_start_date": "date",
@@ -330,8 +330,81 @@ def test_build_intra_chain_never_reproduces_a_near_duplicate_donor():
 
 
 def _feasible(base, donors):
-    other_tuples = {tuple(EQ(f, d[f]) for f in b.LINE_FIELDS) for d in donors}
-    return b._intra_feasible(base, dict(base), donors, other_tuples, b.LINE_FIELDS, DATE_FIELDS, [], set(), PIVOT, EQ)
+    return b._intra_feasible(base, dict(base), donors, b.item_keys(donors, b.LINE_FIELDS, EQ), b.LINE_FIELDS,
+                             DATE_FIELDS, [], set(), PIVOT, EQ)
+
+
+def test_intra_feasible_excludes_a_donor_that_reproduces_an_item_on_the_non_null_fields():
+    # base has no program_desc (null, not shown). donor differs from base in channel only, on the
+    # fields base shows, and has a desc of its own. Borrowing the donor's channel would show exactly
+    # the donor's values (desc is not shown), so the row would be valid: that pair must be excluded.
+    # The old full-tuple guard (nulls compared too) let it through.
+    base = {"channel": "1", "program_desc": None,
+            "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    donor = {"channel": "2", "program_desc": "B show", "line_index": 1,
+             "program_start_date": "01/01/20", "program_end_date": "01/10/20", "sub_amount": "$1"}
+    # desc: null-fill from the donor gives (1, "B show", ...) -- not the donor (channel differs): eligible.
+    assert _feasible(base, [donor]) == {"program_desc": [0]}
+
+
+# --- matches_item -----------------------------------------------------------
+
+
+ITEMS = [
+    {"line_index": 0, "channel": "5", "program_desc": "News", "program_start_date": "2/18/20",
+     "program_end_date": "02/24/20", "sub_amount": "$100.00"},
+    {"line_index": 1, "channel": "5", "program_desc": None, "program_start_date": "02/18/20",
+     "program_end_date": "02/24/20", "sub_amount": "$250.00"},
+]
+
+
+@pytest.mark.parametrize("values, expected", [
+    ({"channel": "5", "program_desc": "News"}, True),                     # item 0
+    ({"channel": "5", "program_start_date": "02/18/20"}, True),           # both items (reformat of item 0's 2/18/20)
+    ({"program_desc": "news", "sub_amount": "100"}, True),                # case / amount format folded
+    ({"program_desc": "News", "sub_amount": "$250.00"}, False),           # desc of item 0, amount of item 1
+    ({"channel": "5", "program_desc": "Sports"}, False),                  # no item has that desc
+    ({"program_desc": "News", "program_end_date": "02/24/20", "sub_amount": "$250.00"}, False),
+    ({"channel": "5", "sub_amount": "$250.00"}, True),                    # item 1; its null desc is not shown
+])
+def test_matches_item(values, expected):
+    assert b.matches_item(values, ITEMS, EQ) is expected
+
+
+def test_matches_item_an_item_null_matches_no_value():
+    # item 1 has no desc: a shown desc can only be matched by item 0, whose amount differs.
+    assert not b.matches_item({"program_desc": "Anything", "sub_amount": "$250.00"}, ITEMS, EQ)
+
+
+def test_matches_item_refuses_a_null_or_empty_shown_value():
+    with pytest.raises(AssertionError):
+        b.matches_item({"channel": None}, ITEMS, EQ)
+    with pytest.raises(AssertionError):
+        b.matches_item({}, ITEMS, EQ)
+
+
+def test_nonnull_values_drops_nulls_only():
+    assert b.nonnull_values(ITEMS[1], b.LINE_FIELDS) == {
+        "channel": "5", "program_start_date": "02/18/20", "program_end_date": "02/24/20", "sub_amount": "$250.00"}
+
+
+def test_line_inter_row_that_reproduces_an_item_is_dropped_and_recorded():
+    # D1 has items A and B that differ only in channel (1 vs 2). D2's one item equals A on every field but
+    # channel ("2"), so the only inter-document corruption A admits is channel 1 -> 2, which shows exactly B:
+    # dropped, never emitted. B admits nothing (D2 offers no value differing from B's). Intra: A's only donor
+    # B would also reproduce B (excluded up front), so both rows are skipped. (Start = end date: the two date
+    # fields share one inter pool, so distinct dates would let A's end date take D2's start date.)
+    a = {"document_id": "D1", "line_index": 0, "valid": True, "channel": "1", "program_desc": "Show",
+         "program_start_date": "03/01/20", "program_end_date": "03/01/20", "sub_amount": "$5"}
+    b_ = {**a, "line_index": 1, "channel": "2"}
+    d2 = {**a, "document_id": "D2", "channel": "2"}
+    rngs = {t: random.Random(0) for t in (b.INTER_DOCUMENT, b.INTRA_DOCUMENT)}
+    out, skipped, _capped, dropped = b.generate_line_split([a, b_, d2], DATE_FIELDS, PIVOT, (1, 5), rngs, EQ, FRAG_RATE)
+    assert dropped == [{"document_id": "D1", "line_index": 0, "k": 1}]
+    d1_invalid = [r for r in out if r["document_id"] == "D1" and not r["valid"]]
+    assert d1_invalid == []
+    assert {(r["document_id"], r["line_index"]) for r in skipped[b.INTER_DOCUMENT]} >= {("D1", 0), ("D1", 1)}
+    assert {(r["document_id"], r["line_index"]) for r in skipped[b.INTRA_DOCUMENT]} >= {("D1", 0), ("D1", 1)}
 
 
 def test_intra_feasible_a_fragment_donor_is_eligible_and_not_order_checked():
@@ -427,7 +500,7 @@ def test_line_counts_and_provenance(built):
     assert sum(1 for r in invalid_t if r["error_type"] == "intra_document") == 2
 
     prov = built["provenance"]
-    assert prov["config_id"] == "2026-10-21-vrdu-invalids-04"
+    assert prov["config_id"] == "2026-10-22-vrdu-invalids-05"
     dist = prov["num_invalid_fields_dist"]["line"]["train"]
     assert {int(k): v for k, v in dist["inter_document"].items()} == {1: 15, 2: 15, 3: 15, 4: 15, 5: 15}
     assert {int(k): v for k, v in dist["intra_document"].items()} == {1: 12, 2: 12, 3: 6, 4: 6, 5: 6}
@@ -572,7 +645,7 @@ def test_cross_type_candidates_same_kind_cross_dataset_and_exclusions():
     counts = _counts()
 
     def cands(target):
-        return b.cross_type_candidates(target, KINDS, kind_of, main_row, line_rows, truth, counts, EQ)
+        return b.cross_type_candidates(target, KINDS, kind_of, main_row, line_rows, truth, counts, EQ, None)
 
     # amount: main gross_amount can take the line sub_amount and vice versa.
     assert [(v, s["dataset"], s["field"], s["line_index"]) for v, s in cands("gross_amount")] == [("$9", "line", "sub_amount", 0)]
@@ -601,9 +674,33 @@ def test_cross_type_value_valid_for_target_elsewhere_in_document_is_excluded():
     truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
                              [{"document_id": "d", "valid": True, **r} for r in line_rows], EQ)["d"]
     got = [(v, s["field"]) for v, s in b.cross_type_candidates(
-        "flight_from", KINDS, kind_of, main_row, line_rows, truth, _counts(), EQ)]
+        "flight_from", KINDS, kind_of, main_row, line_rows, truth, _counts(), EQ, None)]
     assert ("01/01/20", "program_start_date") not in got
     assert ("01/05/20", "program_end_date") in got and ("02/01/20", "flight_to") in got
+
+
+def test_cross_type_never_takes_a_value_from_the_rows_own_line_item():
+    # Line item 0's own end date 01/05/20 may not be filed under its start date (that is cross_item);
+    # item 1's end date may. The main flight dates stay eligible.
+    kind_of = b.field_kinds(KINDS)
+    main_row = {f: None for f in b.MAIN_FIELDS}
+    main_row.update(flight_from="01/02/20", flight_to="02/01/20")
+    line_rows = [
+        {"line_index": 0, "channel": None, "program_desc": None, "program_start_date": "01/01/20",
+         "program_end_date": "01/05/20", "sub_amount": None},
+        {"line_index": 1, "channel": None, "program_desc": None, "program_start_date": "01/03/20",
+         "program_end_date": "01/09/20", "sub_amount": None},
+    ]
+    truth = b.document_truth([{"document_id": "d", "valid": True, **main_row}],
+                             [{"document_id": "d", "valid": True, **r} for r in line_rows], EQ)["d"]
+    got = {(v, s["dataset"], s["field"], s["line_index"]) for v, s in b.cross_type_candidates(
+        "program_start_date", KINDS, kind_of, main_row, line_rows, truth, _counts(), EQ, 0)}
+    assert got == {("01/09/20", "line", "program_end_date", 1),
+                   ("01/02/20", "main", "flight_from", None), ("02/01/20", "main", "flight_to", None)}
+    # the same call for a main record (own_line_index None) does offer item 0's end date
+    got_main = {v for v, _ in b.cross_type_candidates(
+        "program_start_date", KINDS, kind_of, main_row, line_rows, truth, _counts(), EQ, None)}
+    assert "01/05/20" in got_main
 
 
 def _src(dataset, field, line_index=None):
