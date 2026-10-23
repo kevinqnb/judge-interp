@@ -1,23 +1,12 @@
-"""Organize the VRDU ad-buy-form corpus into this repo's dataset layout.
+"""Turn the upstream VRDU ad-buy-form corpus into this repo's dataset layout.
 
-Reads the upstream ``dataset.jsonl`` (one row per document: OCR text plus
-bounding-box annotations) and writes, under ``--out-dir``:
+Reads the upstream ``dataset.jsonl`` and writes, under ``--out-dir``: ``directory.json`` (split +
+per-document metadata), ``ocr/<document_id>.txt``, ``main/{train,test}_base.json`` (one valid row per
+document) and ``line/{train,test}_base.json`` (one valid row per line item). Invalid rows are added
+later by ``build_vrdu_invalids.py``. A document-level field annotated with disagreeing values is
+resolved by majority vote (earliest occurrence breaks ties); the conflicts are kept in ``directory.json``.
 
-    directory.json            split assignment + per-document metadata
-    ocr/<document_id>.txt      raw OCR text, one file per document
-    main/{train,test}_base.json   one datapoint per document (9 document-level fields)
-    line/{train,test}_base.json   one datapoint per line item (5 line fields)
-
-Every datapoint written here is a *correct* extraction, so it gets ``valid: true``.
-Invalid datapoints (deliberately corrupted values) are added by later steps, not here.
-
-The VRDU annotation model records each field at *every* bounding box it appears in.
-For a document-level field those occurrences are meant to be the same value; when the
-OCR disagrees between boxes we pick by majority vote over the stripped strings, with
-the earliest occurrence in the document breaking ties, and record every distinct
-occurrence in ``directory.json`` so the choice stays reversible.
-
-No cluster job: this is local data preparation. Run it directly.
+Local data preparation (no cluster job); the command is in ``README.md``.
 """
 
 from __future__ import annotations
@@ -95,25 +84,42 @@ EXPECTED_LINE_NONNULL = {
 
 
 def occurrence_offset(occurrence):
-    """Earliest OCR character offset an occurrence points at."""
+    """Earliest OCR character offset of an annotation occurrence.
+
+    Args:
+        occurrence: ``[text, bbox, segments]``.
+
+    Returns:
+        The smallest segment start.
+    """
     _text, _bbox, segments = occurrence
     assert segments, f"occurrence has no segments: {occurrence!r}"
     return min(start for start, _end in segments)
 
 
 def _clean(text):
-    """Strip surrounding whitespace only; internal newlines (e.g. in tv_address) stay."""
+    """Strip surrounding whitespace from an annotation value (internal newlines stay).
+
+    Args:
+        text: the raw value.
+
+    Returns:
+        The stripped value; asserts it is non-empty.
+    """
     stripped = text.strip()
     assert stripped, f"annotation value is empty after stripping: {text!r}"
     return stripped
 
 
 def select_main_value(occurrences):
-    """Pick the value for one document-level field from its occurrences.
+    """Choose one value for a document-level field: majority vote, earliest occurrence breaks ties.
 
-    Returns ``(value, conflict)`` where ``conflict`` is None when every occurrence
-    agrees, otherwise a dict recording the chosen value and all distinct
-    occurrences (ordered by first appearance, with counts).
+    Args:
+        occurrences: the field's annotation occurrences.
+
+    Returns:
+        ``(value, conflict)``: ``conflict`` is None if all occurrences agree, else the chosen value and
+        every distinct occurrence with its count.
     """
     assert occurrences, "select_main_value called with no occurrences"
     entries = [(_clean(occ[0]), occurrence_offset(occ)) for occ in occurrences]
@@ -141,10 +147,14 @@ def select_main_value(occurrences):
 
 
 def extract_main_fields(annotations):
-    """Return ``(values, conflicts)`` for the document-level fields.
+    """Document-level field values of one document.
 
-    ``values`` maps every MAIN_FIELD to its value or None. ``conflicts`` maps the
-    subset of fields whose occurrences disagreed to their conflict record.
+    Args:
+        annotations: the document's ``[key, value]`` annotation pairs.
+
+    Returns:
+        ``(values, conflicts)``: every MAIN_FIELD's value (or None), and the conflict record of each field
+        whose occurrences disagreed.
     """
     occurrences_by_field = defaultdict(list)
     entry_count = Counter()
@@ -169,9 +179,13 @@ def extract_main_fields(annotations):
 
 
 def extract_line_items(annotations):
-    """Return the document's line items, ordered by position in the OCR text.
+    """Line items of one document, in OCR order.
 
-    Each item is a dict mapping every LINE_FIELD to its value or None.
+    Args:
+        annotations: the document's ``[key, value]`` annotation pairs.
+
+    Returns:
+        One dict per line item, mapping every LINE_FIELD to its value (or None).
     """
     items = []
     for key, value in annotations:
@@ -198,12 +212,28 @@ def extract_line_items(annotations):
 
 
 def document_id(filename):
+    """Document id from a PDF filename.
+
+    Args:
+        filename: ``<id>.pdf``.
+
+    Returns:
+        ``<id>``.
+    """
     assert filename.endswith(".pdf"), f"unexpected filename {filename!r}"
     return filename[: -len(".pdf")]
 
 
 def load_documents(dataset_jsonl):
-    """Parse every row of the upstream dataset into a plain dict."""
+    """Parse the upstream dataset.
+
+    Args:
+        dataset_jsonl: path of the upstream ``dataset.jsonl``.
+
+    Returns:
+        One dict per document: ``document_id``, ``filename``, ``ocr_text``, ``main_values``, ``conflicts``,
+        ``line_items``.
+    """
     documents = []
     with open(dataset_jsonl, encoding="utf-8") as handle:
         for line_no, raw in enumerate(handle, start=1):
@@ -229,10 +259,15 @@ def load_documents(dataset_jsonl):
 
 
 def assign_splits(doc_ids, test_frac, seed):
-    """Deterministically label each document 'train' or 'test'.
+    """Deterministic train/test split of documents (sort, then seeded shuffle).
 
-    Sorting first makes the result independent of input order; the seeded shuffle
-    is the only source of randomness.
+    Args:
+        doc_ids: document ids.
+        test_frac: share of documents in test, in (0, 1).
+        seed: shuffle seed.
+
+    Returns:
+        ``{document_id: "train" | "test"}``.
     """
     assert 0.0 < test_frac < 1.0, f"test_frac must be in (0, 1), got {test_frac}"
     ordered = sorted(doc_ids)
@@ -248,6 +283,14 @@ def assign_splits(doc_ids, test_frac, seed):
 
 
 def _git(*args):
+    """Run a git command in this directory.
+
+    Args:
+        *args: git arguments.
+
+    Returns:
+        Its stdout; asserts it succeeded.
+    """
     result = subprocess.run(
         ["git", *args],
         capture_output=True,
@@ -259,16 +302,20 @@ def _git(*args):
 
 
 def git_state():
-    """Commit the build ran from, and whether the working tree had uncommitted changes.
+    """The commit the build ran from, for provenance.
 
-    ``directory.json``'s build block is the only reproducibility record for this
-    dataset, so a dirty tree (the script itself not yet committed, say) must be
-    visible in it.
+    Returns:
+        ``(sha, dirty)``: HEAD's sha and whether the working tree had uncommitted changes.
     """
     return _git("rev-parse", "HEAD").strip(), bool(_git("status", "--porcelain").strip())
 
 
 def main(argv=None):
+    """Build ``directory.json``, ``ocr/`` and the ``*_base.json`` files from the CLI arguments.
+
+    Args:
+        argv: CLI arguments (None = ``sys.argv``).
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset-jsonl", required=True, type=Path, help="upstream dataset.jsonl")
     parser.add_argument("--pdf-dir", required=True, type=Path, help="directory of source PDFs")
