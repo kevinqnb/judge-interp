@@ -38,8 +38,8 @@ from pathlib import Path
 
 import build_vrdu_dataset as base_builder
 import yaml
-from build_vrdu_invalids import (field_kinds, fragment_rate, make_eq, matches_item, pair_ok, parse_date,
-                                 pick_fragment_neutral, read_base)
+from vrdu_common import (field_kinds, fragment_rate, make_eq, matches_item, pair_ok, parse_date, pick_fragment_neutral,
+                         read_base)
 
 LINE_FIELDS = base_builder.LINE_FIELDS
 SPLITS = ("train", "test")

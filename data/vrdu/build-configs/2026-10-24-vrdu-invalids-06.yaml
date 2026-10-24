@@ -1,7 +1,8 @@
 id: 2026-10-24-vrdu-invalids-06
 project: judge-interp
 description: >-
-  Simplified VRDU data. Line is built directly as random ordered field subsets of line items, each
+  Simplified VRDU data. Main (entity detection): inter_document and cross_type rows per achievable k,
+  each document's valid row the clean twin of its invalid rows. Line is built directly as random ordered field subsets of line items, each
   invalid sample paired with one clean twin (same item, same ordered fields): intra_document over
   (m, k) cells with k <= 3, and cross_item (k=2), equal size per cell, drawn round-robin over
   documents. Replaces the -05 line rows, manifest and subsets. -05 numbers do not carry over.
@@ -12,6 +13,7 @@ params:
   dates:
     # Every sample keeps parsed(from) <= parsed(to) whenever BOTH shown dates parse (valid twins
     # included). A null or an OCR fragment (e.g. "/08/20") has no position in time.
+    main_fields: [flight_from, flight_to]
     line_fields: [program_start_date, program_end_date]
     year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
 
@@ -21,6 +23,15 @@ params:
       name: [advertiser, agency, property, tv_address, product]
       date: [flight_from, flight_to, program_start_date, program_end_date]
       amount: [gross_amount, sub_amount]
+
+  # Read by build_vrdu_main.py. One invalid row per (document, error type, achievable k in k_range);
+  # inter_document values come from other documents of the split (pool_scope), cross_type values from
+  # other same-kind fields of the document. A null field may be filled (recorded as null_fill); a value is
+  # never nulled.
+  main:
+    k_range: {inter_document: [1, 9], cross_type: [1, 8]}
+    pool_scope: per_split
+    corrupt_from_null: true
 
   # Read by build_vrdu_line.py. Cells: intra_document (m, k) for m in m_range, 1 <= k <= min(m, max_k);
   # cross_item (m, 2) for m in m_range. Every cell has n_per_cell invalid samples plus their twins.
