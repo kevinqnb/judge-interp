@@ -1,0 +1,30 @@
+id: 2026-10-24-vrdu-invalids-06
+project: judge-interp
+description: >-
+  Simplified VRDU data. Line is built directly as random ordered field subsets of line items, each
+  invalid sample paired with one clean twin (same item, same ordered fields): intra_document over
+  (m, k) cells with k <= 3, and cross_item (k=2), equal size per cell, drawn round-robin over
+  documents. Replaces the -05 line rows, manifest and subsets. -05 numbers do not carry over.
+seed: 0
+params:
+  data_root: data/vrdu
+
+  dates:
+    # Every sample keeps parsed(from) <= parsed(to) whenever BOTH shown dates parse (valid twins
+    # included). A null or an OCR fragment (e.g. "/08/20") has no position in time.
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+
+  cross_type:
+    # The kinds define the equivalence key of the label rule (date, amount, folded text).
+    kinds:
+      name: [advertiser, agency, property, tv_address, product]
+      date: [flight_from, flight_to, program_start_date, program_end_date]
+      amount: [gross_amount, sub_amount]
+
+  # Read by build_vrdu_line.py. Cells: intra_document (m, k) for m in m_range, 1 <= k <= min(m, max_k);
+  # cross_item (m, 2) for m in m_range. Every cell has n_per_cell invalid samples plus their twins.
+  line:
+    m_range: [2, 5]
+    max_k: 3
+    n_per_cell: {train: 1250, test: 250}

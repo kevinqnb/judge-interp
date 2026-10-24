@@ -10,6 +10,7 @@
       "Edit(analysis/relation_detection.py)",
       "Edit(analysis/clef.py)",
       "Edit(data/vrdu/build_vrdu_invalids.py)",
+      "Edit(data/vrdu/build_vrdu_line.py)",
       "Edit(data/vrdu/build_vrdu_subsets.py)",
       "Edit(data/vrdu/subsets.py)"
     ]
