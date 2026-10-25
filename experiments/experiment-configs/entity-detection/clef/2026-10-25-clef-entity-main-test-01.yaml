@@ -1,0 +1,32 @@
+id: 2026-10-25-clef-entity-main-test-01
+project: judge-interp
+task: clef_entity_row
+description: >-
+  Clef-flash entity detection, main dataset (one row per document x error type x k, plus the clean row), test split: one record per row (OCR text + row), one noul question per non-null field, P(true) stored per question; every row (2224 rows). Over-length documents (> max_length) are excluded and recorded.
+  Efficiency is measured on every run (artifacts/efficiency.json, efficiency_*.npz, flat eff_* keys in metrics.json): per-record wall time (encode / forward / readout), input tokens, questions per record, peak GPU memory; output tokens are 0, Clef reads two logits per question.
+  The known-answer record is scored first (it is also the CUDA warmup) and the first 5 records are rescored and must be bitwise identical.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  model_config: experiments/model-configs/clef.yaml
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  split: test
+  error_types: [inter_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is a placeholder pending the GPU timing pilot (queue limit 48:00:00).
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "04:00:00"

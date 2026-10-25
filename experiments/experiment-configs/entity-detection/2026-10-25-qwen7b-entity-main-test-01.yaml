@@ -1,0 +1,35 @@
+id: 2026-10-25-qwen7b-entity-main-test-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Row-based entity detection, main dataset (one row per document x error type x k, plus the clean row), test split, Qwen2.5-7B-Instruct: one prompt per row (2224 prompts, every row),
+  representations read at each non-null entity's closing quote at the layers below, labelled per entity from field_errors.
+  Efficiency is measured on every run (artifacts/efficiency.json, efficiency_*.npz, flat eff_* keys in metrics.json): per-prompt wall time (prompt build / trace / readout / cleanup), input tokens, peak GPU memory, and per-layer bytes in memory and in the npz; no output tokens, nothing is decoded.
+  Expected: n_prompts = 2224; one read token id; same row set for both models (context_token_limit is shared).
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  split: test
+  # 28 blocks: 0 = token embedding (identical for every entity -> null control), 28 = post-final-norm.
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  error_types: [inter_document, cross_type]
+  # Every row: null = all rows of the stratum ("valid" + error types, or the 15 cells of a paired dataset).
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is a placeholder pending the GPU timing pilot (queue limit 48:00:00).
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "08:00:00"

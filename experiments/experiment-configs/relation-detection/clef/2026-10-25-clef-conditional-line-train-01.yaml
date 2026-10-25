@@ -1,0 +1,27 @@
+id: 2026-10-25-clef-conditional-line-train-01
+project: judge-interp
+task: clef_relation_conditional
+description: >-
+  Clef-flash relation detection (conditional): the first field of each sample is the primary entity and every other field a condition; one noul question per sample. Line dataset (-06 minimal pairs), train split, all 37500 samples (half valid). Samples file built by experiments/clef_samples.py. Over-length documents (> max_length) are excluded and recorded.
+  Efficiency is measured on every run (artifacts/efficiency.json, efficiency_*.npz, flat eff_* keys in metrics.json): per-record wall time (encode / forward / readout), input tokens, questions per record, peak GPU memory; output tokens are 0, Clef reads two logits per question.
+  The known-answer record is scored first (it is also the CUDA warmup) and the first 5 records are rescored and must be bitwise identical.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-train.json
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is a placeholder pending the GPU timing pilot (queue limit 48:00:00).
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "47:00:00"
