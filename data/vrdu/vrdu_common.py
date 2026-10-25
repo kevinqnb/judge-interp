@@ -1,14 +1,17 @@
-"""Helpers shared by the VRDU builders: dates, the equivalence key, the label rule, fragments, IO.
+"""Helpers shared by the VRDU builders and readers: dates, the equivalence key, the label rule,
+fragments, IO, and the stale-file check (``check_build``).
 
-Moved unchanged from ``build_vrdu_invalids.py`` (-05).
+All but ``check_build`` moved unchanged from ``build_vrdu_invalids.py`` (-05).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from decimal import Decimal
 from functools import cache
+from pathlib import Path
 
 import build_vrdu_dataset as base_builder
 
@@ -239,3 +242,29 @@ def read_base(path, fields, id_keys):
     ids = [tuple(row[k] for k in id_keys) for row in rows]
     assert len(ids) == len(set(ids)), f"{path.name}: duplicate identity keys"
     return rows
+
+
+BUILD_FILES = {"main": "main_build.json", "line": "line_build.json"}
+
+
+def check_build(data_root, rel):
+    """Refuse a split file that is not the one its build file recorded.
+
+    Args:
+        data_root: the ``data/vrdu`` directory.
+        rel: the split file, relative to it (``"main/test.json"``, ``"line/train.json"``, ...).
+
+    Returns:
+        The build file's contents (``config_id``, ``config_snapshot``, ``sha256``, ...).
+
+    Raises:
+        AssertionError: no such build file, the file is not recorded in it, or its sha256 differs.
+    """
+    dataset = rel.split("/")[0]
+    build_path = Path(data_root) / BUILD_FILES[dataset]
+    assert build_path.is_file(), f"no build file {build_path}"
+    build = json.loads(build_path.read_text(encoding="utf-8"))
+    assert rel in build["sha256"], f"{rel} is not recorded in {build_path}"
+    sha = hashlib.sha256((Path(data_root) / rel).read_bytes()).hexdigest()
+    assert sha == build["sha256"][rel], f"{rel} is stale: sha256 differs from {build_path} (rebuild with {build['script']})"
+    return build

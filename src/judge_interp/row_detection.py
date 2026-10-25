@@ -38,7 +38,7 @@ import numpy as np
 import torch
 
 from judge_interp.dataset_spec import DatasetSpec
-from judge_interp.prompts import load_context, load_split, render_query, sub_seed
+from judge_interp.prompts import load_context, load_split, render_query, shown_fields, sub_seed
 from judge_interp.representationlm import RepresentationLM, to_npz_array
 
 _SOURCE_SCOPES = ("other_document", "same_document")
@@ -50,8 +50,10 @@ READ_TOKEN = _PAD + '"\n'  # the one token every entity is read at: pad, closing
 SPAN_META_KEYS = (
     "dataset", "row_ordinal", "line_index", "row_error_type", "row_k", "field", "field_position",
     "value", "label_valid", "field_error_type", "source_scope", "source_dataset", "source_field",
-    "source_line_index", "exchanged_with",
+    "source_line_index", "exchanged_with", "pair_id", "cell",
 )
+# Error types whose same-document sources record the swap partner (``exchanged_with``).
+_EXCHANGE_TYPES = ("cross_type", "cross_item")
 # Per-span columns the model side adds.
 _MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "prompt_n_tokens")
 
@@ -75,10 +77,16 @@ def check_row(row: dict, spec: DatasetSpec) -> None:
 
     Raises:
         AssertionError: the label fields disagree, a corrupted field has a null value,
-            or a ``source`` entry is malformed for its scope.
+            a ``source`` entry is malformed for its scope, or (ordered / paired datasets) the
+            ``fields``, ``m`` or ``cell`` keys are missing or inconsistent.
     """
     fields = list(spec.fields)
     where = f"{row['document_id']!r}/{row_index(row, spec)}"
+    shown = shown_fields(row, spec)
+    if spec.ordered_fields:
+        assert row["m"] == len(shown), f"{where}: m {row['m']!r} != {len(shown)} shown fields"
+    if spec.pair_key is not None:
+        assert isinstance(row[spec.pair_key], str) and isinstance(row["cell"], str), f"{where}: pair id / cell"
     fe = row["field_errors"]
     assert list(fe) == fields, f"{where}: field_errors keys {list(fe)} != {fields}"
     bad = [f for f in fields if fe[f] is not None]
@@ -102,7 +110,7 @@ def check_row(row: dict, spec: DatasetSpec) -> None:
         assert isinstance(src.get("null_fill"), bool), f"{where}/{f}: source null_fill {src.get('null_fill')!r}"
         if src["scope"] == "same_document":
             need = {"scope", "null_fill", "dataset", "field", "line_index"}
-            if row["error_type"] == "cross_type":
+            if row["error_type"] in _EXCHANGE_TYPES:
                 need.add("exchanged_with")
             assert set(src) == need, f"{where}/{f}: source keys {sorted(src)}"
             assert isinstance(src["dataset"], str) and isinstance(src["field"], str), f"{where}/{f}"
@@ -153,13 +161,13 @@ def render_row(row: dict, spec: DatasetSpec) -> dict:
 
     Returns:
         ``{"text": str, "spans": [(field, char_start, char_end), ...]}``: one span per
-        non-null field in canonical order, covering exactly the closing ``"``
+        non-null field in ``prompts.shown_fields`` order, covering exactly the closing ``"``
         (offsets into ``text``, exclusive end).
     """
     lines: list[str] = []
     spans: list[tuple[str, int, int]] = []
     offset = 0
-    shown = [f for f in spec.fields if row[f] is not None]
+    shown = shown_fields(row, spec)
     for f in shown:
         v = row[f]
         assert isinstance(v, str), f"{f}: non-str value {v!r}"
@@ -185,54 +193,70 @@ def render_row(row: dict, spec: DatasetSpec) -> dict:
 # Item building
 
 
-def _stratum(row: dict) -> str:
-    """Stratum name of a row: ``"valid"`` or its error type."""
+def _stratum(row: dict, spec: DatasetSpec) -> str:
+    """Stratum name of a row: its ``cell`` for a paired dataset, else ``"valid"`` or its error type."""
+    if spec.pair_key is not None:
+        return row["cell"]
     return "valid" if row["valid"] else row["error_type"]
 
 
-def _sort_index(row: dict, spec: DatasetSpec) -> int:
-    """Sort key for a row within its document (constant when a document has one row)."""
+def _sort_key(row: dict, spec: DatasetSpec) -> tuple:
+    """Total order of rows: document, index within it, stratum, k (then sample id for a paired dataset)."""
     idx = row_index(row, spec)
-    return -1 if idx is None else idx
+    key = (row["document_id"], -1 if idx is None else idx, _stratum(row, spec), row["k"])
+    return key if spec.pair_key is None else (*key, row["sample_id"])
 
 
 def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
     """Draw a stratified subset of rows.
 
-    Strata are ``"valid"`` plus each error type present in ``rows``.
+    Strata are ``"valid"`` plus each error type present in ``rows``; for a paired dataset
+    (``spec.pair_key``) they are the ``cell`` values present, and the draw is by pair: a
+    count is a number of pairs, and both rows of a drawn pair are kept.
 
     Args:
         rows: rows from ``prompts.load_split``.
         spec: the dataset; its ``name`` seeds the per-stratum draw.
         split: ``"train"`` or ``"test"``; seeds the per-stratum draw.
-        rows_per_stratum: stratum name -> number of rows to draw (``None`` takes all);
+        rows_per_stratum: stratum name -> number of rows (pairs) to draw (``None`` takes all);
             keys must equal the strata present exactly.
         seed: run seed.
 
     Returns:
-        The drawn rows, sorted by ``(document_id, line_index, stratum, k)``.
+        The drawn rows, in ``_sort_key`` order.
 
     Raises:
         ValueError: key mismatch, a count that is not ``None`` or an int >= 1, or a
             stratum smaller than its requested count.
     """
-    strata = sorted({_stratum(r) for r in rows})
+    units: dict[str, list[list[dict]]] = {}   # stratum -> draw units (a row, or the two rows of a pair)
+    if spec.pair_key is None:
+        for r in rows:
+            units.setdefault(_stratum(r, spec), []).append([r])
+    else:
+        pairs: dict[str, list[dict]] = {}
+        for r in rows:
+            pairs.setdefault(r[spec.pair_key], []).append(r)
+        for pid, members in pairs.items():
+            assert sorted(m["valid"] for m in members) == [False, True], f"pair {pid!r} is not one invalid + one valid row"
+            assert members[0]["cell"] == members[1]["cell"], f"pair {pid!r} spans two cells"
+            units.setdefault(members[0]["cell"], []).append(sorted(members, key=lambda m: _sort_key(m, spec)))
+    strata = sorted(units)
     if sorted(rows_per_stratum) != strata:
         raise ValueError(f"rows_per_stratum keys {sorted(rows_per_stratum)} != strata present {strata}")
     chosen: list[dict] = []
     for s in strata:
-        pool = sorted((r for r in rows if _stratum(r) == s),
-                      key=lambda r: (r["document_id"], _sort_index(r, spec), r["k"]))
+        pool = sorted(units[s], key=lambda u: _sort_key(u[0], spec))
         n = rows_per_stratum[s]
         if n is None:
-            chosen.extend(pool)
+            chosen.extend(r for u in pool for r in u)
             continue
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
             raise ValueError(f"rows_per_stratum[{s!r}] must be null or an int >= 1, got {n!r}")
         if n > len(pool):
             raise ValueError(f"stratum {s!r}: {n} rows requested but only {len(pool)} available")
-        chosen.extend(random.Random(sub_seed(seed, spec.name, split, s)).sample(pool, n))
-    return sorted(chosen, key=lambda r: (r["document_id"], _sort_index(r, spec), _stratum(r), r["k"]))
+        chosen.extend(r for u in random.Random(sub_seed(seed, spec.name, split, s)).sample(pool, n) for r in u)
+    return sorted(chosen, key=lambda r: _sort_key(r, spec))
 
 
 def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer, instructions: str) -> list[dict]:
@@ -303,6 +327,8 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
                 "label_valid": entry is None,
                 "field_error_type": "" if entry is None else entry["error_type"],
                 **_source_columns(entry),
+                "pair_id": "" if spec.pair_key is None else r[spec.pair_key],
+                "cell": "" if spec.pair_key is None else r["cell"],
             })
         assert spans, f"{doc_id!r}: row with no non-null field"
         items.append({

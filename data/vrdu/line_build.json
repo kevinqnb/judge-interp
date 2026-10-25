@@ -1,0 +1,627 @@
+{
+ "generated_at": "2026-10-25T12:15:02.964178+00:00",
+ "python": "3.12.5",
+ "script": "data/vrdu/build_vrdu_line.py",
+ "config_id": "2026-10-24-vrdu-invalids-06",
+ "config_snapshot": {
+  "id": "2026-10-24-vrdu-invalids-06",
+  "project": "judge-interp",
+  "description": "Simplified VRDU data. Main (entity detection): inter_document and cross_type rows per achievable k, each document's valid row the clean twin of its invalid rows. Line is built directly as random ordered field subsets of line items, each invalid sample paired with one clean twin (same item, same ordered fields): intra_document over (m, k) cells with k <= 3, and cross_item (k=2), equal size per cell, drawn round-robin over documents. Replaces the -05 line rows, manifest and subsets. -05 numbers do not carry over.",
+  "seed": 0,
+  "params": {
+   "data_root": "data/vrdu",
+   "dates": {
+    "main_fields": [
+     "flight_from",
+     "flight_to"
+    ],
+    "line_fields": [
+     "program_start_date",
+     "program_end_date"
+    ],
+    "year_pivot": 50
+   },
+   "cross_type": {
+    "kinds": {
+     "name": [
+      "advertiser",
+      "agency",
+      "property",
+      "tv_address",
+      "product"
+     ],
+     "date": [
+      "flight_from",
+      "flight_to",
+      "program_start_date",
+      "program_end_date"
+     ],
+     "amount": [
+      "gross_amount",
+      "sub_amount"
+     ]
+    }
+   },
+   "main": {
+    "k_range": {
+     "inter_document": [
+      1,
+      9
+     ],
+     "cross_type": [
+      1,
+      8
+     ]
+    },
+    "pool_scope": "per_split",
+    "corrupt_from_null": true
+   },
+   "line": {
+    "m_range": [
+     2,
+     5
+    ],
+    "max_k": 3,
+    "n_per_cell": {
+     "train": 1250,
+     "test": 250
+    }
+   }
+  }
+ },
+ "cells": [
+  "intra_document:m2:k1",
+  "intra_document:m2:k2",
+  "intra_document:m3:k1",
+  "intra_document:m3:k2",
+  "intra_document:m3:k3",
+  "intra_document:m4:k1",
+  "intra_document:m4:k2",
+  "intra_document:m4:k3",
+  "intra_document:m5:k1",
+  "intra_document:m5:k2",
+  "intra_document:m5:k3",
+  "cross_item:m2:k2",
+  "cross_item:m3:k2",
+  "cross_item:m4:k2",
+  "cross_item:m5:k2"
+ ],
+ "splits": {
+  "train": {
+   "fragment_target_rate": 0.20333805230608748,
+   "cells": {
+    "intra_document:m2:k1": {
+     "n_invalid": 1250,
+     "n_docs": 432,
+     "effective_docs": 427.1,
+     "eligible_items": 7037,
+     "eligible_docs": 432
+    },
+    "intra_document:m2:k2": {
+     "n_invalid": 1250,
+     "n_docs": 408,
+     "effective_docs": 399.4,
+     "eligible_items": 6479,
+     "eligible_docs": 408
+    },
+    "intra_document:m3:k1": {
+     "n_invalid": 1250,
+     "n_docs": 385,
+     "effective_docs": 375.4,
+     "eligible_items": 6353,
+     "eligible_docs": 385
+    },
+    "intra_document:m3:k2": {
+     "n_invalid": 1250,
+     "n_docs": 368,
+     "effective_docs": 358.5,
+     "eligible_items": 6241,
+     "eligible_docs": 368
+    },
+    "intra_document:m3:k3": {
+     "n_invalid": 1250,
+     "n_docs": 290,
+     "effective_docs": 281.0,
+     "eligible_items": 5115,
+     "eligible_docs": 290
+    },
+    "intra_document:m4:k1": {
+     "n_invalid": 1250,
+     "n_docs": 351,
+     "effective_docs": 341.6,
+     "eligible_items": 5620,
+     "eligible_docs": 351
+    },
+    "intra_document:m4:k2": {
+     "n_invalid": 1250,
+     "n_docs": 337,
+     "effective_docs": 330.2,
+     "eligible_items": 5549,
+     "eligible_docs": 337
+    },
+    "intra_document:m4:k3": {
+     "n_invalid": 1250,
+     "n_docs": 267,
+     "effective_docs": 260.1,
+     "eligible_items": 4638,
+     "eligible_docs": 267
+    },
+    "intra_document:m5:k1": {
+     "n_invalid": 1250,
+     "n_docs": 232,
+     "effective_docs": 223.7,
+     "eligible_items": 3970,
+     "eligible_docs": 232
+    },
+    "intra_document:m5:k2": {
+     "n_invalid": 1250,
+     "n_docs": 225,
+     "effective_docs": 217.6,
+     "eligible_items": 3929,
+     "eligible_docs": 225
+    },
+    "intra_document:m5:k3": {
+     "n_invalid": 1250,
+     "n_docs": 188,
+     "effective_docs": 183.9,
+     "eligible_items": 3648,
+     "eligible_docs": 188
+    },
+    "cross_item:m2:k2": {
+     "n_invalid": 1250,
+     "n_docs": 508,
+     "effective_docs": 480.2,
+     "eligible_items": 7500,
+     "eligible_docs": 508
+    },
+    "cross_item:m3:k2": {
+     "n_invalid": 1250,
+     "n_docs": 450,
+     "effective_docs": 435.0,
+     "eligible_items": 6796,
+     "eligible_docs": 450
+    },
+    "cross_item:m4:k2": {
+     "n_invalid": 1250,
+     "n_docs": 412,
+     "effective_docs": 394.4,
+     "eligible_items": 5980,
+     "eligible_docs": 412
+    },
+    "cross_item:m5:k2": {
+     "n_invalid": 1250,
+     "n_docs": 239,
+     "effective_docs": 226.0,
+     "eligible_items": 3977,
+     "eligible_docs": 239
+    }
+   },
+   "date_fragments": {
+    "cross_item:m2:k2": {
+     "invalid_fragment": 48,
+     "non_date_positions": 851,
+     "positions": 50,
+     "twin_fragment": 48
+    },
+    "cross_item:m3:k2": {
+     "invalid_fragment": 186,
+     "non_date_positions": 909,
+     "positions": 774,
+     "twin_fragment": 186
+    },
+    "cross_item:m4:k2": {
+     "invalid_fragment": 287,
+     "non_date_positions": 874,
+     "positions": 1346,
+     "twin_fragment": 287
+    },
+    "cross_item:m5:k2": {
+     "invalid_fragment": 332,
+     "non_date_positions": 825,
+     "positions": 1675,
+     "twin_fragment": 332
+    },
+    "intra_document:m2:k1": {
+     "invalid_fragment": 242,
+     "positions": 1148,
+     "twin_fragment": 248
+    },
+    "intra_document:m2:k2": {
+     "invalid_fragment": 213,
+     "positions": 982,
+     "twin_fragment": 217
+    },
+    "intra_document:m3:k1": {
+     "invalid_fragment": 356,
+     "positions": 1565,
+     "twin_fragment": 364
+    },
+    "intra_document:m3:k2": {
+     "invalid_fragment": 369,
+     "positions": 1589,
+     "twin_fragment": 372
+    },
+    "intra_document:m3:k3": {
+     "invalid_fragment": 446,
+     "positions": 1825,
+     "twin_fragment": 462
+    },
+    "intra_document:m4:k1": {
+     "invalid_fragment": 493,
+     "positions": 2132,
+     "twin_fragment": 498
+    },
+    "intra_document:m4:k2": {
+     "invalid_fragment": 502,
+     "positions": 2154,
+     "twin_fragment": 523
+    },
+    "intra_document:m4:k3": {
+     "invalid_fragment": 578,
+     "positions": 2124,
+     "twin_fragment": 601
+    },
+    "intra_document:m5:k1": {
+     "invalid_fragment": 484,
+     "positions": 2500,
+     "twin_fragment": 489
+    },
+    "intra_document:m5:k2": {
+     "invalid_fragment": 485,
+     "positions": 2500,
+     "twin_fragment": 488
+    },
+    "intra_document:m5:k3": {
+     "invalid_fragment": 528,
+     "positions": 2500,
+     "twin_fragment": 540
+    }
+   },
+   "cross_item": {
+    "cross_item:m2:k2": {
+     "pairs": {
+      "channel~program_desc": 137,
+      "channel~program_end_date": 144,
+      "channel~program_start_date": 135,
+      "channel~sub_amount": 55,
+      "program_desc~program_end_date": 147,
+      "program_desc~program_start_date": 175,
+      "program_desc~sub_amount": 182,
+      "program_end_date~sub_amount": 89,
+      "program_start_date~program_end_date": 25,
+      "program_start_date~sub_amount": 161
+     },
+     "kind_mix": {
+      "cross_kind": 1225,
+      "same_kind": 25
+     }
+    },
+    "cross_item:m3:k2": {
+     "pairs": {
+      "channel~program_desc": 126,
+      "channel~program_end_date": 159,
+      "channel~program_start_date": 173,
+      "channel~sub_amount": 78,
+      "program_desc~program_end_date": 174,
+      "program_desc~program_start_date": 182,
+      "program_desc~sub_amount": 102,
+      "program_end_date~sub_amount": 107,
+      "program_start_date~program_end_date": 35,
+      "program_start_date~sub_amount": 114
+     },
+     "kind_mix": {
+      "cross_kind": 1215,
+      "same_kind": 35
+     }
+    },
+    "cross_item:m4:k2": {
+     "pairs": {
+      "channel~program_desc": 158,
+      "channel~program_end_date": 168,
+      "channel~program_start_date": 164,
+      "channel~sub_amount": 98,
+      "program_desc~program_end_date": 179,
+      "program_desc~program_start_date": 167,
+      "program_desc~sub_amount": 81,
+      "program_end_date~sub_amount": 98,
+      "program_start_date~program_end_date": 39,
+      "program_start_date~sub_amount": 98
+     },
+     "kind_mix": {
+      "cross_kind": 1211,
+      "same_kind": 39
+     }
+    },
+    "cross_item:m5:k2": {
+     "pairs": {
+      "channel~program_desc": 139,
+      "channel~program_end_date": 137,
+      "channel~program_start_date": 130,
+      "channel~sub_amount": 115,
+      "program_desc~program_end_date": 144,
+      "program_desc~program_start_date": 142,
+      "program_desc~sub_amount": 138,
+      "program_end_date~sub_amount": 119,
+      "program_start_date~program_end_date": 33,
+      "program_start_date~sub_amount": 153
+     },
+     "kind_mix": {
+      "cross_kind": 1217,
+      "same_kind": 33
+     }
+    }
+   }
+  },
+  "test": {
+   "fragment_target_rate": 0.21856406188020627,
+   "cells": {
+    "intra_document:m2:k1": {
+     "n_invalid": 250,
+     "n_docs": 96,
+     "effective_docs": 92.5,
+     "eligible_items": 1254,
+     "eligible_docs": 96
+    },
+    "intra_document:m2:k2": {
+     "n_invalid": 250,
+     "n_docs": 88,
+     "effective_docs": 85.4,
+     "eligible_items": 1151,
+     "eligible_docs": 88
+    },
+    "intra_document:m3:k1": {
+     "n_invalid": 250,
+     "n_docs": 85,
+     "effective_docs": 84.0,
+     "eligible_items": 1131,
+     "eligible_docs": 85
+    },
+    "intra_document:m3:k2": {
+     "n_invalid": 250,
+     "n_docs": 80,
+     "effective_docs": 78.9,
+     "eligible_items": 1115,
+     "eligible_docs": 80
+    },
+    "intra_document:m3:k3": {
+     "n_invalid": 250,
+     "n_docs": 60,
+     "effective_docs": 58.0,
+     "eligible_items": 964,
+     "eligible_docs": 60
+    },
+    "intra_document:m4:k1": {
+     "n_invalid": 250,
+     "n_docs": 77,
+     "effective_docs": 74.2,
+     "eligible_items": 1051,
+     "eligible_docs": 77
+    },
+    "intra_document:m4:k2": {
+     "n_invalid": 250,
+     "n_docs": 72,
+     "effective_docs": 69.8,
+     "eligible_items": 1033,
+     "eligible_docs": 72
+    },
+    "intra_document:m4:k3": {
+     "n_invalid": 250,
+     "n_docs": 54,
+     "effective_docs": 52.1,
+     "eligible_items": 916,
+     "eligible_docs": 54
+    },
+    "intra_document:m5:k1": {
+     "n_invalid": 250,
+     "n_docs": 55,
+     "effective_docs": 51.6,
+     "eligible_items": 829,
+     "eligible_docs": 55
+    },
+    "intra_document:m5:k2": {
+     "n_invalid": 250,
+     "n_docs": 51,
+     "effective_docs": 48.7,
+     "eligible_items": 819,
+     "eligible_docs": 51
+    },
+    "intra_document:m5:k3": {
+     "n_invalid": 250,
+     "n_docs": 42,
+     "effective_docs": 40.5,
+     "eligible_items": 784,
+     "eligible_docs": 42
+    },
+    "cross_item:m2:k2": {
+     "n_invalid": 250,
+     "n_docs": 126,
+     "effective_docs": 119.3,
+     "eligible_items": 1371,
+     "eligible_docs": 126
+    },
+    "cross_item:m3:k2": {
+     "n_invalid": 250,
+     "n_docs": 111,
+     "effective_docs": 102.5,
+     "eligible_items": 1237,
+     "eligible_docs": 111
+    },
+    "cross_item:m4:k2": {
+     "n_invalid": 250,
+     "n_docs": 101,
+     "effective_docs": 93.3,
+     "eligible_items": 1146,
+     "eligible_docs": 101
+    },
+    "cross_item:m5:k2": {
+     "n_invalid": 250,
+     "n_docs": 61,
+     "effective_docs": 54.3,
+     "eligible_items": 835,
+     "eligible_docs": 61
+    }
+   },
+   "date_fragments": {
+    "cross_item:m2:k2": {
+     "invalid_fragment": 5,
+     "non_date_positions": 164,
+     "positions": 8,
+     "twin_fragment": 5
+    },
+    "cross_item:m3:k2": {
+     "invalid_fragment": 19,
+     "non_date_positions": 178,
+     "positions": 148,
+     "twin_fragment": 19
+    },
+    "cross_item:m4:k2": {
+     "invalid_fragment": 41,
+     "non_date_positions": 174,
+     "positions": 258,
+     "twin_fragment": 41
+    },
+    "cross_item:m5:k2": {
+     "invalid_fragment": 59,
+     "non_date_positions": 168,
+     "positions": 332,
+     "twin_fragment": 59
+    },
+    "intra_document:m2:k1": {
+     "invalid_fragment": 39,
+     "positions": 217,
+     "twin_fragment": 38
+    },
+    "intra_document:m2:k2": {
+     "invalid_fragment": 38,
+     "positions": 196,
+     "twin_fragment": 44
+    },
+    "intra_document:m3:k1": {
+     "invalid_fragment": 46,
+     "positions": 323,
+     "twin_fragment": 51
+    },
+    "intra_document:m3:k2": {
+     "invalid_fragment": 43,
+     "positions": 312,
+     "twin_fragment": 47
+    },
+    "intra_document:m3:k3": {
+     "invalid_fragment": 51,
+     "positions": 347,
+     "twin_fragment": 62
+    },
+    "intra_document:m4:k1": {
+     "invalid_fragment": 72,
+     "positions": 413,
+     "twin_fragment": 76
+    },
+    "intra_document:m4:k2": {
+     "invalid_fragment": 65,
+     "positions": 421,
+     "twin_fragment": 70
+    },
+    "intra_document:m4:k3": {
+     "invalid_fragment": 82,
+     "positions": 417,
+     "twin_fragment": 92
+    },
+    "intra_document:m5:k1": {
+     "invalid_fragment": 73,
+     "positions": 500,
+     "twin_fragment": 78
+    },
+    "intra_document:m5:k2": {
+     "invalid_fragment": 73,
+     "positions": 500,
+     "twin_fragment": 74
+    },
+    "intra_document:m5:k3": {
+     "invalid_fragment": 74,
+     "positions": 500,
+     "twin_fragment": 83
+    }
+   },
+   "cross_item": {
+    "cross_item:m2:k2": {
+     "pairs": {
+      "channel~program_desc": 31,
+      "channel~program_end_date": 23,
+      "channel~program_start_date": 34,
+      "channel~sub_amount": 17,
+      "program_desc~program_end_date": 27,
+      "program_desc~program_start_date": 30,
+      "program_desc~sub_amount": 34,
+      "program_end_date~sub_amount": 14,
+      "program_start_date~program_end_date": 4,
+      "program_start_date~sub_amount": 36
+     },
+     "kind_mix": {
+      "cross_kind": 246,
+      "same_kind": 4
+     }
+    },
+    "cross_item:m3:k2": {
+     "pairs": {
+      "channel~program_desc": 34,
+      "channel~program_end_date": 25,
+      "channel~program_start_date": 38,
+      "channel~sub_amount": 9,
+      "program_desc~program_end_date": 43,
+      "program_desc~program_start_date": 39,
+      "program_desc~sub_amount": 24,
+      "program_end_date~sub_amount": 12,
+      "program_start_date~program_end_date": 5,
+      "program_start_date~sub_amount": 21
+     },
+     "kind_mix": {
+      "cross_kind": 245,
+      "same_kind": 5
+     }
+    },
+    "cross_item:m4:k2": {
+     "pairs": {
+      "channel~program_desc": 37,
+      "channel~program_end_date": 29,
+      "channel~program_start_date": 25,
+      "channel~sub_amount": 16,
+      "program_desc~program_end_date": 34,
+      "program_desc~program_start_date": 42,
+      "program_desc~sub_amount": 18,
+      "program_end_date~sub_amount": 18,
+      "program_start_date~program_end_date": 5,
+      "program_start_date~sub_amount": 26
+     },
+     "kind_mix": {
+      "cross_kind": 245,
+      "same_kind": 5
+     }
+    },
+    "cross_item:m5:k2": {
+     "pairs": {
+      "channel~program_desc": 22,
+      "channel~program_end_date": 28,
+      "channel~program_start_date": 27,
+      "channel~sub_amount": 28,
+      "program_desc~program_end_date": 32,
+      "program_desc~program_start_date": 23,
+      "program_desc~sub_amount": 24,
+      "program_end_date~sub_amount": 37,
+      "program_start_date~program_end_date": 8,
+      "program_start_date~sub_amount": 21
+     },
+     "kind_mix": {
+      "cross_kind": 242,
+      "same_kind": 8
+     }
+    }
+   }
+  }
+ },
+ "sha256": {
+  "line/train.json": "8fe0255a4242d8b640195a79d7d83a0e765ba11a655ac1959eb5f01888d25528",
+  "line/test.json": "04a9abe83e5da7032c50724e3208ad16dc61a7c371f57e417a2386a1dcd21dbf"
+ },
+ "git_sha": "433de9c17bb31805ae32c41636a5291ca08f04ad",
+ "git_dirty": true
+}

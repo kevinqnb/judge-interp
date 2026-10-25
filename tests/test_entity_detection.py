@@ -25,22 +25,24 @@ from dataset_specs import LINE, MAIN, SPECS
 FIXTURE = "tests/fixtures/entity_detection_mini"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALL_MAIN = ["inter_document", "cross_type"]
-ALL_LINE = ["inter_document", "intra_document", "cross_type"]
+ALL_LINE = ["intra_document", "cross_item"]
+# The line fixture (tests/fixtures/make_line_fixtures.py) has one minimal pair per cell.
+LINE_CELLS = ["cross_item:m2:k2", "cross_item:m3:k2", "intra_document:m2:k1", "intra_document:m5:k2"]
 
 
 def _rows(dataset):
-    return load_split(REPO_ROOT / FIXTURE, SPECS[dataset], "train", ["inter_document", "cross_type"])
+    return load_split(REPO_ROOT / FIXTURE, SPECS[dataset], "train", ALL_MAIN if dataset == "main" else ALL_LINE)
 
 
 def _params(dataset, **kw):
     p = dict(
         data_root=FIXTURE, split="train",
-        error_types=["inter_document", "cross_type"],
+        error_types=ALL_MAIN,
         rows_per_stratum={"valid": None, "inter_document": None, "cross_type": None},
         context_token_limit=None,
     )
     if dataset == "line":
-        p["rows_per_stratum"] = {"valid": None, "cross_type": None}
+        p["error_types"], p["rows_per_stratum"] = ALL_LINE, dict.fromkeys(LINE_CELLS)
     p.update(kw)
     return p
 
@@ -86,10 +88,10 @@ def test_render_row_differs_from_render_query_only_by_padding():
 
 
 def test_line_prompt_has_no_main_fields():
-    # fixture line rows: row 1 has a null program_desc, which is omitted -> 4 lines instead of 5
-    for r, n_newlines in zip(_rows("line"), [4, 3, 4, 4]):
+    # a line row shows only its own `fields` (2, 3 or 5 here), in that order
+    for r in _rows("line"):
         text = render_query(r, LINE)
-        assert text.count("\n") == n_newlines
+        assert [ln.split(":", 1)[0] for ln in text.split("\n")] == r["fields"]
         assert "advertiser" not in text and "gross_amount" not in text and "null" not in text
 
 
@@ -121,13 +123,13 @@ def test_labels_from_field_errors():
 
 def test_line_items_and_null_field():
     items = er.build_items(LINE, _params("line"), 0, REPO_ROOT)
-    assert len(items) == 4
+    assert len(items) == 8
     n_spans = sorted(len(it["spans"]) for it in items)
-    assert n_spans == [4, 5, 5, 5]  # L1 has program_desc null
-    cross = [it for it in items if it["spans"][0]["row_error_type"] == "cross_type"][0]
+    assert n_spans == [2, 2, 2, 2, 3, 3, 5, 5]  # each pair: twin and invalid row show the same fields
+    cross = [it for it in items if it["spans"][0]["row_error_type"] == "cross_item" and it["spans"][0]["cell"] == "cross_item:m3:k2"][0]
     bad = [s for s in cross["spans"] if not s["label_valid"]]
     assert [(s["field"], s["source_field"], s["source_line_index"], s["exchanged_with"], s["line_index"])
-            for s in bad] == [("program_end_date", "program_start_date", 0, "", 0)]
+            for s in bad] == [("sub_amount", "channel", 0, "channel", 0), ("channel", "sub_amount", 0, "sub_amount", 0)]
 
 
 def test_check_row_rejects_inconsistent_labels():
@@ -148,17 +150,17 @@ def test_check_row_rejects_inconsistent_labels():
 
 
 def test_stratified_subset_determinism_and_errors():
-    rows = _rows("line")
-    p = {"valid": 2, "cross_type": 1}
-    a = er.select_rows(rows, LINE, "train", p, 0)
-    assert a == er.select_rows(rows, LINE, "train", p, 0)
-    assert len(a) == 3 and sum(not r["valid"] for r in a) == 1
+    rows = _rows("main")
+    p = {"valid": 2, "inter_document": 1, "cross_type": 1}
+    a = er.select_rows(rows, MAIN, "train", p, 0)
+    assert a == er.select_rows(rows, MAIN, "train", p, 0)
+    assert len(a) == 4 and sum(not r["valid"] for r in a) == 2
     with pytest.raises(ValueError, match="requested but only"):
-        er.select_rows(rows, LINE, "train", {"valid": 4, "cross_type": 1}, 0)
+        er.select_rows(rows, MAIN, "train", {**p, "valid": 3}, 0)
     with pytest.raises(ValueError, match="strata present"):
-        er.select_rows(rows, LINE, "train", {"valid": 1}, 0)
+        er.select_rows(rows, MAIN, "train", {"valid": 1}, 0)
     with pytest.raises(ValueError, match="int >= 1"):
-        er.select_rows(rows, LINE, "train", {"valid": 0, "cross_type": 1}, 0)
+        er.select_rows(rows, MAIN, "train", {**p, "valid": 0}, 0)
 
 
 def test_instructions_name_every_field_of_the_dataset_only():

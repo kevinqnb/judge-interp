@@ -125,7 +125,8 @@ def test_oneshot_units_hand_worked():
     assert [u["invalid_fields"] for u in units] == [[], ["channel"], [], ["program_end_date", "sub_amount"]]
     assert units[0]["fields"] == ["sub_amount", "channel", "program_desc"]  # order given, not canonical
     assert units[0]["record"]["state"].split("## EXTRACTED RECORD\n")[1] == 'sub_amount: "$100.00"\nchannel: "7"\nprogram_desc: "Movie"'
-    assert [u["error_type"] for u in units] == ["", "inter_document", "", "intra_document"]
+    assert [u["error_type"] for u in units] == ["", "intra_document", "", "intra_document"]
+    assert [u["pair_id"] for u in units] == ["p5", "p6", "p7", "p8"] and units[2]["cell"] == "cross_item:m2:k2"
 
 
 def test_conditional_question_names_primary_and_lists_conditions():
@@ -171,6 +172,8 @@ def test_load_samples_refuses_malformed_files(tmp_path):
     bad(lambda d: d[0]["entities"][0].update(valid="yes"), "types")
     bad(lambda d: d[0]["entities"].pop() and d[0]["entities"].pop(), "at least two")
     bad(lambda d: d[0].pop("error_type"), "keys")
+    bad(lambda d: d[0].pop("pair_id"), "keys")
+    bad(lambda d: d[0].update(cell=None), "must be strings")
     bad(lambda d: d.clear(), "non-empty")
     cond = SAMPLES / "conditional.json"
     with pytest.raises(AssertionError, match="keys"):  # a conditional file under the one-shot task
@@ -186,6 +189,7 @@ def test_sample_columns_hand_worked():
                for i, l in enumerate([2.0, -1.0, 0.5, 3.0])]
     cols = clef._sample_columns(units, results)
     assert list(cols["sample_id"]) == ["c1", "c2", "c3", "c4"]
+    assert list(cols["pair_id"]) == ["p1", "p2", "p3", "p4"] and list(cols["cell"])[3] == "cross_item:m3:k2"
     assert list(cols["label_valid"]) == [True, False, False, True]
     assert list(cols["primary_valid"]) == [True, False, True, True]
     assert list(cols["invalid_conditions"]) == ["", "", "program_end_date", ""]

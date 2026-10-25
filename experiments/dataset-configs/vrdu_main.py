@@ -41,4 +41,6 @@ DATASET = DatasetSpec(
     split_path="vrdu/main/{split}.json",
     context_path="vrdu/ocr/{document_id}.txt",
     supports_relation=False,
+    ordered_fields=False,
+    pair_key=None,
 )

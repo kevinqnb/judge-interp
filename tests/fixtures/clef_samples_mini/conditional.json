@@ -3,6 +3,8 @@
   "sample_id": "c1",
   "document_id": "doc-a",
   "error_type": "",
+  "pair_id": "p1",
+  "cell": "intra_document:m3:k1",
   "primary": {
    "field": "program_start_date",
    "value": "01/05/20",
@@ -25,6 +27,8 @@
   "sample_id": "c2",
   "document_id": "doc-a",
   "error_type": "intra_document",
+  "pair_id": "p2",
+  "cell": "intra_document:m3:k1",
   "primary": {
    "field": "sub_amount",
    "value": "$250.00",
@@ -46,7 +50,9 @@
  {
   "sample_id": "c3",
   "document_id": "doc-a",
-  "error_type": "cross_type",
+  "error_type": "intra_document",
+  "pair_id": "p3",
+  "cell": "intra_document:m3:k1",
   "primary": {
    "field": "channel",
    "value": "7",
@@ -69,6 +75,8 @@
   "sample_id": "c4",
   "document_id": "doc-b",
   "error_type": "",
+  "pair_id": "p4",
+  "cell": "cross_item:m3:k2",
   "primary": {
    "field": "program_desc",
    "value": "Weather",

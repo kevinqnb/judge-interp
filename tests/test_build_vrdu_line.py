@@ -140,9 +140,10 @@ def test_twins_match_their_invalid_sample_and_item():
     assert len(pairs) == 18
     for p in pairs.values():
         bad, good = p[False], p[True]
-        assert bad["fields"] == good["fields"] and list(good["values"]) == good["fields"]
+        assert bad["fields"] == good["fields"]
         r = base[(good["document_id"], good["line_index"])]
-        assert good["values"] == {f: r[f] for f in good["fields"]}
+        assert {f: good[f] for f in b.LINE_FIELDS} == {f: r[f] if f in good["fields"] else None for f in b.LINE_FIELDS}
+        assert all(bad[f] is None for f in b.LINE_FIELDS if f not in bad["fields"])
         assert 1 <= bad["k"] == len(bad["invalid_fields"]) <= bad["m"] == len(bad["fields"])   # k counted within the subset
 
 
@@ -167,7 +168,7 @@ def test_verify_catches_tampering():
     base, cells = make_base("test"), b.make_cells(LINE["m_range"], LINE["max_k"])
     b.verify_split(samples, base, cells, 3, EQ, DATES, PIVOT)
     twin = next(s for s in samples if s["valid"])
-    twin["values"][twin["fields"][0]] = "tampered"
+    twin[twin["fields"][0]] = "tampered"
     with pytest.raises(AssertionError):
         b.verify_split(samples, base, cells, 3, EQ, DATES, PIVOT)
     with pytest.raises(AssertionError):

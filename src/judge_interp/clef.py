@@ -252,9 +252,10 @@ def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str])
 # Samples (conditional and one-shot tasks)
 
 ENTITY_KEYS = {"field", "value", "valid"}
+_CARRIED_KEYS = ("error_type", "pair_id", "cell")   # opaque strings carried through to the predictions
 SAMPLE_KEYS = {
-    "clef_relation_conditional": {"sample_id", "document_id", "error_type", "primary", "conditions"},
-    "clef_record_oneshot": {"sample_id", "document_id", "error_type", "entities"},
+    "clef_relation_conditional": {"sample_id", "document_id", *_CARRIED_KEYS, "primary", "conditions"},
+    "clef_record_oneshot": {"sample_id", "document_id", *_CARRIED_KEYS, "entities"},
 }
 
 
@@ -268,7 +269,8 @@ def load_samples(path: Path, spec: DatasetSpec, task: str) -> list[dict]:
     """Read and validate a samples file.
 
     The file is a JSON list. Every sample has ``sample_id`` (unique), ``document_id``,
-    ``error_type`` (``""`` if none; carried through to the predictions) and entities, each
+    ``error_type``, ``pair_id`` and ``cell`` (strings, ``""`` if none; carried through to the
+    predictions for stratification) and entities, each
     ``{"field", "value", "valid"}`` (``valid``: whether the value is correct for its field in the
     document, the ground truth). A conditional sample has ``primary`` (one entity) and
     ``conditions`` (a non-empty list of entities); a one-shot sample has ``entities`` (a list of at
@@ -294,7 +296,8 @@ def load_samples(path: Path, spec: DatasetSpec, task: str) -> list[dict]:
     for s in samples:
         where = s["sample_id"]
         assert set(s) == SAMPLE_KEYS[task], f"{where}: keys {sorted(s)} != {sorted(SAMPLE_KEYS[task])}"
-        assert isinstance(s["document_id"], str) and s["document_id"] and isinstance(s["error_type"], str), where
+        assert isinstance(s["document_id"], str) and s["document_id"], where
+        assert all(isinstance(s[k], str) for k in _CARRIED_KEYS), f"{where}: {_CARRIED_KEYS} must be strings"
         ents = [s["primary"], *s["conditions"]] if task == "clef_relation_conditional" else s["entities"]
         assert isinstance(ents, list) and len(ents) >= 2, f"{where}: needs at least two entities"
         for e in ents:
@@ -310,7 +313,7 @@ def _sample_unit(s: dict, ents: list[dict], state: str, question: dict) -> dict:
     return {
         "sample_id": s["sample_id"],
         "doc_id": s["document_id"],
-        "error_type": s["error_type"],
+        **{k: s[k] for k in _CARRIED_KEYS},
         "fields": [e["field"] for e in ents],
         "invalid_fields": bad,
         "label_valid": not bad,
@@ -630,7 +633,7 @@ def _sample_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
         results: ``_score_units`` output, parallel to ``units``.
 
     Returns:
-        Arrays ``sample_id``, ``doc_ids``, ``error_type``, ``size``, ``fields`` (``|``-joined, in
+        Arrays ``sample_id``, ``doc_ids``, ``error_type``, ``pair_id``, ``cell``, ``size``, ``fields`` (``|``-joined, in
         the order shown), ``invalid_fields``, ``n_invalid_fields``, ``label_valid``,
         ``context_doc``, ``p_true``, ``logit_true``, ``logit_false`` and ``n_tokens``; for
         conditional units also ``primary``, ``conditions``, ``primary_valid`` and ``invalid_conditions``.
@@ -640,7 +643,8 @@ def _sample_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
         assert len(r["p_true"]) == 1
         cols["sample_id"].append(u["sample_id"])
         cols["doc_ids"].append(u["doc_id"])
-        cols["error_type"].append(u["error_type"])
+        for k in _CARRIED_KEYS:
+            cols[k].append(u[k])
         cols["size"].append(len(u["fields"]))
         cols["fields"].append("|".join(u["fields"]))
         cols["invalid_fields"].append("|".join(u["invalid_fields"]))

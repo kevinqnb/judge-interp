@@ -23,7 +23,7 @@ from judge_interp.dataset_spec import DatasetSpec
 # of the dataset's error types on invalid ones; ``field_errors`` labels each field.
 NON_FIELD_KEYS: frozenset[str] = frozenset(
     {"document_id", "line_index", "valid", "k", "num_invalid_fields", "invalid_fields",
-     "error_type", "field_errors"}
+     "error_type", "field_errors", "fields", "m", "cell", "pair_id", "sample_id"}
 )
 
 LAST_LAYER_TOKEN = "last"
@@ -56,13 +56,14 @@ def load_split(data_root: str | Path, spec: DatasetSpec, split: str, error_types
 
     Returns:
         The rows of ``<data_root>/<spec.split_path>`` that are valid or whose
-        ``error_type`` is in ``error_types``.
+        ``error_type`` is in ``error_types``. For a paired dataset (``spec.pair_key``), both
+        rows of every pair whose invalid row has an ``error_type`` in ``error_types``.
 
     Raises:
         ValueError: unknown split or error type, or duplicate error types.
         FileNotFoundError: the split file does not exist.
-        AssertionError: the file is empty, has a row with an unrecognised error type, or
-            has no valid row after filtering.
+        AssertionError: the file is empty, has a row with an unrecognised error type, has
+            a pair that is not one invalid + one valid row, or has no valid row after filtering.
     """
     if split not in ("train", "test"):
         raise ValueError(f"split must be 'train' or 'test', got {split!r}")
@@ -79,12 +80,45 @@ def load_split(data_root: str | Path, spec: DatasetSpec, split: str, error_types
     with open(path) as f:
         rows = json.load(f)
     assert isinstance(rows, list) and rows, f"{path}: expected a non-empty list"
-    kept = [r for r in rows if r["valid"] or r["error_type"] in error_types]
     assert all(r["error_type"] in spec.error_types for r in rows if not r["valid"]), (
         f"{path}: invalid row with an unrecognised error_type"
     )
+    if spec.pair_key is None:
+        kept = [r for r in rows if r["valid"] or r["error_type"] in error_types]
+    else:
+        # A pair is kept or dropped whole, by its invalid row's error type.
+        pairs: dict[str, list[dict]] = {}
+        for r in rows:
+            pairs.setdefault(r[spec.pair_key], []).append(r)
+        for pid, members in pairs.items():
+            assert sorted(m["valid"] for m in members) == [False, True], f"{path}: pair {pid!r} is not one invalid + one valid row"
+        keep = {pid for pid, members in pairs.items() if next(m for m in members if not m["valid"])["error_type"] in error_types}
+        kept = [r for r in rows if r[spec.pair_key] in keep]
     assert any(r["valid"] for r in kept), f"{path}: no valid rows"
     return kept
+
+
+def shown_fields(row: dict, spec: DatasetSpec) -> list[str]:
+    """The fields of a row shown to the judge, in the order shown.
+
+    Args:
+        row: a dataset row.
+        spec: the dataset; ``ordered_fields`` says whether the row lists its own order.
+
+    Returns:
+        ``row["fields"]`` if ``spec.ordered_fields``, else the non-null fields in ``spec.fields`` order.
+
+    Raises:
+        AssertionError: an ordered row whose ``fields`` are not exactly its non-null fields.
+    """
+    non_null = [f for f in spec.fields if row[f] is not None]
+    if not spec.ordered_fields:
+        return non_null
+    order = row["fields"]
+    assert isinstance(order, list) and len(set(order)) == len(order) and set(order) == set(non_null), (
+        f"{row['document_id']!r}: fields {order!r} are not exactly the non-null fields {non_null!r}"
+    )
+    return list(order)
 
 
 def load_context(data_root: str | Path, spec: DatasetSpec, document_id: str) -> str:
@@ -113,7 +147,7 @@ def load_context(data_root: str | Path, spec: DatasetSpec, document_id: str) -> 
 def render_query(row: dict, spec: DatasetSpec) -> str:
     """Render a row as the ``## EXTRACTED RECORD:`` block.
 
-    Emits only the non-null fields of ``spec``, in canonical order, one ``field: <json>``
+    Emits only the non-null fields of ``spec``, in ``shown_fields`` order, one ``field: <json>``
     line each; a null field is omitted. JSON encoding keeps a value that contains a
     newline on one line.
 
@@ -134,7 +168,7 @@ def render_query(row: dict, spec: DatasetSpec) -> str:
     missing = [f for f in fields if f not in row]
     assert not missing, f"row is missing whitelisted field(s): {missing}"
 
-    lines = [f"{f}: {json.dumps(row[f])}" for f in fields if row[f] is not None]
+    lines = [f"{f}: {json.dumps(row[f])}" for f in shown_fields(row, spec)]
     return "\n".join(lines)
 
 

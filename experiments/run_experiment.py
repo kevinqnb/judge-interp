@@ -53,10 +53,13 @@ config loading, snapshots, the manifest (``status`` is ``success`` or ``failed``
     verify_read_point  bool; run ``RepresentationLM.verify_read_point`` on the first
                        item before judging
     error_types        invalid-row error types to include alongside every valid row
-                       (members of the dataset config's ``error_types``)
+                       (members of the dataset config's ``error_types``); for a paired
+                       dataset (line), the pairs whose invalid row has one of these types
     rows_per_stratum   {"valid": n, "<error_type>": n, ...}; keys must equal "valid" +
                        ``error_types``; n is null (all rows) or an int >= 1, and a
                        stratum smaller than n is a hard error. Drawn with ``seed``.
+                       For a paired dataset: {"<cell>": n, ...} over the cells present,
+                       n pairs per cell (both rows of a pair are kept).
 
 ``params`` of the three Clef tasks: ``data_root`` and ``dataset_config`` as above, plus
     model_config       repo-relative path of a model config

@@ -13,6 +13,8 @@ def test_vrdu_specs_match_the_build_schema():
     assert list(MAIN.fields) == schema.MAIN_FIELDS and list(LINE.fields) == schema.LINE_FIELDS
     assert (MAIN.supports_relation, LINE.supports_relation) == (False, True)
     assert MAIN.row_index_key is None and LINE.row_index_key == "line_index"
+    assert (MAIN.ordered_fields, MAIN.pair_key) == (False, None) and (LINE.ordered_fields, LINE.pair_key) == (True, "pair_id")
+    assert LINE.error_types == ("intra_document", "cross_item") and MAIN.error_types == ("inter_document", "cross_type")
 
 
 def test_require_relation():
@@ -30,6 +32,8 @@ def test_require_relation():
     {"context_path": "vrdu/ocr/doc.txt"},  # no {document_id}
     {"type_confusion_hint": ""},
     {"supports_relation": 1},
+    {"ordered_fields": None},
+    {"pair_key": ""},
 ])
 def test_invalid_specs_are_rejected(change):
     with pytest.raises(ValueError):

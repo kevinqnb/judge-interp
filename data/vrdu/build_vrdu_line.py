@@ -4,7 +4,8 @@ Reads ``line/{train,test}_base.json`` and writes ``line/{train,test}.json`` and 
 (provenance). A sample shows ``m`` of one line item's non-null fields, in a random order. Every
 invalid sample has one clean **twin**: the same item, the same ordered fields, the original values.
 So every cell, and every union of cells, has the same items, documents, field sets and orders in
-both classes.
+both classes. A sample is a dataset row (the usual label keys, one key per line field, null if not
+shown) plus ``fields`` (the shown fields, in the order shown), ``m``, ``cell``, ``pair_id``, ``sample_id``.
 
 Cells (all of size ``n_per_cell`` invalid samples + their twins):
 
@@ -162,6 +163,18 @@ def cross_item_corruption(item, doc_items, fields, rng, eq, date_fields, year_pi
     return None
 
 
+def line_source(field, line_index, exchanged_with):
+    """A ``field_errors`` source: the value is ``field`` of line item ``line_index`` of the same document.
+
+    ``exchanged_with`` is the swap partner of a cross_item field (None for intra_document, whose source
+    has no such key). ``null_fill`` is always False: nulls are never shown or filled.
+    """
+    src = {"scope": "same_document", "null_fill": False, "dataset": "line", "field": field, "line_index": line_index}
+    if exchanged_with is not None:
+        src["exchanged_with"] = exchanged_with
+    return src
+
+
 def make_candidate(item, doc_items, cell, used, rng, eq, date_fields, year_pivot, frag_rate):
     """One invalid sample of ``cell`` from ``item``, in an order not yet used for the item.
 
@@ -189,14 +202,14 @@ def make_candidate(item, doc_items, cell, used, rng, eq, date_fields, year_pivot
             if out is None:
                 continue
             values, donors = out
-            errors = {f: {"error_type": et, "source": {"line_index": li, "field": f}} for f, li in donors.items()}
+            errors = {f: {"error_type": et, "source": line_source(f, li, None)} for f, li in donors.items()}
         else:
             out = cross_item_corruption(item, doc_items, subset, rng, eq, date_fields, year_pivot)
             if out is None:
                 continue
             values, (a, b) = out
-            errors = {a: {"error_type": et, "source": {"line_index": item["line_index"], "field": b}},
-                      b: {"error_type": et, "source": {"line_index": item["line_index"], "field": a}}}
+            errors = {a: {"error_type": et, "source": line_source(b, item["line_index"], b)},
+                      b: {"error_type": et, "source": line_source(a, item["line_index"], a)}}
         order = list(orders[rng.randrange(len(orders))])
         return {"item": item, "fields": order, "values": {f: values[f] for f in order},
                 "field_errors": {f: errors.get(f) for f in order}}
@@ -235,7 +248,10 @@ def draw_round_robin(by_doc, n, rng):
 
 
 def make_pair(cand, cell):
-    """The invalid sample and its clean twin.
+    """The invalid sample and its clean twin, as dataset rows.
+
+    A row has one key per line field (null when not shown), the standard label keys, and ``fields``:
+    the shown fields in the order shown.
 
     Args:
         cand: from ``make_candidate``.
@@ -251,10 +267,18 @@ def make_pair(cand, cell):
               "cell": cid, "m": len(fields), "fields": fields}
     invalid_fields = [f for f in fields if cand["field_errors"][f] is not None]
     bad = {"sample_id": f"{pair_id}|invalid", **common, "valid": False, "error_type": cell[0], "k": len(invalid_fields),
-           "invalid_fields": invalid_fields, "values": cand["values"], "field_errors": cand["field_errors"]}
-    good = {"sample_id": f"{pair_id}|valid", **common, "valid": True, "error_type": None, "k": 0, "invalid_fields": [],
-            "values": {f: item[f] for f in fields}, "field_errors": {f: None for f in fields}}
+           "num_invalid_fields": len(invalid_fields), "invalid_fields": invalid_fields,
+           "field_errors": {f: cand["field_errors"].get(f) for f in LINE_FIELDS},
+           **{f: cand["values"].get(f) for f in LINE_FIELDS}}
+    good = {"sample_id": f"{pair_id}|valid", **common, "valid": True, "error_type": None, "k": 0, "num_invalid_fields": 0,
+            "invalid_fields": [], "field_errors": {f: None for f in LINE_FIELDS},
+            **{f: item[f] if f in fields else None for f in LINE_FIELDS}}
     return [bad, good]
+
+
+def shown_values(row):
+    """``{field: value}`` of a sample row, in the order shown."""
+    return {f: row[f] for f in row["fields"]}
 
 
 def build_split(base_rows, line_params, split, seed, eq, date_fields, year_pivot):
@@ -332,29 +356,40 @@ def verify_split(samples, base_rows, cells, n_per_cell, eq, date_fields, year_pi
         shown[(good["document_id"], good["line_index"], tuple(fields))] += 1
         doc_items = by_doc[good["document_id"]]
         for s in (bad, good):
-            assert list(s["values"]) == fields and list(s["field_errors"]) == fields, (s["sample_id"], "not in field order")
-            assert all(isinstance(v, str) for v in s["values"].values()), (s["sample_id"], "a null value is shown")
-            assert dates_in_order(s["values"], date_fields, year_pivot), (s["sample_id"], "from > to")
-        assert good["values"] == {f: item[f] for f in fields} and good["k"] == 0 and good["error_type"] is None, pid
-        assert all(e is None for e in good["field_errors"].values()) and good["invalid_fields"] == [], pid
-        assert matches_item(good["values"], doc_items, eq), (pid, "twin is no real item")
+            assert list(s["field_errors"]) == LINE_FIELDS, (s["sample_id"], "field_errors keys")
+            assert all(isinstance(s[f], str) for f in fields), (s["sample_id"], "a null value is shown")
+            assert all(s[f] is None and s["field_errors"][f] is None for f in LINE_FIELDS if f not in fields), (
+                s["sample_id"], "a field that is not shown has a value or an error")
+            assert dates_in_order(shown_values(s), date_fields, year_pivot), (s["sample_id"], "from > to")
+        assert shown_values(good) == {f: item[f] for f in fields} and good["k"] == good["num_invalid_fields"] == 0, pid
+        assert good["error_type"] is None and good["invalid_fields"] == [], pid
+        assert all(e is None for e in good["field_errors"].values()), pid
+        assert matches_item(shown_values(good), doc_items, eq), (pid, "twin is no real item")
 
         changed = [f for f in fields if bad["field_errors"][f] is not None]
-        assert bad["error_type"] == et and bad["k"] == k == len(changed) and bad["invalid_fields"] == changed, (pid, k, changed)
+        assert bad["error_type"] == et and bad["k"] == bad["num_invalid_fields"] == k == len(changed), (pid, k, changed)
+        assert bad["invalid_fields"] == changed, (pid, "invalid_fields not the corrupted fields in shown order")
         for f in fields:
-            same = eq(f, bad["values"][f]) == eq(f, item[f])
+            same = eq(f, bad[f]) == eq(f, item[f])
             assert same == (f not in changed), (pid, f, "changed iff marked")
+        for f in changed:
+            e = bad["field_errors"][f]
+            assert e["error_type"] == et and e["source"]["scope"] == "same_document" and e["source"]["dataset"] == "line", (pid, f)
+            assert e["source"]["null_fill"] is False, (pid, f)
         if et == INTRA_DOCUMENT:
             donors = [bad["field_errors"][f]["source"]["line_index"] for f in changed]
             assert len(set(donors)) == len(donors) and item["line_index"] not in donors, (pid, "donors not distinct others")
             for f in changed:
                 src = bad["field_errors"][f]["source"]
-                assert src["field"] == f and items[(item["document_id"], src["line_index"])][f] == bad["values"][f], (pid, f)
+                assert "exchanged_with" not in src, (pid, f)
+                assert src["field"] == f and items[(item["document_id"], src["line_index"])][f] == bad[f], (pid, f)
         else:
             a, b = changed
-            assert bad["values"][a] == item[b] and bad["values"][b] == item[a], (pid, "not a swap")
-            assert bad["field_errors"][a]["source"]["field"] == b and bad["field_errors"][b]["source"]["field"] == a, pid
-        assert not matches_item(bad["values"], doc_items, eq), (pid, "invalid sample is a real item")
+            assert bad[a] == item[b] and bad[b] == item[a], (pid, "not a swap")
+            for x, y in ((a, b), (b, a)):
+                src = bad["field_errors"][x]["source"]
+                assert src["field"] == src["exchanged_with"] == y and src["line_index"] == item["line_index"], (pid, x)
+        assert not matches_item(shown_values(bad), doc_items, eq), (pid, "invalid sample is a real item")
     assert max(shown.values()) == 1, "an (item, ordered fields) pair occurs twice"
     per_cell = Counter(s["cell"] for s in samples if not s["valid"])
     assert per_cell == Counter({cid: n_per_cell for cid in cell_of}), per_cell
@@ -373,15 +408,15 @@ def fragment_stats(samples, date_fields, year_pivot):
             continue
         cell, twin = out.setdefault(s["cell"], Counter()), twins[s["pair_id"]]
         for f in date_fields:
-            if f not in s["values"]:
+            if f not in s["fields"]:
                 continue
             err = s["field_errors"][f]
             if err is not None and err["source"]["field"] not in date_fields:
                 cell["non_date_positions"] += 1
                 continue
             cell["positions"] += 1
-            cell["invalid_fragment"] += parse_date(s["values"][f], year_pivot) is None
-            cell["twin_fragment"] += parse_date(twin["values"][f], year_pivot) is None
+            cell["invalid_fragment"] += parse_date(s[f], year_pivot) is None
+            cell["twin_fragment"] += parse_date(twin[f], year_pivot) is None
     return {c: dict(sorted(v.items())) for c, v in sorted(out.items())}
 
 

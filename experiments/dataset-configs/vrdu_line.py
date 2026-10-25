@@ -2,8 +2,10 @@
 
 Defines ``DATASET`` for ``judge_interp.dataset_spec.load_dataset_spec``. The field list
 comes from ``data/vrdu/build_vrdu_dataset.py`` (single source of truth for the schema); the
-descriptions, wording and file layout below are this dataset's. Rows are line items, so the
-relation tasks apply: the entities of a row should all belong to the same line item.
+descriptions, wording and file layout below are this dataset's. A row is a random ordered subset
+of one line item's fields (``data/vrdu/build_vrdu_line.py``), so the relation tasks apply: the
+entities of a row should all belong to the same line item. Rows come in minimal pairs (an invalid
+row and its clean twin) and are drawn pair by pair.
 """
 import sys
 from pathlib import Path
@@ -26,7 +28,7 @@ DATASET = DatasetSpec(
     name="line",
     fields=tuple(schema.LINE_FIELDS),
     field_descriptions=FIELD_DESCRIPTIONS,
-    error_types=("inter_document", "intra_document", "cross_type"),
+    error_types=("intra_document", "cross_item"),
     record_description="one line item (one broadcast spot) of the advertising order of a document",
     context_description="OCR text of the source document",
     type_confusion_hint=(
@@ -37,4 +39,6 @@ DATASET = DatasetSpec(
     split_path="vrdu/line/{split}.json",
     context_path="vrdu/ocr/{document_id}.txt",
     supports_relation=True,
+    ordered_fields=True,
+    pair_key="pair_id",
 )

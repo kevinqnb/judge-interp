@@ -18,11 +18,12 @@ from dataset_specs import LINE, MAIN
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = "tests/fixtures/entity_detection_mini"
 READ_TOKEN = ' "\n'
+LINE_CELLS = ["cross_item:m2:k2", "cross_item:m3:k2", "intra_document:m2:k1", "intra_document:m5:k2"]
 END_OF_TURN = {"Qwen/Qwen2.5-0.5B-Instruct": "<|im_end|>", "meta-llama/Llama-3.1-8B-Instruct": "<|eot_id|>"}
 
 
 def _items(spec, strata):
-    p = dict(data_root=FIXTURE, split="train", error_types=["inter_document", "cross_type"],
+    p = dict(data_root=FIXTURE, split="train", error_types=list(spec.error_types),
              rows_per_stratum=strata, context_token_limit=None)
     return er.build_items(spec, p, 0, REPO_ROOT)
 
@@ -37,8 +38,8 @@ def lm(request):
 
 def test_every_entity_is_read_at_the_same_token_including_the_last_of_a_row(lm):
     items = (_items(MAIN, {"valid": None, "inter_document": None, "cross_type": None})
-             + _items(LINE, {"valid": None, "cross_type": None}))
-    assert len(items) == 8
+             + _items(LINE, dict.fromkeys(LINE_CELLS)))
+    assert len(items) == 4 + 8
     for it in items:
         ids, offsets, shift = lm._build_prompt_with_offsets(it["instructions"], it["context"], it["query"])
         reads = []

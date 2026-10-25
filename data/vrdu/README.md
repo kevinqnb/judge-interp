@@ -1,167 +1,81 @@
 # data/vrdu
 
 VRDU ad-buy-form corpus (641 documents) turned into extraction-validation rows for the judge:
-every row is one extraction, either **valid** (copied from the annotations) or **invalid**
-(valid values deliberately corrupted). Four scripts build everything, in this order:
+each row is **valid** (copied from the annotations) or **invalid** (valid values deliberately
+corrupted). Two datasets, each with its own task:
+
+- **main** (entity detection): one row per document, 9 fields (`advertiser`, `agency`, `property`,
+  `tv_address`, `product`, `contract_num`, `flight_from`, `flight_to`, `gross_amount`).
+- **line** (relation detection): random ordered subsets of one line item's 5 fields (`channel`,
+  `program_desc`, `program_start_date`, `program_end_date`, `sub_amount`).
+
+The split is by document (513 train / 128 test, seed 0).
 
 | script | writes | config |
 |---|---|---|
-| `build_vrdu_dataset.py` | `main/`, `line/` `*_base.json` (valid rows only), `ocr/`, `directory.json` | CLI args (split ratio, seed 0) |
-| `build_vrdu_invalids.py` | `main/`, `line/` `{train,test}.json`, `invalids.json` | `data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml` |
-| `build_vrdu_manifest.py` | `manifest.json` (matched evaluation subset) | `params.manifest` in the same config |
-| `build_vrdu_subsets.py` | `subsets.json` (shared random field subsets, line only) | `params.subsets` in the same config |
+| `build_vrdu_dataset.py` | `{main,line}/*_base.json` (valid rows), `ocr/`, `directory.json` | CLI args (split ratio, seed 0) |
+| `build_vrdu_main.py` | `main/{train,test}.json`, `main_build.json` | `build-configs/2026-10-24-vrdu-invalids-06.yaml` |
+| `build_vrdu_line.py` | `line/{train,test}.json`, `line_build.json` | the same config |
 
-Build configs live in `build-configs/` (one per invalids version, `-01` to `-05`; only the newest
-describes the data on disk). Run each script directly (local data prep, no cluster job), e.g.
-`uv run --python 3.12 python data/vrdu/build_vrdu_invalids.py --config data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml`.
-Output is deterministic for a fixed seed. The large row files (`{main,line}/{train,test}.json`,
-~110 MB) and `ocr/` are **gitignored**: regenerate them with the commands above, then check them
-against the committed `manifest.json`, which stores the sha256 of each split file
-(`build_vrdu_manifest.load_manifest_split` raises if a regenerated file differs). Numbers from earlier invalids configs (`-01`..`-04`) do
-not carry over to `-05`.
+Run each script with `uv run --python 3.12 python data/vrdu/<script> --config <config>`. Output is
+deterministic for a fixed seed. The row files are **gitignored**. The committed `{main,line}_build.json`
+record each file's sha256, and readers refuse a stale file (`vrdu_common.check_build`). Numbers
+from invalids `-05` and earlier do not carry over to `-06`. The `-05` scripts (`build_vrdu_invalids.py`,
+`build_vrdu_manifest.py`, `build_vrdu_subsets.py`) and their outputs are retired.
 
-## Two datasets
+## Rules shared by both datasets
 
-- **main**: one row per document, 9 fields (`advertiser`, `agency`, `property`, `tv_address`,
-  `product`, `contract_num`, `flight_from`, `flight_to`, `gross_amount`). Many are null.
-- **line**: one row per line item (broadcast spot), 5 fields (`channel`, `program_desc`,
-  `program_start_date`, `program_end_date`, `sub_amount`); 9,163 line items in 636 documents.
+- **Label rule.** Shown values are valid iff they are one real item's values (`matches_item`; nulls
+  are not shown). "Same value" is judged by an equivalence key (parsed date, numeric amount,
+  folded text), so a reformat is never an error.
+- **Date order.** `from <= to` holds whenever both dates parse, so a reversed date is never a tell.
+- **OCR-fragment dates** (~20% of dates, e.g. `/08/20`) are valid ground truth. Corruptions draw
+  fragments at the same rate, so a fragment does not predict the label.
 
-The split is by document (513 train / 128 test, seed 0), so no document is in both splits.
+## main
 
-## Row format
+One row per (document, error type, achievable k), plus the clean row. Values are corrupted as follows:
 
-Every row has `document_id` (+ `line_index` for line), `valid`, `error_type` (null if valid),
-`k` (number of corrupted fields; 0 if valid), `invalid_fields`, one value per field, and
-`field_errors`: one entry per field, `null` if that entity is correct, otherwise
-`{error_type, source}` saying where the wrong value came from. A row's identity is
-`(document_id, [line_index], error_type, k)`. Rows are single-error-type: all corrupted fields
-of a row were built the same way.
+- `inter_document` takes values from another document (k = 1-9);
+- `cross_type` takes this document's value of a different field of the same kind (name, date or amount; k = 1-8).
 
-## How the error types are made
+Null fields can be filled (`corrupt_from_null`). Every corrupted source records `null_fill`.
 
-An invalid row starts from a valid row of the same split and replaces exactly `k` of its fields.
-One invalid row is emitted per achievable `k` (never a requested `k` the row can't reach).
+| | valid | inter_document | cross_type |
+|---|---|---|---|
+| rows (train / test) | 513 / 128 | 4,617 / 1,152 | 3,836 / 944 |
 
-| type | datasets | where the wrong value comes from |
-|---|---|---|
-| `inter_document` | main, line | another document of the same split (main: any row's value for that field; line: any other document's line rows). Not in this document's text by construction. This is intended, so it tests whether the judge checks the value against the document. |
-| `intra_document` | line | the **same field** taken from other line items of the **same** document (a same-type error: line A's `program_start_date` gets line B's `program_start_date`), one distinct donor item per corrupted field. A chain: fields and donors are drawn one at a time until `k` is reached or no eligible pair is left. |
-| `cross_type` | main, line | a real value of this document that belongs to a **different field of the same kind** (name: advertiser, agency, property, tv_address, product; date: the four date fields; amount: gross_amount, sub_amount), in either dataset, never from a line row's own item. The value is genuine but filed under the wrong type. `contract_num`, `channel`, `program_desc` have no kind and are never touched. Two fields that pull each other's values are marked `exchanged_with`. |
-| `cross_item` | line, subsets only | two shown fields of a clean line-item subset swap values (any kinds, k=2). |
+**Evaluation:** `main_samples.main_entity_pairs(rows, seed)` gives one pair per corrupted span:
+- the invalid span;
+- its clean twin, the same (document, field) span in the clean row.
 
-`intra_document` and `cross_type` never overlap: `intra_document` keeps the field's type (same field, another
-line item), `cross_type` changes it (a different field). A `cross_type` value may not already be valid for
-its target field anywhere in the document, which excludes exactly the same-field values `intra_document` uses.
-In a row's `field_errors`, an intra source has `field` equal to the corrupted field, a cross source a
-different one.
+A null-fill span has no clean value, so its twin is the same field from another document
+(`null_fill=True`; drop these pairs to evaluate without null-fill). This gives 39,453 / 9,751 pairs,
+of which 5,598 / 1,472 are null-fill. `cross_type` thins out at k ≥ 7 (test: 109 docs at k=7, 69 at k=8).
 
-Rules that apply to every type:
+## line
 
-- **A corruption must change the value.** "Same value" is judged by an equivalence key (parsed
-  date, numeric amount, case- and whitespace-folded text), so `2/18/20` -> `02/18/20` or
-  `ISSUE` -> `Issue` is never an error. A cross value may not already be valid for its target field
-  anywhere in the document.
-- **Label rule.** Shown values are valid iff they are one valid line item's (`matches_item`; nulls are
-  not shown). Invalid rows and subsets that match an item are excluded or dropped.
-- **Null fields can be filled; values are never nulled.** Filling a null adds an entity that
-  was absent; every corrupted source carries `null_fill` (true/false) so it can be stratified
-  (13-22% of corrupted entities in `inter`/`cross`, 5% in `intra`).
-- **Date order.** The two dates of a record keep `from <= to`, enforced whenever both dates parse
-  (no valid row is reversed, so a reversed invalid row would be a free tell).
-- **Field choice is uniform** over the fields that can be corrupted for that row.
+**Minimal pairs.** Each invalid sample has one clean twin: the same line item, the same ordered
+fields, with the original values. Every cell is therefore 50/50, and the field set, order, size, item
+and document are identical across the two classes.
 
-## Composition (train / test)
+| cell | how | m (fields shown) | k (corrupted, within the subset) |
+|---|---|---|---|
+| `intra_document` | the same field from another item of the same document, a distinct donor per field | 2-5 | 1 to min(m, 3) |
+| `cross_item` | two shown fields swap values | 2-5 | 2 |
 
-| dataset | valid | inter_document | intra_document | cross_type |
-|---|---|---|---|---|
-| main | 513 / 128 | 4,617 / 1,152 | - | 3,836 / 944 |
-| line | 7,732 / 1,431 | 38,651 / 7,152 | 24,805 / 4,614 | 17,939 / 3,097 |
+There are 15 cells (`<type>:m<m>:k<k>`), each with 1,250 / 250 pairs (train / test). That makes
+37,500 / 7,500 samples. Items are drawn round-robin over documents. The weakest cell is
+`intra_document:m5:k3`, with 188 / 42 documents. No null-fill. Rows carry the 5 field values (null
+if not shown), plus:
+- `fields` (shown order), `m`, `cell`, `pair_id`, `sample_id`;
+- the usual label keys.
 
-Rows per `k` (train; test has the same shape, e.g. line intra 1,275 / 1,254 / 1,028 / 848 / 209):
-
-| | k=1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
-|---|---|---|---|---|---|---|---|---|---|
-| main inter_document | 513 | 513 | 513 | 513 | 513 | 513 | 513 | 513 | 513 |
-| main cross_type | 513 | 513 | 513 | 513 | 512 | 507 | 484 | 281 | - |
-| line inter_document | 7,723 | 7,732 | 7,732 | 7,732 | 7,732 | - | - | - | - |
-| line intra_document | 7,295 | 7,109 | 5,552 | 3,987 | 862 | - | - | - | - |
-| line cross_type | 7,723 | 6,514 | 3,702 | - | - | - | - | - | - |
-
-The types differ in reach: inter always reaches every `k`, intra and cross only where the
-document has enough donors (line cross is capped at k=3, its three kinded fields). Cells at high
-`k` are therefore made of different, richer documents. Skipped rows (no achievable corruption) are
-listed in `invalids.json` (`skipped_rows`), along with pool sizes, `k` distributions and
-`date_fragment_rates`. Valid rows are ~6% (main) and ~9% (line) of each split; balance them when
-scoring. Rows from one base row at different `k` are not independent (and intra rows are nested).
-
-## OCR-fragment dates
-
-About 20% of line date values (12-18% in main) are OCR fragments that don't parse as a date, e.g.
-`/08/20` or `02/21/`. They are valid ground truth. To keep "is a fragment" from predicting "is correct",
-corruptions can also produce fragments, at the same rate they occur in the valid rows, and date order
-(`from <= to`) is only enforced when both dates parse. The corrupted and kept fragment rates are recorded
-per error type in `invalids.json` (`date_fragment_rates`) and match everywhere except one place:
-**line `cross_type` over-produces fragments** (~28-33% of corrupted dates vs ~18-20% kept), so there a
-fragment is weakly predictive of "corrupted".
-
-## Matched subset (`manifest.json`)
-
-The full set is not comparable across types (sizes and documents differ, above). The manifest
-fixes that: a base row qualifies only if **every** error type of its dataset has a row at
-**every** `k` in `k_values`; each selected base row contributes its valid row plus one row per
-(error type, `k`). Every (error type, `k`) cell then has the same size, the same documents and the
-same exact `k`. `k_values`: main 1-6 (507 / 126 base rows), line 1-3 (2,499 / 418 base rows).
-The manifest records the invalids config id and sha256 of each split file, and
-`load_manifest_split` refuses one that is stale. `data/vrdu/build_vrdu_manifest.py` documents the
-selection; it is not yet wired into `row_detection`.
-
-## Random field subsets (`subsets.json`, line only)
-
-The shared evaluation samples for Clef and the probe. `subsets.json` holds **5 replicates** per split, each an
-independent random evaluation set; metrics are averaged over the 5.
-
-| per replicate | train | test |
-|---|---|---|
-| samples | 10,128 (5,064 valid + 5,064 invalid) | 2,528 (1,264 + 1,264) |
-| source rows (manifest) | 24,990 (2,499 line items) | 4,180 (418 line items) |
-
-Replicates reuse the same rows but draw different subsets.
-
-**A sample** is a random subset of 2 to 5 of a line item's non-null fields, in a random order (for the chain
-rule P(f1..fn) = P(fn|f1..fn-1)...P(f1)). It is valid iff its shown values are one real line item's (label rule above). Per source row, 6 distinct
-unordered subsets are drawn, then each is permuted. `cross_item` samples swap two shown values of a clean subset.
-
-**Balancing.** Both classes get exactly the same number of samples for every set of fields (`balance_by:
-field_set_error_type`), so subset size and field presence say nothing about the label. Without this, size alone gave
-test AUROC 0.63 and field presence 0.65; now 0.50. A set's share is its share among all subsets of the source
-valid rows (sizes 2 / 3 / 4 / 5: 42% / 38% / 17% / 3%). Each of the four error types is ~25% of the
-invalid class (asserted within 0.03).
-
-**Use.** Read it only through `subsets.load_subsets(data_root, split, replicate)`, which refuses a stale file
-and re-checks every sample against its row. `sample_id` is `doc|line_index|error_type|k|f1+f2+...` (`cross_item` adds `|a~b`); the
-field order is part of the id. Rebuild (repo root, after the manifest), with all values in `params.subsets` of
-the config:
-`uv run --python 3.12 python data/vrdu/build_vrdu_subsets.py --config data/vrdu/build-configs/2026-10-22-vrdu-invalids-05.yaml`.
-Replicate r uses `default_rng([seed, split index, r])`; raising `n_replicates` leaves earlier ones unchanged.
-
-Caveats:
-- Many valid samples come from the uncorrupted parts of corrupted rows, so a
-  per-error-type breakdown of the valid class is meaningless.
-- `cross_type` never touches `channel` or `program_desc`, so a sample of only those two is never a
-  cross_type error.
-- Matching field sets does not remove value-level tells (a filled `sub_amount`, an OCR fragment); keep a
-  baseline in every report.
-- Samples from one row, and rows of one line item, are not independent; resample by document. Source rows carry
-  the manifest's selection bias (see Known limitations).
+Per-cell document counts and fragment rates are in `line_build.json`.
 
 ## Known limitations
 
-- `inter_document` values almost never occur in the document text (by design); `intra` and
-  `cross` values do. Report types separately.
-- The matched subset is not a random sample. A line row qualifies only if intra and cross reach k=3, which
-  needs several other line items with varied values, so only ~32% of line base rows (train) and ~30%
-  (test) qualify, skewed toward longer, more varied line-item tables. Main keeps ~99%. Results on the
-  manifest describe those documents, not the whole corpus.
-- ~5% of test line rows are identical (all fields) to a train line row, and many test advertisers
-  also occur in train; documents are split, but contracts recur.
+- `inter_document` values almost never occur in the document text. `intra`, `cross_type` and
+  `cross_item` values do. Report the types separately.
+- Rows and samples from one document are not independent, so resample by document.
+- ~5% of test line items are identical to a train line item. Documents are split, but contracts recur.

@@ -3,6 +3,8 @@
   "sample_id": "o1",
   "document_id": "doc-a",
   "error_type": "",
+  "pair_id": "p5",
+  "cell": "intra_document:m3:k1",
   "entities": [
    {
     "field": "sub_amount",
@@ -24,7 +26,9 @@
  {
   "sample_id": "o2",
   "document_id": "doc-a",
-  "error_type": "inter_document",
+  "error_type": "intra_document",
+  "pair_id": "p6",
+  "cell": "intra_document:m2:k1",
   "entities": [
    {
     "field": "channel",
@@ -42,6 +46,8 @@
   "sample_id": "o3",
   "document_id": "doc-b",
   "error_type": "",
+  "pair_id": "p7",
+  "cell": "cross_item:m2:k2",
   "entities": [
    {
     "field": "program_end_date",
@@ -59,6 +65,8 @@
   "sample_id": "o4",
   "document_id": "doc-a",
   "error_type": "intra_document",
+  "pair_id": "p8",
+  "cell": "intra_document:m3:k2",
   "entities": [
    {
     "field": "program_end_date",

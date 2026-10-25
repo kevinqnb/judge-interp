@@ -50,6 +50,12 @@ class DatasetSpec:
         supports_relation: whether rows are one of several similar items per document, so
             that "do these entities belong to the same item?" is a meaningful question.
             The relation tasks refuse a dataset where this is false.
+        ordered_fields: whether each row lists its shown fields, in the order shown, under
+            ``fields`` (exactly its non-null fields). If false, the non-null fields are shown
+            in the order of ``fields`` above.
+        pair_key: row key holding the id of the row's minimal pair (one invalid row and its
+            clean twin), or ``None`` if rows are not paired. Paired rows also carry ``cell``,
+            their stratum, and are drawn pair by pair.
     """
 
     name: str
@@ -63,6 +69,8 @@ class DatasetSpec:
     split_path: str
     context_path: str
     supports_relation: bool
+    ordered_fields: bool
+    pair_key: str | None
 
     def __post_init__(self) -> None:
         _require_text(self.name, "name")
@@ -80,15 +88,16 @@ class DatasetSpec:
             _require_text(d, f"field_descriptions[{f!r}]")
         for name in ("record_description", "context_description"):
             _require_text(getattr(self, name), name)
-        for name in ("type_confusion_hint", "row_index_key"):
+        for name in ("type_confusion_hint", "row_index_key", "pair_key"):
             if getattr(self, name) is not None:
                 _require_text(getattr(self, name), name)
         if "{split}" not in self.split_path:
             raise ValueError(f"split_path must contain '{{split}}', got {self.split_path!r}")
         if "{document_id}" not in self.context_path:
             raise ValueError(f"context_path must contain '{{document_id}}', got {self.context_path!r}")
-        if not isinstance(self.supports_relation, bool):
-            raise ValueError(f"supports_relation must be a bool, got {self.supports_relation!r}")
+        for name in ("supports_relation", "ordered_fields"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool, got {getattr(self, name)!r}")
         if self.supports_relation and len(self.fields) < 2:
             raise ValueError("a dataset with a relation task needs at least two fields")
 
