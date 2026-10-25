@@ -63,7 +63,7 @@ def test_row_write_efficiency_hand_worked_on_cpu(tmp_path):
     }
     npz = tmp_path / "artifacts" / "span_representations.npz"
     rd.write_span_representations({k: v for k, v in result.items() if k != "efficiency"}, npz)
-    rlm = SimpleNamespace(hidden_size=hidden, weights_bytes=None, shard_write_seconds=[0.5, 0.25], device="cpu", model_name="m")
+    rlm = SimpleNamespace(hidden_size=hidden, weights_bytes=None, verify_seconds=2.5, shard_write_seconds=[0.5, 0.25], device="cpu", model_name="m")
     m = rd.write_efficiency(tmp_path, rlm, result, npz, dict(
         model_load_seconds=1.0, build_items_seconds=2.0, collect_seconds=3.0, final_write_seconds=4.0))
     assert m["eff_seconds_per_prompt_total"] == pytest.approx(4 * 1.0)
@@ -72,7 +72,7 @@ def test_row_write_efficiency_hand_worked_on_cpu(tmp_path):
     assert m["eff_rep_bytes_layer_0"] == n * hidden * 4 == m["eff_rep_bytes_layer_5"]
     assert m["eff_rep_bytes_per_span_per_layer"] == hidden * 4
     assert m["eff_gpu_peak_alloc_bytes_max"] is None and m["eff_gpu_peak_activation_bytes_max"] is None
-    assert m["eff_n_shards_resumed"] == 1 and m["eff_n_shards_written"] == 2
+    assert m["eff_first_trace_verify_seconds"] == 2.5 and m["eff_n_shards_resumed"] == 1 and m["eff_n_shards_written"] == 2
     assert m["eff_shard_write_seconds_total"] == 0.75
     assert (tmp_path / "artifacts" / "efficiency.json").is_file()
     assert "efficiency" not in np.load(npz).files

@@ -359,14 +359,17 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
 class RowDetectionLM(RepresentationLM):
     """``RepresentationLM`` that reads hidden states at each entity's closing quote.
 
-    Every ``judge_row`` is measured (``efficiency``): the model's weight memory is recorded at
-    construction, before anything else is on the device.
+    Every ``judge_row`` is measured (``efficiency``). nnsight loads the weights lazily, on the
+    first trace, so construction excludes the load and no weights are on the device yet:
+    ``verify_seconds`` (the first trace, when ``verify_read_point`` is on) carries the load, and
+    ``weights_bytes`` is read at the end of ``collect_rows``.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.meter = eff.Meter(self.device)
-        self.weights_bytes = self.meter.allocated_bytes()
+        self.weights_bytes = None   # set at the end of collect_rows
+        self.verify_seconds = None  # first-trace time (weight load + verify_read_point); None if verify_read_point is off
         self.shard_write_seconds: list[float] = []  # this process only; a resumed shard's write is not re-measured
 
     def judge_row(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
@@ -523,7 +526,9 @@ class RowDetectionLM(RepresentationLM):
         self.n_shards_resumed = 0
         if verify_read_point:
             first = items[0]
+            t0 = self.meter.now()
             self.verify_read_point(first["instructions"], first["context"], first["query"])
+            self.verify_seconds = self.meter.now() - t0
 
         for i, doc_id in enumerate(sorted(by_doc)):
             shard = cache_dir / f"{doc_id}.npz"
@@ -541,6 +546,9 @@ class RowDetectionLM(RepresentationLM):
                 print(f"[{i + 1}/{len(by_doc)}] {doc_id}: judging {len(fps)} row(s), {n_spans} span(s)")
             self._judge_document_rows(by_doc[doc_id], fps, shard)
 
+        if self.meter.cuda:
+            torch.cuda.empty_cache()
+        self.weights_bytes = self.meter.allocated_bytes()   # weights only: every per-row tensor is freed
         return self._aggregate_rows(by_doc, cache_dir)
 
     def _judge_document_rows(self, doc_items: list[dict], fps: list[str], shard: Path) -> None:
@@ -822,6 +830,8 @@ def write_efficiency(run_dir: Path, rlm: "RowDetectionLM", result: dict, npz_pat
         None if m["eff_gpu_peak_alloc_bytes_max"] is None else m["eff_gpu_peak_alloc_bytes_max"] - rlm.weights_bytes
     )
     m["eff_host_peak_rss_bytes"] = eff.peak_rss_bytes()
+    # None when verify_read_point is off: then the lazy weight load lands in the first measured prompt.
+    m["eff_first_trace_verify_seconds"] = rlm.verify_seconds
     for k, v in seconds.items():
         m[f"eff_{k}"] = v
     # Shards written by this process only (a resumed shard was written, and timed, by an earlier run).
