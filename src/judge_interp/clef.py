@@ -43,6 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
+from judge_interp import efficiency as eff
 from judge_interp import entity_detection as edr
 from judge_interp.dataset_spec import DatasetSpec, load_dataset_spec
 from judge_interp.prompts import load_context
@@ -59,6 +60,11 @@ _SAMPLE_PARAMS = (*_COMMON_PARAMS, "samples_path")
 TASK_PARAMS: dict[str, tuple[str, ...]] = {
     "clef_entity_row": _ROW_PARAMS, "clef_relation_conditional": _SAMPLE_PARAMS, "clef_record_oneshot": _SAMPLE_PARAMS,
 }
+# Per-record measurements of ``ClefScorer.score`` (see ``efficiency``).
+EFFICIENCY_KEYS = (
+    "seconds_encode", "seconds_forward", "seconds_readout", "n_tokens", "n_questions",
+    "peak_alloc_bytes", "peak_reserved_bytes",
+)
 OVERLONG_MODES = ("exclude", "error")
 CONTEXT_CONTROLS = ("none", "other_document")
 _DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
@@ -523,6 +529,8 @@ class ClefScorer:
         assert Path(path).name == revision, f"snapshot {path} is not commit {revision}"
         self.model, self.processor = jsm.load_release_model(path, device=device, dtype=getattr(torch, _DTYPES[dtype]))
         self.tokenizer = self.processor.tokenizer
+        self.meter = eff.Meter(device)
+        self.weights_bytes = self.meter.allocated_bytes()  # only the model is on the device here
 
     def score(self, record: dict) -> dict:
         """Score one record.
@@ -532,13 +540,18 @@ class ClefScorer:
 
         Returns:
             ``logits`` (``float32 [n_questions, 2]`` in ``OPTION_IDS`` order), ``p_true``
-            (``float64 [n_questions]``) and ``n_tokens``.
+            (``float64 [n_questions]``), ``n_tokens`` and ``efficiency`` (see ``EFFICIENCY_KEYS``).
         """
         torch = self.torch
+        t0 = self.meter.now()
         enc = encode_checked(self.jsm, self.tokenizer, record, self.max_length)
         batch = self.jsm.collate_records([enc], self.tokenizer.pad_token_id, torch.device(self.device))
+        t1 = self.meter.now()
+        self.meter.reset_peaks()
         with torch.inference_mode():
             out = self.model(batch)[0]
+        t2 = self.meter.now()
+        peaks = self.meter.peaks()
         assert len(out) == len(enc.questions)
         logits = np.zeros((len(out), len(OPTION_IDS)), dtype=np.float32)
         for qi, (q, ql) in enumerate(zip(enc.questions, out)):
@@ -548,7 +561,17 @@ class ClefScorer:
         z = logits.astype(np.float64)
         p_true = np.exp(z[:, 0] - np.logaddexp(z[:, 0], z[:, 1]))
         assert ((0 <= p_true) & (p_true <= 1)).all()
-        return {"logits": logits, "p_true": p_true, "n_tokens": len(enc.input_ids)}
+        t3 = self.meter.now()
+        efficiency = {
+            "seconds_encode": t1 - t0,    # tokenization (counted + encoded) and collation onto the device
+            "seconds_forward": t2 - t1,   # model forward, CUDA-synchronized
+            "seconds_readout": t3 - t2,   # device-to-host copy of the logits, P(true)
+            "n_tokens": len(enc.input_ids),
+            "n_questions": len(enc.questions),
+            **peaks,
+        }
+        assert set(efficiency) == set(EFFICIENCY_KEYS), sorted(efficiency)
+        return {"logits": logits, "p_true": p_true, "n_tokens": len(enc.input_ids), "efficiency": efficiency}
 
     def known_answer_check(self) -> dict:
         """Score a hand-built record whose answers are known: a total of 1250 is above 1000, not above 2000.
@@ -665,6 +688,64 @@ def _sample_columns(units: list[dict], results: list[dict]) -> dict[str, np.ndar
     return out
 
 
+def write_efficiency(run_dir: Path, scorer: ClefScorer, units: list[dict], results: list[dict], seconds: dict,
+                     warmed_up: bool) -> dict:
+    """Write ``artifacts/efficiency.json`` and ``artifacts/efficiency_records.npz``; return the flat ``eff_*`` metrics.
+
+    One row per scored record (the determinism rescoring is not included): phase times, input tokens,
+    questions and peak GPU memory. Input tokens only; Clef decodes nothing, so output tokens are 0.
+    See ``efficiency`` for what each quantity means.
+
+    Args:
+        run_dir: run output directory (``artifacts/`` exists).
+        scorer: the scorer that produced ``results``.
+        units: the scored units, parallel to ``results``.
+        results: ``_score_units`` output.
+        seconds: process-level timings (load, build, filter, known answer, score loop).
+        warmed_up: whether the known-answer record ran first (the first measured record is otherwise a cold start).
+
+    Returns:
+        Flat scalar metrics, all prefixed ``eff_``.
+    """
+    assert len(units) == len(results)
+    recs = eff.unit_columns([r["efficiency"] for r in results])
+    n = len(results)
+    assert (recs["n_tokens"] == np.array([u["n_tokens"] for u in units])).all()
+    per_record = recs["seconds_encode"] + recs["seconds_forward"] + recs["seconds_readout"]
+    m: dict = {"eff_n_records": n, "eff_warmed_up": int(warmed_up)}
+    for k in ("seconds_encode", "seconds_forward", "seconds_readout"):
+        m.update(eff.column_stats(f"eff_{k}", recs[k]))
+    m.update(eff.column_stats("eff_seconds_per_record", per_record))
+    m["eff_seconds_per_question_mean"] = float(per_record.sum() / recs["n_questions"].sum())
+    m["eff_first_record_seconds"] = float(per_record[0])
+    m.update(eff.column_stats("eff_input_tokens", recs["n_tokens"]))
+    m["eff_input_tokens_per_second_forward"] = float(recs["n_tokens"].sum() / recs["seconds_forward"].sum())
+    m["eff_output_tokens_total"] = 0   # no decoding: two logits per question
+    m["eff_n_questions_total"] = int(recs["n_questions"].sum())
+    on_cpu = not scorer.meter.cuda
+    m.update(eff.peak_stats("eff_gpu_peak_alloc_bytes", [None] * n if on_cpu else recs["peak_alloc_bytes"].tolist()))
+    m.update(eff.peak_stats("eff_gpu_peak_reserved_bytes", [None] * n if on_cpu else recs["peak_reserved_bytes"].tolist()))
+    m["eff_gpu_weights_bytes"] = scorer.weights_bytes
+    m["eff_gpu_peak_activation_bytes_max"] = (
+        None if on_cpu else m["eff_gpu_peak_alloc_bytes_max"] - scorer.weights_bytes
+    )
+    m["eff_host_peak_rss_bytes"] = eff.peak_rss_bytes()
+    m.update({f"eff_{k}": v for k, v in seconds.items()})
+    assert all(v is None or isinstance(v, (int, float, bool)) for v in m.values())
+    (run_dir / "artifacts" / "efficiency.json").write_text(json.dumps({
+        "hardware": eff.hardware(scorer.device), "model": scorer.model.__class__.__name__, "metrics": m,
+        "definitions": {
+            "seconds_encode": "tokenization (token count + encode, so the state is tokenized twice) and collation onto the device",
+            "seconds_forward": "model forward, CUDA-synchronized",
+            "seconds_readout": "device-to-host copy of the logits and P(true)",
+            "peak_alloc_bytes": "max_memory_allocated over one forward, includes weights",
+            "tokens": "input tokens of the encoded record only; output tokens are 0",
+        },
+    }, indent=2))
+    np.savez_compressed(run_dir / "artifacts" / "efficiency_records.npz", **recs)
+    return m
+
+
 def validate_params(p: dict) -> None:
     """Check the config values that ``run`` branches on.
 
@@ -761,12 +842,19 @@ def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg:
     validate_params(p)
     max_length = model_cfg["max_length"]
 
+    meter = eff.Meter(p["device"])
+    t0 = meter.now()
     units, metrics = build_units(task, p, seed, spec, repo_root)
+    seconds = {"build_units_seconds": meter.now() - t0}
 
+    t0 = meter.now()
     rc = model_cfg["release_code"]
     jsm = load_release_code(model_cfg["model"], model_cfg["revision"], rc["file"], rc["sha256"])
     scorer = ClefScorer(jsm, model_cfg["model"], model_cfg["revision"], p["device"], model_cfg["dtype"], max_length)
+    seconds["model_load_seconds"] = meter.now() - t0
+    t0 = meter.now()
     units, excluded = filter_overlong(units, jsm, scorer.tokenizer, max_length, p["overlong_docs"])
+    seconds["filter_overlong_seconds"] = meter.now() - t0
     metrics["n_excluded_overlong"] = len(excluded)
     metrics["n_excluded_overlong_docs"] = len({u["doc_id"] for u in excluded})
     assert units, "every record was excluded"
@@ -774,12 +862,17 @@ def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg:
     (run_dir / "artifacts" / "excluded_overlong.json").write_text(json.dumps(
         [{"record_id": u["record"]["id"], "doc_id": u["doc_id"], "n_tokens": u["n_tokens"]} for u in excluded], indent=2))
 
+    t0 = meter.now()
     if p["known_answer_check"]:
-        metrics.update(scorer.known_answer_check())
+        metrics.update(scorer.known_answer_check())   # also the CUDA warmup, scored before the measured loop
+    seconds["known_answer_seconds"] = meter.now() - t0
+    t0 = meter.now()
     results = _score_units(scorer, units, p["determinism_check_n"])
+    seconds["score_loop_seconds"] = meter.now() - t0   # includes the determinism rescoring
     metrics["determinism_check_n"] = p["determinism_check_n"]
 
     cols = _entity_columns(units, results) if task == "clef_entity_row" else _sample_columns(units, results)
     np.savez_compressed(run_dir / "artifacts" / "clef_predictions.npz", **cols)
     metrics.update(summarize(cols))
+    metrics.update(write_efficiency(run_dir, scorer, units, results, seconds, p["known_answer_check"]))
     return metrics

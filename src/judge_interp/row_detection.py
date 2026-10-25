@@ -32,11 +32,13 @@ import gc
 import hashlib
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from judge_interp import efficiency as eff
 from judge_interp.dataset_spec import DatasetSpec
 from judge_interp.prompts import load_context, load_split, render_query, shown_fields, sub_seed
 from judge_interp.representationlm import RepresentationLM, to_npz_array
@@ -56,6 +58,11 @@ SPAN_META_KEYS = (
 _EXCHANGE_TYPES = ("cross_type", "cross_item")
 # Per-span columns the model side adds.
 _MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "prompt_n_tokens")
+# Per-row measurements of ``judge_row`` (see ``efficiency``); stored in each shard as ``eff_<key>``.
+EFFICIENCY_KEYS = (
+    "seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup",
+    "prompt_n_tokens", "n_spans", "peak_alloc_bytes", "peak_reserved_bytes",
+)
 
 
 def row_index(row: dict, spec: DatasetSpec) -> int | None:
@@ -350,7 +357,17 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
 
 
 class RowDetectionLM(RepresentationLM):
-    """``RepresentationLM`` that reads hidden states at each entity's closing quote."""
+    """``RepresentationLM`` that reads hidden states at each entity's closing quote.
+
+    Every ``judge_row`` is measured (``efficiency``): the model's weight memory is recorded at
+    construction, before anything else is on the device.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.meter = eff.Meter(self.device)
+        self.weights_bytes = self.meter.allocated_bytes()
+        self.shard_write_seconds: list[float] = []  # this process only; a resumed shard's write is not re-measured
 
     def judge_row(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
         """Run one prefill pass and read the hidden state at each closing quote.
@@ -364,8 +381,9 @@ class RowDetectionLM(RepresentationLM):
 
         Returns:
             Dict with ``representations`` (``{layer: float32 [n_spans, hidden]}``),
-            ``token_index``, ``token_id`` and ``token_n_chars`` (each ``[n_spans]``), and
-            ``prompt_n_tokens``. Every ``token_id`` is that of ``READ_TOKEN``.
+            ``token_index``, ``token_id`` and ``token_n_chars`` (each ``[n_spans]``),
+            ``prompt_n_tokens`` and ``efficiency`` (see ``EFFICIENCY_KEYS``). Every ``token_id`` is
+            that of ``READ_TOKEN``.
 
         Raises:
             ValueError: ``spans`` is empty or the prompt exceeds
@@ -373,6 +391,7 @@ class RowDetectionLM(RepresentationLM):
         """
         if not spans:
             raise ValueError("spans is empty")
+        t0 = self.meter.now()
         input_ids, offsets, shift = self._build_prompt_with_offsets(instructions, context, query)
         prompt_n_tokens = len(input_ids)
         if prompt_n_tokens > self.max_position_embeddings:
@@ -406,11 +425,14 @@ class RowDetectionLM(RepresentationLM):
         idx_tensor = torch.tensor(token_index, dtype=torch.long)
 
         saved: dict[int, "torch.Tensor"] = {}
+        t1 = self.meter.now()
+        self.meter.reset_peaks()
         with torch.no_grad(), self.llm.trace(input_ids, logits_to_keep=1):
             for layer in self.layers:
                 h = self._read_point(layer)
                 seq = h[0] if h.ndim == 3 else h
                 saved[layer] = seq[idx_tensor, :].detach().to(torch.float32).save()
+        t2 = self.meter.now()
 
         representations = {
             layer: np.asarray(t.cpu().numpy(), dtype=np.float32) for layer, t in saved.items()
@@ -419,12 +441,26 @@ class RowDetectionLM(RepresentationLM):
         for layer, arr in representations.items():
             assert arr.shape == (n_spans, self.hidden_size), (layer, arr.shape)
             assert np.isfinite(arr).all(), f"non-finite representation at layer {layer}"
+        t3 = self.meter.now()
+        peaks = self.meter.peaks()
 
         del saved
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        t4 = self.meter.now()
+        efficiency = {
+            "seconds_prompt": t1 - t0,       # tokenization, offsets, read-position resolution (CPU)
+            "seconds_trace": t2 - t1,        # forward pass + in-trace gather/cast/save of the read layers
+            "seconds_readout": t3 - t2,      # device-to-host copy and finiteness checks
+            "seconds_cleanup": t4 - t3,      # empty_cache + gc, run after every row
+            "prompt_n_tokens": prompt_n_tokens,
+            "n_spans": n_spans,
+            **peaks,
+        }
+        assert set(efficiency) == set(EFFICIENCY_KEYS), sorted(efficiency)
         return {
+            "efficiency": efficiency,
             "representations": representations,
             "token_index": np.asarray(token_index, dtype=np.int64),
             "token_id": np.asarray(token_id, dtype=np.int64),
@@ -484,6 +520,7 @@ class RowDetectionLM(RepresentationLM):
                 for sp in it["spans"]:
                     assert set(sp) == {"char_start", "char_end", *SPAN_META_KEYS}, sorted(sp)
 
+        self.n_shards_resumed = 0
         if verify_read_point:
             first = items[0]
             self.verify_read_point(first["instructions"], first["context"], first["query"])
@@ -497,6 +534,7 @@ class RowDetectionLM(RepresentationLM):
                     if list(z["item_fingerprints"]) == fps and int(z["n_spans"]) == n_spans:
                         if self.verbose:
                             print(f"[{i + 1}/{len(by_doc)}] {doc_id}: cached, skipping")
+                        self.n_shards_resumed += 1
                         continue
                 shard.unlink()  # incomplete / stale -- recompute
             if self.verbose:
@@ -516,9 +554,11 @@ class RowDetectionLM(RepresentationLM):
         per_layer: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
         cols: dict[str, list] = {k: [] for k in _MODEL_KEYS}
         meta: dict[str, list] = {k: [] for k in SPAN_META_KEYS}
+        row_eff: list[dict] = []
 
         for it in doc_items:
             res = self.judge_row(it["instructions"], it["context"], it["query"], it["spans"])
+            row_eff.append(res["efficiency"])
             n = len(it["spans"])
             for L in self.layers:
                 per_layer[L].append(res["representations"][L])
@@ -533,7 +573,10 @@ class RowDetectionLM(RepresentationLM):
             "n_spans": np.asarray(len(cols["token_index"]), dtype=np.int64),
             "item_fingerprints": np.asarray(fps, dtype=object).astype("U"),
             "layers": np.asarray(self.layers, dtype=np.int64),
+            "eff_gpu_name": np.asarray(eff.hardware(self.device)["gpu_name"] or "cpu"),
         }
+        for k, v in eff.unit_columns(row_eff).items():
+            payload[f"eff_{k}"] = v
         for k, v in cols.items():
             payload[k] = to_npz_array(v)
         for L in self.layers:
@@ -542,8 +585,10 @@ class RowDetectionLM(RepresentationLM):
             payload[f"meta_{k}"] = to_npz_array(meta[k])
 
         tmp = shard.with_name(shard.stem + ".tmp.npz")
+        t0 = time.perf_counter()
         np.savez(tmp, **payload)
         tmp.rename(shard)
+        self.shard_write_seconds.append(time.perf_counter() - t0)
 
     def _aggregate_rows(self, by_doc: dict, cache_dir: Path) -> dict:
         """Concatenate the per-document shards in sorted document order.
@@ -559,12 +604,19 @@ class RowDetectionLM(RepresentationLM):
         cols: dict[str, list[np.ndarray]] = {k: [] for k in _MODEL_KEYS}
         meta: dict[str, list[np.ndarray]] = {k: [] for k in SPAN_META_KEYS}
         doc_id_col: list[np.ndarray] = []
+        eff_parts: dict[str, list[np.ndarray]] = {k: [] for k in EFFICIENCY_KEYS}
+        gpu_names: set[str] = set()
 
         for doc_id in sorted(by_doc):
             with np.load(cache_dir / f"{doc_id}.npz", allow_pickle=False) as z:
                 assert list(z["layers"]) == self.layers, (doc_id, z["layers"])
                 n = int(z["n_spans"])
                 assert n == sum(len(it["spans"]) for it in by_doc[doc_id]), (doc_id, n)
+                gpu_names.add(str(z["eff_gpu_name"]))
+                for k in EFFICIENCY_KEYS:
+                    eff_parts[k].append(z[f"eff_{k}"])
+                assert [len(p[-1]) for p in eff_parts.values()] == [len(by_doc[doc_id])] * len(EFFICIENCY_KEYS), doc_id
+                assert int(eff_parts["n_spans"][-1].sum()) == n, doc_id
                 for L in self.layers:
                     rep_blocks[L].append(z[f"rep_{L}"])
                 for k in cols:
@@ -593,6 +645,12 @@ class RowDetectionLM(RepresentationLM):
             if k not in ("representations", "layers"):
                 assert len(v) == n, f"{k}: len {len(v)} != n {n}"
         check_row_invariants(out)
+        assert len(gpu_names) == 1, f"shards were measured on different devices: {sorted(gpu_names)}"
+        rows = {k: np.concatenate(v, axis=0) for k, v in eff_parts.items()}
+        n_prompts = len(_prompt_groups(out)[0])
+        assert all(len(v) == n_prompts for v in rows.values()), "efficiency rows != prompts"
+        assert int(rows["n_spans"].sum()) == n and int(rows["prompt_n_tokens"].sum()) > 0
+        out["efficiency"] = {"rows": rows, "gpu_name": gpu_names.pop(), "n_shards_resumed": self.n_shards_resumed}
         return out
 
 
@@ -717,10 +775,85 @@ def write_span_representations(result: dict, path: Path) -> None:
     """
     payload = {f"rep_{L}": result["representations"][L] for L in result["layers"].tolist()}
     for k, v in result.items():
-        if k == "representations":
+        if k in ("representations", "efficiency"):
             continue
         payload[k] = v
     np.savez_compressed(path, **payload)
+
+
+def write_efficiency(run_dir: Path, rlm: "RowDetectionLM", result: dict, npz_path: Path, seconds: dict) -> dict:
+    """Write ``artifacts/efficiency.json`` and ``artifacts/efficiency_rows.npz``; return the flat ``eff_*`` metrics.
+
+    Per prompt (row): the four phase times of ``judge_row``, peak GPU memory, prompt tokens, span count.
+    Per layer: bytes of the stored array (float32) and its compressed size in the final ``.npz``.
+    See ``efficiency`` for what each quantity means. Phase times of resumed shards come from the
+    run that wrote them; ``eff_n_shards_resumed`` says how many.
+
+    Args:
+        run_dir: run output directory.
+        rlm: the model wrapper that ran the rows.
+        result: ``collect_rows`` output (with ``efficiency``).
+        npz_path: the written ``span_representations.npz``.
+        seconds: ``model_load_seconds``, ``build_items_seconds``, ``collect_seconds``, ``final_write_seconds``.
+
+    Returns:
+        Flat scalar metrics, all prefixed ``eff_``.
+    """
+    rows = result["efficiency"]["rows"]
+    n_prompts, n_spans = len(rows["n_spans"]), int(rows["n_spans"].sum())
+    m: dict = {"eff_n_prompts": n_prompts, "eff_n_shards_resumed": result["efficiency"]["n_shards_resumed"]}
+    for k in ("seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup"):
+        m.update(eff.column_stats(f"eff_{k}", rows[k]))
+    per_prompt = rows["seconds_prompt"] + rows["seconds_trace"] + rows["seconds_readout"] + rows["seconds_cleanup"]
+    m.update(eff.column_stats("eff_seconds_per_prompt", per_prompt))
+    m["eff_seconds_per_span_mean"] = float(per_prompt.sum() / n_spans)
+    m["eff_first_prompt_seconds"] = float(per_prompt[0])   # CUDA warmup is in here unless verify_read_point ran first
+    m.update(eff.column_stats("eff_prompt_n_tokens", rows["prompt_n_tokens"]))
+    m["eff_prompt_tokens_per_second_trace"] = float(rows["prompt_n_tokens"].sum() / rows["seconds_trace"].sum())
+    m["eff_output_tokens_total"] = 0   # prefill only: nothing is decoded
+    if result["efficiency"]["gpu_name"] == "cpu":
+        peak_a = peak_r = [None] * n_prompts
+    else:
+        peak_a, peak_r = rows["peak_alloc_bytes"].tolist(), rows["peak_reserved_bytes"].tolist()
+    m.update(eff.peak_stats("eff_gpu_peak_alloc_bytes", peak_a))
+    m.update(eff.peak_stats("eff_gpu_peak_reserved_bytes", peak_r))
+    m["eff_gpu_weights_bytes"] = rlm.weights_bytes
+    m["eff_gpu_peak_activation_bytes_max"] = (
+        None if m["eff_gpu_peak_alloc_bytes_max"] is None else m["eff_gpu_peak_alloc_bytes_max"] - rlm.weights_bytes
+    )
+    m["eff_host_peak_rss_bytes"] = eff.peak_rss_bytes()
+    for k, v in seconds.items():
+        m[f"eff_{k}"] = v
+    # Shards written by this process only (a resumed shard was written, and timed, by an earlier run).
+    m["eff_shard_write_seconds_total"] = float(sum(rlm.shard_write_seconds))
+    m["eff_n_shards_written"] = len(rlm.shard_write_seconds)
+    sizes = eff.npz_member_sizes(npz_path)
+    for L in result["layers"].tolist():
+        arr = result["representations"][L]
+        assert arr.dtype == np.float32 and arr.shape == (n_spans, rlm.hidden_size), (L, arr.dtype, arr.shape)
+        m[f"eff_rep_bytes_layer_{L}"] = int(arr.nbytes)
+        m[f"eff_rep_compressed_bytes_layer_{L}"] = sizes[f"rep_{L}"][1]
+    m["eff_rep_bytes_per_span_per_layer"] = rlm.hidden_size * 4
+    m["eff_npz_file_bytes"] = npz_path.stat().st_size
+    assert all(v is None or isinstance(v, (int, float)) for v in m.values())
+
+    hw = eff.hardware(rlm.device)
+    assert (hw["gpu_name"] or "cpu") == result["efficiency"]["gpu_name"], "shards were measured on another device than this process"
+    (run_dir / "artifacts" / "efficiency.json").write_text(json.dumps({
+        "hardware": hw, "shard_gpu_name": result["efficiency"]["gpu_name"], "model": rlm.model_name,
+        "layers": result["layers"].tolist(), "metrics": m,
+        "definitions": {
+            "seconds_prompt": "tokenize + offsets + read-position resolution (CPU)",
+            "seconds_trace": "forward pass and in-trace gather/cast/save of the read layers, CUDA-synchronized",
+            "seconds_readout": "device-to-host copy + finiteness checks",
+            "seconds_cleanup": "torch.cuda.empty_cache + gc.collect after every row",
+            "peak_alloc_bytes": "max_memory_allocated over the trace and readout of one row, includes weights",
+            "rep_bytes_layer": "float32 array as stored; the forward runs in the config dtype",
+            "tokens": "input (prompt) tokens only; output tokens are 0 (no decoding)",
+        },
+    }, indent=2))
+    np.savez_compressed(run_dir / "artifacts" / "efficiency_rows.npz", **{k: v for k, v in rows.items()})
+    return m
 
 
 def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build_items_fn, lm_class) -> dict:
@@ -740,14 +873,31 @@ def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build
     from transformers import AutoTokenizer
 
     p, seed = cfg["params"], int(cfg["seed"])
+    meter = eff.Meter(p["device"])
+    t0 = meter.now()
     rlm = lm_class(model_name=p["model"], layers=p["layers"], device=p["device"], dtype=p["dtype"], verbose=True)
+    model_load_seconds = meter.now() - t0
     limit = p["context_token_limit"]
     tokenizer = AutoTokenizer.from_pretrained(p["model"]) if limit is not None else None
+    t0 = meter.now()
     items = build_items_fn(spec, p, seed, repo_root, tokenizer)
+    build_items_seconds = meter.now() - t0
     print(f"{cfg['id']}: {len(items)} row prompt(s), dataset={spec.name}, split={p['split']}")
+    t0 = meter.now()
     result = rlm.collect_rows(
         items, cache_dir=run_dir / "artifacts" / "cache", verify_read_point=p["verify_read_point"],
     )
+    collect_seconds = meter.now() - t0
     (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-    write_span_representations(result, run_dir / "artifacts" / "span_representations.npz")
-    return compute_metrics(result, spec)
+    npz_path = run_dir / "artifacts" / "span_representations.npz"
+    t0 = meter.now()
+    write_span_representations(result, npz_path)
+    final_write_seconds = meter.now() - t0
+    metrics = compute_metrics(result, spec)
+    metrics.update(write_efficiency(
+        run_dir, rlm, result, npz_path, dict(
+            model_load_seconds=model_load_seconds, build_items_seconds=build_items_seconds,
+            collect_seconds=collect_seconds, final_write_seconds=final_write_seconds,
+        ),
+    ))
+    return metrics
