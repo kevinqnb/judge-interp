@@ -1,15 +1,24 @@
-"""Row-based entity detection: PCA of per-entity activations and a single-entity logistic validity probe.
+"""Row-based entity detection on the main dataset: PCA of per-entity activations and a single-entity
+logistic validity probe, scored on minimal pairs.
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py analysis/configs/<type>/<id>.yaml``
 
 Reads the ``entity_detection`` train and test runs named in the config, then:
 
 1. Load one layer and subtract each document's mean activation (nothing else).
-2. PCA on train, coloured by validity.
-3. Logistic regression on one entity's activation, train -> test: smECE, Brier (skill), AUROC,
-   accuracy, reliability diagram.
-4. Per-error-type report on test.
-5. Controls: field-identity baseline, shuffled-label AUROC ~ 0.5, seed determinism.
+2. Pair every corrupted span with its clean twin span (``data/vrdu/main_samples.main_entity_pairs``
+   on the row file the run judged): the same field in the document's clean row, or, for a null-fill
+   span, in another document's clean row. Train and test sets are these pairs, so each (error type,
+   k, field) stratum is exactly 50/50.
+3. PCA on train, coloured by validity.
+4. Logistic regression on one entity's activation, train -> test: smECE, Brier (skill), AUROC (with a
+   document-bootstrap interval), accuracy, reliability diagram; per error type, per (type, k), and
+   with / without null-fill pairs.
+5. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
+   row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the probe does not just sense "this row
+   has a corruption somewhere".
+6. Controls: field-identity baseline (exactly 0.5 AUROC on pairs, asserted), shuffled-label AUROC
+   ~ 0.5, seed determinism.
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
@@ -32,6 +41,13 @@ from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
+
+from judge_interp.dataset_spec import load_dataset_spec
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "data" / "vrdu"))
+from main_samples import kept_span_pairs, main_entity_pairs  # noqa: E402
+from vrdu_common import MAIN_FIELDS, check_build  # noqa: E402
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -112,8 +128,10 @@ def scatter_indices(n: int, max_points: int, seed: int) -> np.ndarray:
     return rng.choice(n, size=max_points, replace=False)
 
 FIGURES_DIR = Path(__file__).parent / "figures"
-# Same set as src/judge_interp/entity_detection.ALL_ERROR_TYPES (not imported: that module needs torch).
-ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type")
+# Every error type of the VRDU datasets (main: inter_document, cross_type; line: intra_document, cross_item).
+ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type", "cross_item")
+# Tolerance for "this AUROC is exactly 0.5" (a structure-only baseline on minimal pairs): float rounding only.
+EXACT_AUROC_ATOL = 1e-9
 REQUIRED_META = (
     "row_ordinal", "field", "field_position", "label_valid", "field_error_type", "row_error_type", "row_k",
 )
@@ -164,7 +182,9 @@ def load_split(run_id: str, runs_root: Path, layer: int, max_docs: int | None, e
         assert len(valid) == metrics["n_spans"], f"{run_id}: {len(valid)} rows != metrics n_spans {metrics['n_spans']}"
         assert int(valid.sum()) == metrics["n_valid_spans"], run_id
         assert int((~valid).sum()) == metrics["n_invalid_spans"], run_id
-        for et in ALL_ERROR_TYPES:
+        run_types = [et for et in ALL_ERROR_TYPES if f"n_spans_{et}" in metrics]   # the run's spec.error_types
+        assert sum(metrics[f"n_spans_{et}"] for et in run_types) == metrics["n_invalid_spans"], (run_id, run_types)
+        for et in run_types:
             assert int((meta["field_error_type"] == et).sum()) == metrics[f"n_spans_{et}"], (run_id, et)
     print(f"{run_id}: layer={layer} n={len(valid)} valid={int(valid.sum())} docs={len(set(meta['doc_ids'].tolist()))} "
           f"hidden={x.shape[1]}")
@@ -183,32 +203,141 @@ def brier_skill_score(y_true: np.ndarray, probs: np.ndarray, ref_rate: float) ->
     return brier, brier_ref, 1.0 - brier / brier_ref
 
 
-def error_type_report(y_valid: np.ndarray, probs: np.ndarray, threshold: float, invalid_type: np.ndarray,
-                      row_type: np.ndarray, types: list[str]) -> dict:
-    """Per-error-type metrics: detection rate and AUROC per type, valid accuracy in clean and corrupted rows.
+def stratum_report(y_valid: np.ndarray, probs: np.ndarray, threshold: float, strata: np.ndarray) -> dict:
+    """Per-stratum metrics of a minimal-pair set (both members of a pair share a stratum).
 
-    ``invalid_type``: each invalid item's error type; ``row_type``: its row's (``""`` if clean).
+    For each stratum value ``s``: ``n_<s>``, ``auroc_<s>``, ``accuracy_<s>``, ``detect_<s>`` (invalid
+    items called invalid) and ``valid_acc_<s>`` (valid items called valid).
+
+    Raises:
+        AssertionError: a stratum without both classes.
     """
-    assert y_valid.dtype == bool and probs.shape == y_valid.shape == invalid_type.shape == row_type.shape
+    assert y_valid.dtype == bool and probs.shape == y_valid.shape == strata.shape
     pred_valid = probs > threshold
     out: dict[str, float] = {}
-    clean = y_valid & (row_type == "")
-    assert clean.any(), "no valid items from clean rows"
-    out["valid_acc_clean_rows"] = float(pred_valid[clean].mean())
-    out["n_valid_clean_rows"] = int(clean.sum())
-    assert set(np.unique(invalid_type[~y_valid]).tolist()) <= set(types), "invalid item with an unlisted error type"
-    for t in types:
-        inv_t = ~y_valid & (invalid_type == t)
-        assert inv_t.any(), f"error type {t!r} has no invalid items"
-        out[f"detect_{t}"] = float((~pred_valid[inv_t]).mean())
-        out[f"n_invalid_{t}"] = int(inv_t.sum())
-        sel = inv_t | y_valid
-        out[f"auroc_{t}_vs_valid"] = float(roc_auc_score(y_valid[sel], probs[sel]))
-        val_in_t = y_valid & (row_type == t)
-        if val_in_t.any():
-            out[f"valid_acc_in_{t}_rows"] = float(pred_valid[val_in_t].mean())
-            out[f"n_valid_in_{t}_rows"] = int(val_in_t.sum())
+    for s in sorted(set(strata.tolist())):
+        sel = strata == s
+        y = y_valid[sel]
+        assert y.any() and (~y).any(), f"stratum {s!r} lacks a class"
+        out[f"n_{s}"] = int(sel.sum())
+        out[f"auroc_{s}"] = float(roc_auc_score(y, probs[sel]))
+        out[f"accuracy_{s}"] = float((pred_valid[sel] == y).mean())
+        out[f"detect_{s}"] = float((~pred_valid[sel][~y]).mean())
+        out[f"valid_acc_{s}"] = float(pred_valid[sel][y].mean())
     return out
+
+
+def doc_bootstrap_auroc(y_valid: np.ndarray, probs: np.ndarray, docs: np.ndarray, n_boot: int, ci_level: float,
+                        seed: int) -> tuple[float, float]:
+    """Percentile interval of AUROC over ``n_boot`` resamples of documents, with replacement.
+
+    ``docs``: the document each item is resampled with (for a minimal pair, both members carry the
+    invalid member's document, so a resample keeps pairs whole).
+    """
+    assert isinstance(n_boot, int) and n_boot > 0 and 0.0 < ci_level < 1.0, (n_boot, ci_level)
+    assert y_valid.shape == probs.shape == docs.shape
+    uniq = np.unique(docs)
+    members = [np.flatnonzero(docs == d) for d in uniq]
+    rng = np.random.default_rng(seed)
+    aucs = []
+    for _ in range(n_boot):
+        idx = np.concatenate([members[j] for j in rng.integers(len(uniq), size=len(uniq))])
+        assert y_valid[idx].any() and (~y_valid[idx]).any(), "a document resample lacks a class"
+        aucs.append(roc_auc_score(y_valid[idx], probs[idx]))
+    lo, hi = np.quantile(aucs, [(1 - ci_level) / 2, (1 + ci_level) / 2])
+    return float(lo), float(hi)
+
+
+# --------------------------------------------------------------------- minimal pairs (main)
+def load_run_rows(run_id: str, runs_root: Path, repo_root: Path, dataset: str) -> list[dict]:
+    """The row file a run judged (named by its ``config.snapshot.yaml``); refuses a stale file (``check_build``)."""
+    params = yaml.safe_load((runs_root / run_id / "config.snapshot.yaml").read_text())["params"]
+    spec = load_dataset_spec(repo_root / params["dataset_config"])
+    assert spec.name == dataset, f"{run_id}: dataset {spec.name!r}, expected {dataset!r}"
+    path = repo_root / params["data_root"] / spec.split_path.format(split=params["split"])
+    check_build(path.parent.parent, f"{path.parent.name}/{path.name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def main_span_pairs(split: dict, rows: list[dict], seed: int) -> dict:
+    """Minimal entity pairs of a main run, as span indices.
+
+    Only the rows the run judged are paired (a run may draw a subset of rows); every shown field of a
+    judged row must be a span with the row file's value.
+
+    Args:
+        split: per-span ``doc_ids``, ``row_error_type``, ``row_k``, ``field``, ``value``, ``label_valid``.
+        rows: the main row file the run judged (``load_run_rows``).
+        seed: seeds the other-document twins of null-fill spans (``main_entity_pairs``).
+
+    Returns:
+        Arrays ``inv`` and ``val`` (the invalid span and its clean twin), ``error_type``, ``k``,
+        ``field``, ``null_fill`` and ``doc`` (the invalid span's document), one entry per pair; and
+        ``kept``, ``clean``, ``kept_error_type``, ``kept_doc`` for the row-context diagnostic.
+
+    Raises:
+        AssertionError: a span of no row, a row value the span disagrees with, a judged corrupted row
+            whose clean row was not judged, or a label that disagrees with the pairing.
+    """
+    keys = zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist(), split["field"].tolist())
+    index: dict[tuple, int] = {}
+    for i, key in enumerate(keys):
+        assert key not in index, f"span {key} occurs twice"
+        index[key] = i
+    by_row = {(r["document_id"], r["error_type"] or "", r["k"]): r for r in rows}
+    assert len(by_row) == len(rows), "row keys are not unique"
+    judged = sorted({key[:3] for key in index})
+    assert set(judged) <= set(by_row), f"spans of rows not in the row file, e.g. {sorted(set(judged) - set(by_row))[:3]}"
+    n_shown = 0
+    for rk in judged:
+        r = by_row[rk]
+        for f in (f for f in MAIN_FIELDS if r[f] is not None):
+            assert (*rk, f) in index, f"row {rk}: shown field {f!r} has no span"
+            assert split["value"][index[(*rk, f)]] == r[f], f"row {rk}, {f!r}: span value differs from the row file"
+            n_shown += 1
+    assert n_shown == len(index), "a span of a field the row does not show"
+
+    sub = [by_row[rk] for rk in judged]
+    pairs = main_entity_pairs(sub, seed)
+    out = {
+        "inv": np.array([index[(p["invalid"]["document_id"], p["error_type"], p["k"], p["field"])] for p in pairs]),
+        "val": np.array([index[(p["valid"]["document_id"], "", 0, p["field"])] for p in pairs]),
+        "error_type": np.array([p["error_type"] for p in pairs]), "k": np.array([p["k"] for p in pairs]),
+        "field": np.array([p["field"] for p in pairs]), "null_fill": np.array([p["null_fill"] for p in pairs]),
+        "doc": np.array([p["invalid"]["document_id"] for p in pairs]),
+    }
+    kept = kept_span_pairs(sub)
+    out["kept"] = np.array([index[(p["kept"]["document_id"], p["error_type"], p["k"], p["field"])] for p in kept], dtype=np.int64)
+    out["clean"] = np.array([index[(p["clean"]["document_id"], "", 0, p["field"])] for p in kept], dtype=np.int64)
+    out["kept_error_type"] = np.array([p["error_type"] for p in kept])
+    out["kept_doc"] = np.array([p["kept"]["document_id"] for p in kept])
+    valid = split["label_valid"]
+    assert not valid[out["inv"]].any() and valid[out["val"]].all(), "a pair's labels disagree with the span labels"
+    assert valid[out["kept"]].all() and valid[out["clean"]].all(), "a kept / clean span is not valid"
+    assert len(out["inv"]) == int((~valid).sum()), "not every invalid span is paired"
+    return out
+
+
+def stack_pairs(inv: np.ndarray, val: np.ndarray, **cols: np.ndarray) -> dict:
+    """Both members of every pair as one evaluation set: ``idx`` (invalid members, then their twins),
+    ``y`` (valid), and each of ``cols`` (per pair) repeated for both members."""
+    assert inv.shape == val.shape and all(c.shape == inv.shape for c in cols.values())
+    n = len(inv)
+    return {"idx": np.concatenate([inv, val]), "y": np.concatenate([np.zeros(n, bool), np.ones(n, bool)]),
+            **{k: np.concatenate([c, c]) for k, c in cols.items()}}
+
+
+def assert_structure_auroc_is_chance(name: str, y_tr: np.ndarray, cats_tr: np.ndarray, y_te: np.ndarray,
+                                     cats_te: np.ndarray, p: dict, seed: int) -> dict:
+    """Known-answer control: a probe on one-hot structure categories (each exactly 50/50 in a minimal-pair
+    set) has test AUROC exactly 0.5; anything else means the pairing is broken. Returns its metrics."""
+    cats = sorted(set(cats_tr.tolist()) | set(cats_te.tolist()))
+    base = fit_logreg(onehot(cats_tr, cats), y_tr, p, seed)
+    probs = base.predict_proba(onehot(cats_te, cats))[:, 1]
+    m = probe_metrics(f"test_baseline_{name}", y_te, probs, float(y_tr.mean()), p["decision_threshold"])
+    assert abs(m[f"test_baseline_{name}_auroc"] - 0.5) <= EXACT_AUROC_ATOL, (
+        f"{name} baseline AUROC {m[f'test_baseline_{name}_auroc']} != 0.5 on minimal pairs -- the pairing is broken")
+    return m
 
 
 def shuffled_label_auroc(x_tr: np.ndarray, y_tr: np.ndarray, x_te: np.ndarray, y_te: np.ndarray, p: dict,
@@ -274,6 +403,15 @@ def plot_prob_histogram(probs: np.ndarray, n_bins: int, out_dir: Path) -> None:
 
 
 # ----------------------------------------------------------------------------- main
+def pair_set(split: dict, rows: list[dict], seed: int) -> tuple[dict, dict]:
+    """``(z, s)``: ``main_span_pairs`` and both members of its pairs stacked (``stack_pairs``)."""
+    z = main_span_pairs(split, rows, seed)
+    s = stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"],
+                    null_fill=z["null_fill"], doc=z["doc"])
+    s["type_k"] = np.char.add(np.char.add(s["error_type"], "_k"), s["k"].astype(str))
+    return z, s
+
+
 def run(cfg: dict, runs_root: Path) -> dict:
     p, seed = cfg["params"], cfg["seed"]
     out = runs_root / cfg["id"]
@@ -283,25 +421,26 @@ def run(cfg: dict, runs_root: Path) -> dict:
     layer, thr = p["layer"], p["decision_threshold"]
     assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
 
-    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ())
-    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ())
+    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
+    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
     assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
-    types = sorted(set(np.unique(tr["field_error_type"][~tr["label_valid"]]).tolist()))
-    assert types == sorted(set(np.unique(te["field_error_type"][~te["label_valid"]]).tolist())), (
-        "train and test have different error types"
-    )
 
     # The only preprocessing: per-document mean subtraction (asserted ~0 per document).
     center_per_document(tr["X"], tr["doc_ids"])
     center_per_document(te["X"], te["doc_ids"])
-    x_tr, x_te, y_tr, y_te = tr["X"], te["X"], tr["label_valid"], te["label_valid"]
-    for y in (y_tr, y_te):
-        assert y.any() and (~y).any(), "one class missing"
+    z_tr, s_tr = pair_set(tr, load_run_rows(p["train_run_id"], runs_root, REPO_ROOT, "main"), p["twin_seed"])
+    z_te, s_te = pair_set(te, load_run_rows(p["test_run_id"], runs_root, REPO_ROOT, "main"), p["twin_seed"])
+    x_tr, x_te, y_tr, y_te = tr["X"][s_tr["idx"]], te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
+    types = sorted(set(z_tr["error_type"].tolist()))
+    assert types == sorted(set(z_te["error_type"].tolist())), "train and test have different error types"
     ref_rate = float(y_tr.mean())
+    assert ref_rate == 0.5 == float(y_te.mean()), "minimal-pair sets are not 50/50"
 
     metrics: dict[str, float] = {
-        "layer": layer, "n_train": int(len(y_tr)), "n_test": int(len(y_te)),
-        "train_valid_rate": ref_rate, "test_valid_rate": float(y_te.mean()),
+        "layer": layer, "n_train_pairs": int(len(z_tr["inv"])), "n_test_pairs": int(len(z_te["inv"])),
+        "n_train_null_fill_pairs": int(z_tr["null_fill"].sum()), "n_test_null_fill_pairs": int(z_te["null_fill"].sum()),
+        # one clean span is the twin in every (type, k) stratum, so far fewer valid spans than pairs
+        "n_train_unique_valid_spans": len(set(z_tr["val"].tolist())), "n_test_unique_valid_spans": len(set(z_te["val"].tolist())),
         "n_train_docs": len(set(tr["doc_ids"].tolist())), "n_test_docs": len(set(te["doc_ids"].tolist())),
     }
 
@@ -317,20 +456,37 @@ def run(cfg: dict, runs_root: Path) -> dict:
     assert probs.shape == y_te.shape
     metrics.update(probe_metrics("test", y_te, probs, ref_rate, thr))
     metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(x_tr)[:, 1]))
+    metrics["test_auroc_ci_lo"], metrics["test_auroc_ci_hi"] = doc_bootstrap_auroc(
+        y_te, probs, s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
+    no_fill = ~s_te["null_fill"]
+    metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
+    metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
+        y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
+    if s_te["null_fill"].any():
+        fill = s_te["null_fill"]
+        metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
 
     d = smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     plot_calibration(d, fig_dir)
     plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
 
-    for k_, v in error_type_report(y_te, probs, thr, te["field_error_type"], te["row_error_type"], types).items():
-        metrics[f"test_{k_}"] = v
+    for col in ("error_type", "type_k"):
+        for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
+            metrics[f"test_{k_}"] = v
+    for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
+        metrics[f"test_no_null_fill_{k_}"] = v
 
-    # Field-identity baseline: what a probe that sees only which field this is can do.
-    fields = sorted(set(tr["field"].tolist()))
-    base = fit_logreg(onehot(tr["field"], fields), y_tr, p, seed)
-    base_probs = base.predict_proba(onehot(te["field"], fields))[:, 1]
-    metrics.update(probe_metrics("test_baseline_field", y_te, base_probs, ref_rate, thr))
+    # Row-context diagnostic: uncorrupted spans of corrupted rows vs the same spans in the clean row.
+    p_kept, p_clean = clf.predict_proba(te["X"][z_te["kept"]])[:, 1], clf.predict_proba(te["X"][z_te["clean"]])[:, 1]
+    metrics["test_kept_mean_p_valid"], metrics["test_kept_twin_mean_p_valid"] = float(p_kept.mean()), float(p_clean.mean())
+    metrics["test_kept_valid_acc"] = float((p_kept > thr).mean())
+    n_kept = len(p_kept)
+    metrics["test_clean_vs_kept_auroc"] = float(roc_auc_score(
+        np.concatenate([np.zeros(n_kept, bool), np.ones(n_kept, bool)]), np.concatenate([p_kept, p_clean])))
+
+    # Field-identity baseline: on minimal pairs every field is 50/50, so exactly chance (asserted).
+    metrics.update(assert_structure_auroc_is_chance("field", y_tr, s_tr["field"], y_te, s_te["field"], p, seed))
 
     if p["run_controls"]:
         auc_shuf, auc_shuf_std = shuffled_label_auroc(x_tr, y_tr, x_te, y_te, p, seed)
@@ -345,8 +501,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
 
     np.savez_compressed(
         out / "artifacts" / "test_predictions.npz",
-        prob_valid=probs, label_valid=y_te, doc_ids=te["doc_ids"], row_ordinal=te["row_ordinal"],
-        field=te["field"], field_error_type=te["field_error_type"], row_error_type=te["row_error_type"],
+        prob_valid=probs, label_valid=y_te, span=s_te["idx"], pair_doc=s_te["doc"], doc_ids=te["doc_ids"][s_te["idx"]],
+        field=s_te["field"], error_type=s_te["error_type"], k=s_te["k"], null_fill=s_te["null_fill"],
     )
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
