@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-25T12:15:20.067912+00:00",
+ "generated_at": "2026-10-25T12:54:14.845956+00:00",
  "python": "3.12.5",
  "script": "data/vrdu/build_vrdu_main.py",
  "config_id": "2026-10-24-vrdu-invalids-06",
@@ -1561,6 +1561,6 @@
   "main/train.json": "6c0998658a38cf8604710abbcf93373baa8709282f76cb078fd661eff99a42b6",
   "main/test.json": "e75f7b48aedc4a6107feb0beeb42d10b3b1afc40c0c3896b656557f38ec3805d"
  },
- "git_sha": "433de9c17bb31805ae32c41636a5291ca08f04ad",
+ "git_sha": "4fba69b69171d4bccbecd418ff1777d3e830d87f",
  "git_dirty": true
 }
