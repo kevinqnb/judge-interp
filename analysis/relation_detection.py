@@ -241,10 +241,14 @@ def run(cfg: dict, runs_root: Path) -> dict:
         metrics["test_context_valid_acc"] = float((p_ctx[:n_ctx] > thr).mean())
         metrics["test_twin_vs_context_auroc"] = float(roc_auc_score(c["y"], p_ctx))
 
-    # Structure baseline: cell x field pair, each exactly 50/50 on matched pairs -> AUROC exactly 0.5 (asserted).
+    # Structure baseline: cell x field pair, from each member's own span metadata (not the pair's); each is
+    # exactly 50/50 on matched pairs -> AUROC exactly 0.5 (asserted).
     pair_ids = np.array([f"{a}__{b}" for a, b in PAIRS])
-    struct_tr = np.char.add(np.char.add(s_tr["cell"], "|"), pair_ids[s_tr["pair"]])
-    struct_te = np.char.add(np.char.add(s_te["cell"], "|"), pair_ids[s_te["pair"]])
+
+    def structure(split, s):
+        return np.array([f"{c}|{a}__{b}" for c, a, b in zip(split["cell"][s["i"]], split["field"][s["i"]], split["field"][s["j"]])])
+
+    struct_tr, struct_te = structure(tr, s_tr), structure(te, s_te)
     metrics.update(er.assert_structure_auroc_is_chance("cell_field_pair", y_tr, struct_tr, y_te, struct_te, p, seed))
 
     if p["run_controls"]:

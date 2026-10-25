@@ -485,8 +485,9 @@ def run(cfg: dict, runs_root: Path) -> dict:
     metrics["test_clean_vs_kept_auroc"] = float(roc_auc_score(
         np.concatenate([np.zeros(n_kept, bool), np.ones(n_kept, bool)]), np.concatenate([p_kept, p_clean])))
 
-    # Field-identity baseline: on minimal pairs every field is 50/50, so exactly chance (asserted).
-    metrics.update(assert_structure_auroc_is_chance("field", y_tr, s_tr["field"], y_te, s_te["field"], p, seed))
+    # Field-identity baseline, from each member's own span metadata (not the pair's): on minimal pairs every
+    # field is 50/50, so exactly chance (asserted).
+    metrics.update(assert_structure_auroc_is_chance("field", y_tr, tr["field"][s_tr["idx"]], y_te, te["field"][s_te["idx"]], p, seed))
 
     if p["run_controls"]:
         auc_shuf, auc_shuf_std = shuffled_label_auroc(x_tr, y_tr, x_te, y_te, p, seed)

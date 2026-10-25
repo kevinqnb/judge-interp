@@ -166,7 +166,7 @@ def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: P
             for k, v in er.stratum_report(y, probs, thr, ev[col]).items():
                 m[f"test_{k}"] = v
         # Parameter-free structure baseline: subset size is identical within a pair, so exactly chance.
-        m["test_baseline_size_auroc"] = float(roc_auc_score(y, -ev["size"]))
+        m["test_baseline_size_auroc"] = float(roc_auc_score(y, -run["size"][ev["idx"]]))   # each member's own size
         assert abs(m["test_baseline_size_auroc"] - 0.5) <= er.EXACT_AUROC_ATOL, f"{label}: size predicts the label"
 
     mean, std = permutation_null_auroc(y, probs, p["n_shuffles"], seed)
