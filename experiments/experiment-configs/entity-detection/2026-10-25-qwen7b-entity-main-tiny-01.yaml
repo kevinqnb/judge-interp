@@ -1,0 +1,30 @@
+id: 2026-10-25-qwen7b-entity-main-tiny-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Tiny GPU test of entity detection, main dataset, test split, Qwen2.5-7B-Instruct: 4 rows per stratum, drawn with the seed.
+  Confirms GPU plumbing, the efficiency measurement (eff_* metrics, artifacts/efficiency.json) and label bookkeeping only.
+  Expected: n_prompts = 12, one read token id, eff_output_tokens_total = 0, eff_n_shards_resumed = 0, GPU peak memory not None.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  split: test
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  error_types: [inter_document, cross_type]
+  rows_per_stratum:
+    valid: 4
+    inter_document: 4
+    cross_type: 4
+
+  # -- experiments/submit.sh resources (tiny test) --
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "00:30:00"

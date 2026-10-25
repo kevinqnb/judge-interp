@@ -1,0 +1,25 @@
+id: 2026-10-25-clef-conditional-line-tiny-01
+project: judge-interp
+task: clef_relation_conditional
+description: >-
+  Tiny GPU test of Clef conditional on the line test split: 30 samples = the first pair (by pair_id) of each of the 15 cells, from experiments/clef-samples/conditional-test.json.
+  Confirms GPU plumbing, the efficiency measurement and the sanity controls only.
+  Expected: known-answer check passes, the 5-record determinism rescore is bitwise identical, eff_output_tokens_total = 0, GPU peak memory not None.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-tiny.json
+
+  # -- experiments/submit.sh resources (tiny test) --
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "00:30:00"
