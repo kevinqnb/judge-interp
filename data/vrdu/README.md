@@ -21,7 +21,7 @@ Run each script with `uv run --python 3.12 python data/vrdu/<script> --config <c
 deterministic for a fixed seed. The row files are **gitignored**. The committed `{main,line}_build.json`
 record each file's sha256, and readers refuse a stale file (`vrdu_common.check_build`). Numbers
 from invalids `-05` and earlier do not carry over to `-06`. The `-05` scripts (`build_vrdu_invalids.py`,
-`build_vrdu_manifest.py`, `build_vrdu_subsets.py`) and their outputs are retired.
+`build_vrdu_manifest.py`, `build_vrdu_subsets.py`) and their outputs were removed after `-06`; see git history.
 
 ## Rules shared by both datasets
 

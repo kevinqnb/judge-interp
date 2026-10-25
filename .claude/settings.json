@@ -9,13 +9,10 @@
       "Edit(analysis/entity_detection.py)",
       "Edit(analysis/relation_detection.py)",
       "Edit(analysis/clef.py)",
-      "Edit(data/vrdu/build_vrdu_invalids.py)",
       "Edit(data/vrdu/build_vrdu_line.py)",
       "Edit(data/vrdu/build_vrdu_main.py)",
       "Edit(data/vrdu/main_samples.py)",
-      "Edit(data/vrdu/vrdu_common.py)",
-      "Edit(data/vrdu/build_vrdu_subsets.py)",
-      "Edit(data/vrdu/subsets.py)"
+      "Edit(data/vrdu/vrdu_common.py)"
     ]
   }
 }

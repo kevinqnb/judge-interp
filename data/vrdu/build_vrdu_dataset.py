@@ -2,8 +2,8 @@
 
 Reads the upstream ``dataset.jsonl`` and writes, under ``--out-dir``: ``directory.json`` (split +
 per-document metadata), ``ocr/<document_id>.txt``, ``main/{train,test}_base.json`` (one valid row per
-document) and ``line/{train,test}_base.json`` (one valid row per line item). Invalid rows are added
-later by ``build_vrdu_invalids.py``. A document-level field annotated with disagreeing values is
+document) and ``line/{train,test}_base.json`` (one valid row per line item). Invalid rows and samples are
+built from them by ``build_vrdu_main.py`` and ``build_vrdu_line.py``. A document-level field annotated with disagreeing values is
 resolved by majority vote (earliest occurrence breaks ties); the conflicts are kept in ``directory.json``.
 
 Local data preparation (no cluster job); the command is in ``README.md``.
