@@ -19,9 +19,10 @@ params:
 
   # -- experiments/submit.sh resources --
   # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
-  # models and Clef; walltime is a placeholder pending the GPU timing pilot (queue limit 48:00:00).
+  # models and Clef; walltime is ~2x the tiny-test estimate (2026-10-25-*-tiny-0*: ~0.5 s/prompt
+  # for the representation models, 0.7-1.2 s/record for Clef). Shards resume if a job is killed.
   gpu_type: L40S
   gpu_memory: 48G
   gpu_c: 8.9
   omp: 8
-  walltime: "12:00:00"
+  walltime: "04:00:00"
