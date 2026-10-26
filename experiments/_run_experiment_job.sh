@@ -28,13 +28,19 @@ CONFIG_PATH="${CONFIG_PATH:?CONFIG_PATH not set -- must be passed via qsub -v fr
 export HF_HOME=/projectnb/mcnet/kevin/cache-hf
 
 # CPU-only analysis job (submit.sh --analysis <script>): ANALYSIS_SCRIPT is always
-# passed by submit.sh, empty for a normal experiment. BLAS threads follow the slots.
+# passed by submit.sh, empty for a normal experiment. BLAS threads follow the config's
+# params.thread_cap (no default: a missing key fails here), at most the granted slots.
 if [ -n "${ANALYSIS_SCRIPT}" ]; then
-    export OMP_NUM_THREADS="${NSLOTS:?NSLOTS not set -- not running under SGE}"
+    : "${NSLOTS:?NSLOTS not set -- not running under SGE}"
+    THREADS="$(uv run --python 3.12 python -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['params']['thread_cap'])" "${CONFIG_PATH}")"
+    [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] && [ "$THREADS" -le "$NSLOTS" ] \
+        || { echo "error: params.thread_cap=${THREADS} must be an integer in [1, NSLOTS=${NSLOTS}]" >&2; exit 1; }
+    export OMP_NUM_THREADS="$THREADS"
     # numpy and scipy each bundle an OpenBLAS (and others ship MKL/numexpr/Accelerate), and
-    # OMP_NUM_THREADS alone does not cap all of them: jobs overran their slots (CPU/wall ~11-20x
-    # on 8-16 slots; 8098591 was SIGKILLed). Pin every pool to the slot count.
-    export OPENBLAS_NUM_THREADS="$NSLOTS" MKL_NUM_THREADS="$NSLOTS" NUMEXPR_NUM_THREADS="$NSLOTS" VECLIB_MAXIMUM_THREADS="$NSLOTS"
+    # OMP_NUM_THREADS alone does not cap all of them, so pin every pool. Pinning to the slot count
+    # still overran it on compute nodes (CPU/wall 10-18x on 8-16 slots; 8098591 and, 2026-10-26,
+    # 8289218 / 8289220 were SIGKILLed), hence a cap below the slots in the config.
+    export OPENBLAS_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" NUMEXPR_NUM_THREADS="$THREADS" VECLIB_MAXIMUM_THREADS="$THREADS"
     # Log which pools exist and their thread counts, to verify the caps took effect.
     uv run --python 3.12 --extra analysis python -c "import numpy, scipy, sklearn; from threadpoolctl import threadpool_info; [print('threadpool:', d['internal_api'], d['num_threads'], d['filepath']) for d in threadpool_info()]"
     exec uv run --python 3.12 --extra analysis python "${ANALYSIS_SCRIPT}" "${CONFIG_PATH}"

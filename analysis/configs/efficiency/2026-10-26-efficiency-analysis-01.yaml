@@ -42,4 +42,6 @@ params:
     - {name: clef_oneshot_line_over_qwen7b_relation_line_seconds_per_item, numerator: clef_oneshot_line, denominator: qwen7b_relation_line, metric: seconds_per_item}
   # -- experiments/submit.sh --analysis resources (CPU only) --
   omp: 2
+  # equals omp, as in the finished 2026-10-26-efficiency-analysis-01 run
+  thread_cap: 2
   walltime: "00:30:00"

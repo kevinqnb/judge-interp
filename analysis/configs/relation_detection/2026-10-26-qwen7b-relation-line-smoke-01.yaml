@@ -25,6 +25,8 @@ params:
   shuffled_label_auroc_tolerance: 0.1
   # -- experiments/submit.sh --analysis resources (CPU only; walltime is a placeholder until the smoke run sizes it) --
   omp: 16
+  # BLAS threads, below omp: jobs at thread_cap == omp were SIGKILLed on a compute node
+  thread_cap: 8
   walltime: "00:30:00"
   # restrict each split to its first N documents (null = all)
   max_docs: 20

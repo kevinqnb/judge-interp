@@ -28,4 +28,6 @@ params:
   permutation_auroc_tolerance: 0.03
   # -- experiments/submit.sh --analysis resources (CPU only) --
   omp: 8
+  # equals omp, as in the finished 2026-10-26-clef-analysis-01 run
+  thread_cap: 8
   walltime: "01:00:00"

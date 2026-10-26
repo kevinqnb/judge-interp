@@ -18,4 +18,6 @@ params:
     - {name: clef_over_qwen_relation_seconds_unit_mean, numerator: clef_conditional_line, denominator: qwen7b_relation_line, metric: seconds_unit_mean}
   # -- experiments/submit.sh --analysis resources (CPU only) --
   omp: 2
+  # equals omp, as in the finished 2026-10-26-efficiency-analysis-01 run
+  thread_cap: 2
   walltime: "00:10:00"
