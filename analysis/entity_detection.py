@@ -318,6 +318,76 @@ def main_span_pairs(split: dict, rows: list[dict], seed: int) -> dict:
     return out
 
 
+def line_span_pairs(split: dict, rows: list[dict]) -> dict:
+    """Minimal entity pairs of a line run, as span indices.
+
+    A corrupted span is paired with the same field of its clean twin sample (same ``pair_id``, original
+    values). Spans left uncorrupted in an invalid sample are paired with the twin's span too, for the
+    context diagnostic. Only the samples the run judged are paired; a pair must be judged whole.
+
+    Args:
+        split: per-span ``doc_ids``, ``pair_id``, ``cell``, ``row_error_type``, ``row_k``, ``field``,
+            ``value``, ``label_valid``, ``field_error_type``.
+        rows: the line row file the run judged (``load_run_rows``).
+
+    Returns:
+        The arrays of ``main_span_pairs`` (``inv``, ``val``, ``error_type``, ``k``, ``field``, ``null_fill``
+        -- always False on line --, ``doc``, ``kept``, ``clean``, ``kept_error_type``, ``kept_doc``) and
+        ``cell``, ``kept_cell``.
+
+    Raises:
+        AssertionError: a span of no sample, a value or label the row file disagrees with, a sample whose
+            twin was not judged, or a corruption that left the value unchanged.
+    """
+    keys = zip(split["pair_id"].tolist(), (split["row_error_type"] == "").tolist(), split["field"].tolist())
+    index: dict[tuple, int] = {}
+    for i, key in enumerate(keys):
+        assert key not in index, f"span {key} occurs twice"
+        index[key] = i
+    by_sample = {(r["pair_id"], r["valid"]): r for r in rows}
+    assert len(by_sample) == len(rows), "(pair_id, valid) is not unique in the row file"
+    judged = sorted({key[:2] for key in index})
+    assert set(judged) <= set(by_sample), f"spans of samples not in the row file, e.g. {sorted(set(judged) - set(by_sample))[:3]}"
+    pair_ids = sorted({pid for pid, _ in judged})
+    judged_set = set(judged)
+    missing = [(pid, v) for pid in pair_ids for v in (True, False) if (pid, v) not in judged_set]
+    assert not missing, f"{len(missing)} samples whose twin was not judged, e.g. {missing[:2]}"
+
+    n_shown = 0
+    for key in judged:
+        r = by_sample[key]
+        for f in r["fields"]:
+            assert (*key, f) in index, f"sample {key}: shown field {f!r} has no span"
+            i = index[(*key, f)]
+            assert split["value"][i] == r[f], f"sample {key}, {f!r}: span value differs from the row file"
+            assert bool(split["label_valid"][i]) == (r["field_errors"][f] is None), f"sample {key}, {f!r}: span label differs from the row file"
+            n_shown += 1
+    assert n_shown == len(index), "a span of a field the sample does not show"
+
+    inv, val, kept, clean = [], [], [], []
+    for pid in pair_ids:
+        for f in by_sample[(pid, False)]["fields"]:
+            i, j = index[(pid, False, f)], index[(pid, True, f)]
+            if split["label_valid"][i]:
+                assert split["value"][i] == split["value"][j], f"{pid}, {f!r}: an uncorrupted span differs from its twin"
+                kept.append(i)
+                clean.append(j)
+            else:
+                assert split["value"][i] != split["value"][j], f"{pid}, {f!r}: the corruption left the value unchanged"
+                inv.append(i)
+                val.append(j)
+    inv, val, kept, clean = (np.array(a, dtype=np.int64) for a in (inv, val, kept, clean))
+    valid = split["label_valid"]
+    assert not valid[inv].any() and valid[val].all() and valid[kept].all() and valid[clean].all(), "a pair's labels disagree with the span labels"
+    assert len(inv) == int((~valid).sum()), "not every invalid span is paired"
+    return {
+        "inv": inv, "val": val, "error_type": split["field_error_type"][inv], "k": split["row_k"][inv],
+        "field": split["field"][inv], "null_fill": np.zeros(len(inv), dtype=bool), "doc": split["doc_ids"][inv],
+        "cell": split["cell"][inv], "kept": kept, "clean": clean, "kept_error_type": split["row_error_type"][kept],
+        "kept_doc": split["doc_ids"][kept], "kept_cell": split["cell"][kept],
+    }
+
+
 def stack_pairs(inv: np.ndarray, val: np.ndarray, **cols: np.ndarray) -> dict:
     """Both members of every pair as one evaluation set: ``idx`` (invalid members, then their twins),
     ``y`` (valid), and each of ``cols`` (per pair) repeated for both members."""
@@ -403,12 +473,20 @@ def plot_prob_histogram(probs: np.ndarray, n_bins: int, out_dir: Path) -> None:
 
 
 # ----------------------------------------------------------------------------- main
-def pair_set(split: dict, rows: list[dict], seed: int) -> tuple[dict, dict]:
-    """``(z, s)``: ``main_span_pairs`` and both members of its pairs stacked (``stack_pairs``)."""
-    z = main_span_pairs(split, rows, seed)
+DATASETS = ("main", "line")
+
+
+def pair_set(split: dict, rows: list[dict], seed: int | None, dataset: str) -> tuple[dict, dict]:
+    """``(z, s)``: the dataset's span pairs (``main_span_pairs`` / ``line_span_pairs``) and both members
+    stacked (``stack_pairs``). ``s["stratum"]`` is the finer stratification: (type, k) on main, the cell on line."""
+    assert dataset in DATASETS, dataset
+    z = main_span_pairs(split, rows, seed) if dataset == "main" else line_span_pairs(split, rows)
     s = stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"],
                     null_fill=z["null_fill"], doc=z["doc"])
-    s["type_k"] = np.char.add(np.char.add(s["error_type"], "_k"), s["k"].astype(str))
+    if dataset == "main":
+        s["stratum"] = np.char.add(np.char.add(s["error_type"], "_k"), s["k"].astype(str))
+    else:
+        s["stratum"] = np.concatenate([z["cell"]] * 2)
     return z, s
 
 
@@ -421,15 +499,19 @@ def run(cfg: dict, runs_root: Path) -> dict:
     layer, thr = p["layer"], p["decision_threshold"]
     assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
 
-    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
-    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
+    dataset = p["dataset"]
+    assert dataset in DATASETS, dataset
+    extra = ("value",) if dataset == "main" else ("value", "pair_id", "cell")
+    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", extra)
+    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", extra)
     assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
 
     # The only preprocessing: per-document mean subtraction (asserted ~0 per document).
     center_per_document(tr["X"], tr["doc_ids"])
     center_per_document(te["X"], te["doc_ids"])
-    z_tr, s_tr = pair_set(tr, load_run_rows(p["train_run_id"], runs_root, REPO_ROOT, "main"), p["twin_seed"])
-    z_te, s_te = pair_set(te, load_run_rows(p["test_run_id"], runs_root, REPO_ROOT, "main"), p["twin_seed"])
+    twin_seed = p["twin_seed"] if dataset == "main" else None   # only main has other-document twins
+    z_tr, s_tr = pair_set(tr, load_run_rows(p["train_run_id"], runs_root, REPO_ROOT, dataset), twin_seed, dataset)
+    z_te, s_te = pair_set(te, load_run_rows(p["test_run_id"], runs_root, REPO_ROOT, dataset), twin_seed, dataset)
     x_tr, x_te, y_tr, y_te = tr["X"][s_tr["idx"]], te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
     types = sorted(set(z_tr["error_type"].tolist()))
     assert types == sorted(set(z_te["error_type"].tolist())), "train and test have different error types"
@@ -438,11 +520,12 @@ def run(cfg: dict, runs_root: Path) -> dict:
 
     metrics: dict[str, float] = {
         "layer": layer, "n_train_pairs": int(len(z_tr["inv"])), "n_test_pairs": int(len(z_te["inv"])),
-        "n_train_null_fill_pairs": int(z_tr["null_fill"].sum()), "n_test_null_fill_pairs": int(z_te["null_fill"].sum()),
         # one clean span is the twin in every (type, k) stratum, so far fewer valid spans than pairs
         "n_train_unique_valid_spans": len(set(z_tr["val"].tolist())), "n_test_unique_valid_spans": len(set(z_te["val"].tolist())),
         "n_train_docs": len(set(tr["doc_ids"].tolist())), "n_test_docs": len(set(te["doc_ids"].tolist())),
     }
+    if dataset == "main":   # null-fill exists only on main
+        metrics["n_train_null_fill_pairs"], metrics["n_test_null_fill_pairs"] = int(z_tr["null_fill"].sum()), int(z_te["null_fill"].sum())
 
     pca = PCA(n_components=p["pca_n_components"], svd_solver=p["pca_svd_solver"], random_state=seed)
     scores = pca.fit_transform(x_tr)
@@ -459,23 +542,27 @@ def run(cfg: dict, runs_root: Path) -> dict:
     metrics["test_auroc_ci_lo"], metrics["test_auroc_ci_hi"] = doc_bootstrap_auroc(
         y_te, probs, s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
     no_fill = ~s_te["null_fill"]
-    metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
-    metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
-        y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
-    if s_te["null_fill"].any():
-        fill = s_te["null_fill"]
-        metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
+    if dataset == "main":
+        metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
+        metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
+            y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
+        if s_te["null_fill"].any():
+            fill = s_te["null_fill"]
+            metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
+    else:
+        assert no_fill.all(), "line has no null-fill pairs"
 
     d = smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
     plot_calibration(d, fig_dir)
     plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
 
-    for col in ("error_type", "type_k"):
+    for col in ("error_type", "stratum"):
         for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
             metrics[f"test_{k_}"] = v
-    for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
-        metrics[f"test_no_null_fill_{k_}"] = v
+    if dataset == "main":
+        for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
+            metrics[f"test_no_null_fill_{k_}"] = v
 
     # Row-context diagnostic: uncorrupted spans of corrupted rows vs the same spans in the clean row.
     p_kept, p_clean = clf.predict_proba(te["X"][z_te["kept"]])[:, 1], clf.predict_proba(te["X"][z_te["clean"]])[:, 1]
