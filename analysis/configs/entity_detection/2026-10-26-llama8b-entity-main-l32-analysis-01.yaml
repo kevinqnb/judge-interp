@@ -1,0 +1,35 @@
+id: 2026-10-26-llama8b-entity-main-l32-analysis-01
+project: judge-interp
+description: >-
+  Llama-3.1-8B-Instruct, layer 32 of 32 (last, post-final-norm). Entity detection, main dataset (-06 minimal pairs): single-entity logistic validity probe on per-document mean-centred closing-quote activations, scored on matched corrupted-span / clean-twin-span pairs; train PCA, per-error-type and per-(type, k) accuracy, with and without null-fill pairs, row-context diagnostic, controls.
+  Needs the full train and test runs 2026-10-25-llama8b-entity-main-train-01 and 2026-10-25-llama8b-entity-main-test-01 (-06 data, 2026-10-25).
+seed: 0
+params:
+  train_run_id: 2026-10-25-llama8b-entity-main-train-01
+  test_run_id: 2026-10-25-llama8b-entity-main-test-01
+  dataset: main
+  # one of the runs' layers; 0 is the constant null control and is rejected
+  layer: 32
+  pca_n_components: 2
+  pca_svd_solver: randomized
+  max_scatter_points: 20000
+  twin_seed: 0   # seeds the other-document twins of null-fill spans
+  # logistic regression (lbfgs; ConvergenceWarning is an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  # document-bootstrap interval of the test AUROC
+  auroc_n_boot: 1000
+  ci_level: 0.95
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  run_controls: true
+  # test AUROC is averaged over n_shuffles permuted-train-label fits
+  n_shuffles: 30
+  shuffled_label_auroc_tolerance: 0.03
+  # -- experiments/submit.sh --analysis resources (CPU only; walltime is a placeholder until the smoke run sizes it) --
+  omp: 8
+  walltime: "06:00:00"
+  # restrict each split to its first N documents (null = all)
+  max_docs: null

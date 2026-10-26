@@ -1,0 +1,21 @@
+id: 2026-10-26-efficiency-smoke-01
+project: judge-interp
+description: >-
+  SMOKE (plumbing only, not a result): the 2026-10-25 tiny runs (30 rows each; warmup is a large share of their timings).
+seed: 0
+params:
+  # every run must have been measured on this GPU, or the timings are not comparable
+  gpu_name: NVIDIA L40S
+  # kind: rep (entity / relation detection) | clef
+  runs:
+    - {label: qwen7b_relation_line, kind: rep, run_id: 2026-10-25-qwen7b-relation-line-tiny-02}
+    - {label: qwen7b_entity_main, kind: rep, run_id: 2026-10-25-qwen7b-entity-main-tiny-02}
+    - {label: llama8b_entity_line, kind: rep, run_id: 2026-10-25-llama8b-entity-line-tiny-02}
+    - {label: clef_conditional_line, kind: clef, run_id: 2026-10-25-clef-conditional-line-tiny-01}
+    - {label: clef_entity_main, kind: clef, run_id: 2026-10-25-clef-entity-main-tiny-01}
+  # ratio of a per-run metric between two labelled runs: numerator / denominator
+  comparisons:
+    - {name: clef_over_qwen_relation_seconds_unit_mean, numerator: clef_conditional_line, denominator: qwen7b_relation_line, metric: seconds_unit_mean}
+  # -- experiments/submit.sh --analysis resources (CPU only) --
+  omp: 2
+  walltime: "00:10:00"

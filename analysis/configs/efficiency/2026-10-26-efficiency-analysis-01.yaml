@@ -1,0 +1,45 @@
+id: 2026-10-26-efficiency-analysis-01
+project: judge-interp
+description: >-
+  Computational performance of the judges on the 2026-10-25 test-split runs (-06 minimal pairs), all on one L40S:
+  representation runs (Qwen2.5-7B-Instruct and Llama-3.1-8B-Instruct; entity main, entity line, relation line) and Clef
+  (entity main, conditional line, one-shot line). Seconds per judged row by phase (incl. and excl. the per-row cache cleanup),
+  per judged item, tokens, compute-vs-tokens fit, GPU memory, and Llama/Qwen and Clef/representation ratios. Train-split runs are the same cost per row and are not repeated.
+seed: 0
+params:
+  # every run must have been measured on this GPU, or the timings are not comparable
+  gpu_name: NVIDIA L40S
+  # kind: rep (entity / relation detection) | clef
+  runs:
+    - {label: qwen7b_entity_main, kind: rep, run_id: 2026-10-25-qwen7b-entity-main-test-01}
+    - {label: qwen7b_entity_line, kind: rep, run_id: 2026-10-25-qwen7b-entity-line-test-01}
+    - {label: qwen7b_relation_line, kind: rep, run_id: 2026-10-25-qwen7b-relation-line-test-01}
+    - {label: llama8b_entity_main, kind: rep, run_id: 2026-10-25-llama8b-entity-main-test-01}
+    - {label: llama8b_entity_line, kind: rep, run_id: 2026-10-25-llama8b-entity-line-test-01}
+    - {label: llama8b_relation_line, kind: rep, run_id: 2026-10-25-llama8b-relation-line-test-01}
+    - {label: clef_entity_main, kind: clef, run_id: 2026-10-25-clef-entity-main-test-01}
+    - {label: clef_conditional_line, kind: clef, run_id: 2026-10-25-clef-conditional-line-test-01}
+    - {label: clef_oneshot_line, kind: clef, run_id: 2026-10-25-clef-oneshot-line-test-01}
+  # ratio of a per-run metric between two labelled runs: numerator / denominator
+  comparisons:
+    - {name: llama_over_qwen_entity_main_seconds_unit_mean, numerator: llama8b_entity_main, denominator: qwen7b_entity_main, metric: seconds_unit_mean}
+    - {name: llama_over_qwen_entity_main_seconds_per_item, numerator: llama8b_entity_main, denominator: qwen7b_entity_main, metric: seconds_per_item}
+    - {name: llama_over_qwen_entity_main_peak_alloc_gib_max, numerator: llama8b_entity_main, denominator: qwen7b_entity_main, metric: peak_alloc_gib_max}
+    - {name: llama_over_qwen_entity_line_seconds_unit_mean, numerator: llama8b_entity_line, denominator: qwen7b_entity_line, metric: seconds_unit_mean}
+    - {name: llama_over_qwen_entity_line_seconds_per_item, numerator: llama8b_entity_line, denominator: qwen7b_entity_line, metric: seconds_per_item}
+    - {name: llama_over_qwen_entity_line_peak_alloc_gib_max, numerator: llama8b_entity_line, denominator: qwen7b_entity_line, metric: peak_alloc_gib_max}
+    - {name: llama_over_qwen_relation_line_seconds_unit_mean, numerator: llama8b_relation_line, denominator: qwen7b_relation_line, metric: seconds_unit_mean}
+    - {name: llama_over_qwen_relation_line_seconds_per_item, numerator: llama8b_relation_line, denominator: qwen7b_relation_line, metric: seconds_per_item}
+    - {name: llama_over_qwen_relation_line_peak_alloc_gib_max, numerator: llama8b_relation_line, denominator: qwen7b_relation_line, metric: peak_alloc_gib_max}
+    - {name: clef_entity_main_over_qwen7b_entity_main_seconds_unit_mean, numerator: clef_entity_main, denominator: qwen7b_entity_main, metric: seconds_unit_mean}
+    - {name: clef_entity_main_over_qwen7b_entity_main_seconds_unit_excl_cleanup_mean, numerator: clef_entity_main, denominator: qwen7b_entity_main, metric: seconds_unit_excl_cleanup_mean}
+    - {name: clef_entity_main_over_qwen7b_entity_main_seconds_per_item, numerator: clef_entity_main, denominator: qwen7b_entity_main, metric: seconds_per_item}
+    - {name: clef_conditional_line_over_qwen7b_relation_line_seconds_unit_mean, numerator: clef_conditional_line, denominator: qwen7b_relation_line, metric: seconds_unit_mean}
+    - {name: clef_conditional_line_over_qwen7b_relation_line_seconds_unit_excl_cleanup_mean, numerator: clef_conditional_line, denominator: qwen7b_relation_line, metric: seconds_unit_excl_cleanup_mean}
+    - {name: clef_conditional_line_over_qwen7b_relation_line_seconds_per_item, numerator: clef_conditional_line, denominator: qwen7b_relation_line, metric: seconds_per_item}
+    - {name: clef_oneshot_line_over_qwen7b_relation_line_seconds_unit_mean, numerator: clef_oneshot_line, denominator: qwen7b_relation_line, metric: seconds_unit_mean}
+    - {name: clef_oneshot_line_over_qwen7b_relation_line_seconds_unit_excl_cleanup_mean, numerator: clef_oneshot_line, denominator: qwen7b_relation_line, metric: seconds_unit_excl_cleanup_mean}
+    - {name: clef_oneshot_line_over_qwen7b_relation_line_seconds_per_item, numerator: clef_oneshot_line, denominator: qwen7b_relation_line, metric: seconds_per_item}
+  # -- experiments/submit.sh --analysis resources (CPU only) --
+  omp: 2
+  walltime: "00:30:00"
