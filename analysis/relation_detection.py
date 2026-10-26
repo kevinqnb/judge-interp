@@ -99,19 +99,12 @@ def is_item_pair(values: dict, keys: list[dict], eq) -> bool:
     return matches_keys({f: eq(f, v) for f, v in values.items()}, keys)
 
 
-def build_pairs(split: dict, groups: list[dict], data: dict) -> dict:
-    """Matched field pairs of every judged minimal pair of samples.
-
-    Returns arrays (one entry per matched field pair) ``inv_i, inv_j`` (the two spans in the invalid
-    sample, canonical field order), ``val_i, val_j`` (the same fields in the twin), ``pair`` (field
-    pair index), ``cell``, ``error_type``, ``doc``; the same for context pairs (``ctx_*``: valid field
-    pairs of invalid samples, with their twins); and counts ``n_samples`` and
-    ``n_invalid_samples_without_invalid_pair`` (an invalid sample all of whose field pairs match some
-    item: possible, since the label rule is on the whole subset).
+def match_samples(split: dict, groups: list[dict], data: dict) -> dict[str, dict[bool, dict]]:
+    """Every judged minimal pair of samples, checked against the row file: ``{pair_id: {False: invalid
+    sample, True: its twin}}`` (entries of ``groups``).
 
     Raises:
-        AssertionError: a sample not in the row file, a span that disagrees with it, a pair not judged
-            whole, or a twin field pair that is no item's.
+        AssertionError: a sample not in the row file, a span that disagrees with it, or a pair not judged whole.
     """
     by_pair: dict[str, dict[bool, dict]] = defaultdict(dict)
     for g in groups:
@@ -127,7 +120,23 @@ def build_pairs(split: dict, groups: list[dict], data: dict) -> dict:
         by_pair[g["pair_id"]][g["valid"]] = g
     incomplete = [pid for pid, m in by_pair.items() if set(m) != {True, False}]
     assert not incomplete, f"{len(incomplete)} pairs not judged whole, e.g. {incomplete[:2]}"
+    return by_pair
 
+
+def build_pairs(split: dict, groups: list[dict], data: dict) -> dict:
+    """Matched field pairs of every judged minimal pair of samples.
+
+    Returns arrays (one entry per matched field pair) ``inv_i, inv_j`` (the two spans in the invalid
+    sample, canonical field order), ``val_i, val_j`` (the same fields in the twin), ``pair`` (field
+    pair index), ``cell``, ``error_type``, ``doc``; the same for context pairs (``ctx_*``: valid field
+    pairs of invalid samples, with their twins); and counts ``n_samples`` and
+    ``n_invalid_samples_without_invalid_pair`` (an invalid sample all of whose field pairs match some
+    item: possible, since the label rule is on the whole subset).
+
+    Raises:
+        AssertionError: as ``match_samples``, or a twin field pair that is no item's.
+    """
+    by_pair = match_samples(split, groups, data)
     out: dict[str, list] = defaultdict(list)
     n_without = 0
     for pid in sorted(by_pair):
