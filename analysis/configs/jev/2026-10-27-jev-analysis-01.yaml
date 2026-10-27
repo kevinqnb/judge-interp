@@ -1,0 +1,31 @@
+id: 2026-10-27-jev-analysis-01
+project: judge-interp
+description: >-
+  Analysis of the Jev (jev-1.14.0) direct judge on the -06 minimal-pair test splits (2026-10-27 runs), the counterpart of 2026-10-26-clef-analysis-01: entity detection
+  (main; one P(true) per field), conditional relation detection and one-shot record detection (line samples). The same metrics as the Clef analysis (analysis/clef.py's, reused unchanged),
+  plus resolution of P(true) (0.01 grid, ties, saturation) and the run's rescoring drift. Each item was scored once and the API is nondeterministic, so the metrics include that noise.
+  Jev excludes nothing, so it covers the records Clef excluded as over-length; compare to Clef on the shared records only.
+seed: 0
+params:
+  # kind: entity | conditional | oneshot. bss_ref_rate: a float in (0, 1), or "evaluation_set_rate" (constant
+  # forecast at the evaluated set's own valid rate).
+  runs:
+    - {label: entity_main, kind: entity, run_id: 2026-10-27-jev-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
+    - {label: conditional_line, kind: conditional, run_id: 2026-10-27-jev-conditional-line-test-01, bss_ref_rate: evaluation_set_rate}
+    - {label: oneshot_line, kind: oneshot, run_id: 2026-10-27-jev-oneshot-line-test-01, bss_ref_rate: evaluation_set_rate}
+  decision_threshold: 0.5
+  # seeds the other-document twins of null-fill entity spans
+  twin_seed: 0
+  # document-bootstrap interval of the AUROC
+  auroc_n_boot: 1000
+  ci_level: 0.95
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  # permutation null of the metrics: mean AUROC over n_shuffles label permutations must be within tolerance of 0.5
+  n_shuffles: 200
+  permutation_auroc_tolerance: 0.03
+  # -- experiments/submit.sh --analysis resources (CPU only) --
+  omp: 8
+  # equals omp, as in the finished 2026-10-27-jev-analysis-01 run
+  thread_cap: 8
+  walltime: "01:00:00"
