@@ -1,45 +1,51 @@
-"""Subset-level relation detection on the line dataset: a validity probe on the summed activations of field
-subsets drawn from full (m = 5) records, scored on minimal pairs of subsets.
+"""Relation detection on the line subsets: per-model probes and the direct judges (Clef, Jev), all scored on the
+same rows of ``params.test_subsets`` (``data/vrdu/line/test_subsets.json``).
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/relation_set_detection.py analysis/configs/<type>/<id>.yaml``
 
-Reads the ``relation_detection`` train and test runs named in the config, then:
+The unit is a subset row: 2 to m of a full-length sample's fields (m = 2-5), labelled by the row's own ``valid``
+(the label rule, ``vrdu_common.matches_keys`` against the document's line items). Rows are NOT minimal pairs and
+not balanced: a clean parent and its invalid twin share subsets, a subset of an invalid parent can still be valid,
+and rows repeat by content. So nothing here assumes 50/50: the Brier reference is the evaluation set's own valid
+rate, AUROC is bootstrapped by document, and the structure baseline is reported, not asserted.
 
-1. Load one layer and subtract each document's mean activation.
-2. Join every judged sample to its row in the line file (``relation_detection.match_samples``) and keep the
-   minimal pairs of full records (all five fields shown; invalid record + clean twin, same shown order).
-3. Every field subset of each size in ``params.subset_sizes`` is taken from both records of a pair, reusing
-   the record's activations (one span per field, from the m = 5 prompt). The label rule
-   (``vrdu_common.matches_keys`` against the split's line items) labels each; every twin subset must be
-   valid. A subset invalid in the invalid record, with the twin's same subset, is a matched pair: train and
-   test sets are these, so each (cell, subset) stratum is exactly 50/50. A subset still valid in the
-   invalid record is a context pair.
-4. Feature ``sum_i X[f_i]`` over the subset. Ablations (``params.ablations``): ``last`` = ``X[f_k]`` (the
-   member shown last in the prompt) and ``context`` = the sum of the other members. The span activation is
-   the value's last token in a causal model, so a member has attended to every field shown before it in
-   the m = 5 prompt -- including fields outside the subset.
-5. Logistic regression, train -> test, with the metrics of ``analysis/entity_detection.py``: overall (with
-   a document-bootstrap interval), per error type, cell, subset size, number of corrupted members and
-   whether the last member is corrupted; the same for each ablation, with a paired document-bootstrap
-   interval of AUROC(sum) - AUROC(ablation).
-6. Context diagnostic, by kind: ``hidden`` (no corrupted member, every corrupted field shown after all
-   members: the members' prompt prefixes equal the twin's, so the features must too -- asserted to
-   ``params.prefix_match_rtol``), ``visible`` (no corrupted member, a corrupted field shown before one) and
-   ``corrupted_member`` (valid by the rule despite a corrupted member).
-7. Controls: structure baseline (cell x subset one-hot; exactly 0.5 AUROC, asserted), shuffled-label
-   AUROC ~ 0.5 (asserted), seed determinism (asserted).
+Methods (``params.models``: a probe per entry; ``params.judges``: a Clef / Jev ``subsets`` run per entry,
+nothing trained). Metric keys and figure directories are prefixed with the method's ``label``.
+
+1. Probes train on the rows of ``params.train_subsets`` (``data/vrdu/line/train_subsets.json``) whose parent
+   sample is in the model's train run; every method is scored on ``params.test_subsets``. Each judged run must
+   hold subsets of the test split only.
+2. Probe feature ``sum_i X[f_i]`` over the subset's members, the activations of the value's last token in the
+   PARENT's prompt (one span per shown field, per-document mean-centred over the run). Ablations
+   (``params.ablations``): ``last`` = ``X[f_k]`` (the member shown last) and ``context`` = the sum of the other
+   members. Asymmetry to keep in mind when comparing to a judge: a member has attended to every field shown before
+   it in the parent, including fields outside the subset, whereas a judge sees only the subset.
+3. Every span value is checked against the subsets file, and every row's label is recomputed by the label rule
+   from the items and must equal ``valid``.
+4. The common set: the test rows every method scored (a judge excludes over-length documents; a probe needs the
+   parent in its run). Each method's scored and dropped rows are reported, and every method's labels are the file's.
+5. Metrics (one code path for every method): smECE, Brier skill, AUROC (document-bootstrap interval), accuracy,
+   permutation-null AUROC (asserted ~0.5); per error type, cell, size, corrupted members, parent validity and row
+   kind (``invalid``; ``clean_parent``; ``corrupted_member`` = valid despite a corrupted member; ``hidden`` /
+   ``visible`` = valid, no corrupted member, every corrupted parent field shown after all members / before one).
+   A stratum with one class reports no AUROC. Context diagnostic: each valid row of an invalid parent against the
+   same subset of the clean parent (its twin).
+6. Probes only: sum vs ablation (paired document-bootstrap AUROC difference), shuffled-label AUROC ~ 0.5
+   (asserted), seed determinism (asserted), and the ``hidden`` known answer: the members' prompt prefixes equal the
+   twin's, so their features must too (relative difference <= ``params.prefix_match_rtol``, asserted).
+   All methods: the structure baseline (a probe on which fields are shown, trained on the train subsets).
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
 from __future__ import annotations
 
 import importlib.util
-import itertools
 import json
 import os
 import shutil
 import sys
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -51,82 +57,139 @@ _spec = importlib.util.spec_from_file_location("analysis_relation_detection", _h
 rr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)  # sample matching and label rule
 er = rr.er  # shared loader, metrics and plots
+REPO_ROOT = rr.REPO_ROOT
 
 FIGURES_DIR = _here / "figures"
 FEATURES = ("sum", "last", "context")
-CONTEXT_KINDS = ("hidden", "visible", "corrupted_member")
-N_FIELDS = len(rr.LINE_FIELDS)
-# Per-subset columns of build_subsets (besides the span-index lists).
-COLUMNS = ("size", "cell", "error_type", "doc", "pair_id", "fields", "n_corrupted", "last_corrupted", "context_kind")
+ROW_KINDS = ("invalid", "clean_parent", "corrupted_member", "visible", "hidden")
+CONTEXT_KINDS = ("corrupted_member", "visible", "hidden")   # valid rows of an invalid parent
+JUDGES = ("clef", "jev")
+JUDGE_TASKS = ("conditional", "oneshot")
+# Per-row columns of a subsets frame (besides the python lists ``members``, ``rows``).
+SUBSET_COLS = ("subset_id", "parent_id", "pair_id", "doc", "cell", "error_type", "parent_valid", "size", "fields",
+               "n_corrupted", "y", "kind")
 
 
-# ------------------------------------------------------------------------ subsets
-def build_subsets(split: dict, groups: list[dict], data: dict, sizes: list[int]) -> dict:
-    """Matched and context subset pairs of every judged minimal pair of full records.
+@lru_cache(maxsize=None)
+def sibling(name: str):
+    """``analysis/<name>.py`` as a module, loaded once."""
+    return er.load_sibling(name)
 
-    Returns, for matched pairs (no prefix) and context pairs (``ctx_``): ``inv_rows`` / ``val_rows``
-    (lists of span-index arrays, members in shown order, from the invalid record / the twin) and arrays
-    ``size``, ``cell``, ``error_type``, ``doc``, ``pair_id``, ``fields`` (members joined by ``,``),
-    ``n_corrupted`` (corrupted members), ``last_corrupted`` (the last member is corrupted) and
-    ``context_kind`` (``""`` for matched pairs, else one of ``CONTEXT_KINDS``); and ``n_records`` (full-record
-    pairs) and ``n_samples`` (all judged samples).
+
+# ------------------------------------------------------------------------ subsets frame
+def load_subsets(subsets_path: Path, parents_path: Path) -> dict:
+    """The rows of a ``line/<split>_subsets.json`` as a frame, checked against the parent samples file.
+
+    Returns arrays ``SUBSET_COLS`` (``fields``: members joined by ``,``; ``y``: the row's ``valid``; ``kind``:
+    one of ``ROW_KINDS``), the lists ``members`` (field names in shown order) and ``rows`` (the raw rows),
+    and ``index`` (``{subset_id: position}``).
 
     Raises:
-        AssertionError: as ``relation_detection.match_samples``, a full record that is not five fields, a
-            twin with other fields or order, a full record the label rule disagrees with, or a twin subset
-            that is no item's.
+        AssertionError: a stale file (``check_build``), a duplicate id, a parent that is missing or disagrees
+            (validity, pair, document, cell), members not a subset of the parent's fields in shown order, corrupted
+            fields that are not the parent's shown ones, or an invalid row with no corrupted member.
     """
-    assert sizes and all(isinstance(s, int) and 2 <= s <= N_FIELDS for s in sizes) and len(set(sizes)) == len(sizes), sizes
-    by_pair = rr.match_samples(split, groups, data)
+    for path in (subsets_path, parents_path):
+        rr.check_build(path.parent.parent, f"{path.parent.name}/{path.name}")
+    rows = json.loads(subsets_path.read_text(encoding="utf-8"))
+    parent_rows = json.loads(parents_path.read_text(encoding="utf-8"))
+    parents = {r["sample_id"]: r for r in parent_rows}
+    assert len(parents) == len(parent_rows), f"{parents_path}: sample_id is not unique"
     out: dict[str, list] = defaultdict(list)
-    n_records = 0
-    for pid in sorted(by_pair):
-        bad, good = by_pair[pid][False], by_pair[pid][True]
-        assert bad["fields"] == good["fields"] and bad["doc"] == good["doc"] and bad["cell"] == good["cell"], pid
-        m = int(bad["cell"].split(":")[1].removeprefix("m"))
-        assert m == len(bad["fields"]), (pid, m, bad["fields"])
-        if m != N_FIELDS:
-            continue
-        n_records += 1
-        keys, eq = data["item_keys"][bad["doc"]], data["eq"]
-        val = {v: [str(split["value"][i]) for i in g["rows"]] for v, g in ((False, bad), (True, good))}
-        corrupt = [not bool(split["label_valid"][i]) for i in bad["rows"]]
-        assert all(bool(split["label_valid"][i]) for i in good["rows"]), (pid, "a corrupted twin span")
-        assert rr.is_item_pair(dict(zip(good["fields"], val[True])), keys, eq), (pid, "a twin that is no item's")
-        assert not rr.is_item_pair(dict(zip(bad["fields"], val[False])), keys, eq), (pid, "an invalid record that is an item's")
-        for s in sizes:
-            for pos in itertools.combinations(range(N_FIELDS), s):
-                fs = [bad["fields"][p] for p in pos]
-                assert rr.is_item_pair({f: val[True][p] for f, p in zip(fs, pos)}, keys, eq), (pid, fs, "a twin subset that is no item's")
-                valid = rr.is_item_pair({f: val[False][p] for f, p in zip(fs, pos)}, keys, eq)
-                n_corr = sum(corrupt[p] for p in pos)
-                if not valid:
-                    pre, kind = "", ""
-                else:
-                    pre = "ctx_"
-                    kind = ("corrupted_member" if n_corr else
-                            "visible" if any(c and q < pos[-1] for q, c in enumerate(corrupt)) else "hidden")
-                out[f"{pre}inv_rows"].append(np.array([bad["rows"][p] for p in pos]))
-                out[f"{pre}val_rows"].append(np.array([good["rows"][p] for p in pos]))
-                for c, v in zip(COLUMNS, (s, bad["cell"], bad["cell"].split(":")[0], bad["doc"], pid, ",".join(fs),
-                                          n_corr, corrupt[pos[-1]], kind)):
-                    out[f"{pre}{c}"].append(v)
-    assert out["inv_rows"], "no matched subset pairs"
-    res = {k: (v if k.endswith("_rows") else np.array(v)) for k, v in out.items()}
-    res["n_records"], res["n_samples"] = n_records, len(groups)
-    for pre in ("", "ctx_"):
-        if f"{pre}inv_rows" in res:
-            assert len(res[f"{pre}inv_rows"]) == len(res[f"{pre}val_rows"]) == len(res[f"{pre}size"])
-    assert (res["n_corrupted"] > 0).all(), "a matched invalid subset with no corrupted member"
+    for r in rows:
+        sid = r["subset_id"]
+        assert r["parent_id"] in parents, f"{sid}: parent {r['parent_id']!r} not in {parents_path.name}"
+        par = parents[r["parent_id"]]
+        assert (par["valid"], par["pair_id"], par["document_id"], par["cell"]) == (r["parent_valid"], r["pair_id"], r["document_id"], r["cell"]), (
+            f"{sid}: disagrees with its parent")
+        members = list(r["fields"])
+        assert r["size"] == len(members) >= 2 and len(set(members)) == len(members), (sid, members)
+        assert set(members) <= set(par["fields"]), (sid, "a member the parent does not show")
+        pos = [par["fields"].index(f) for f in members]
+        assert pos == sorted(pos), (sid, "members not in the parent's shown order")
+        assert set(r["invalid_fields"]) == set(par["invalid_fields"]) & set(members), (sid, "corrupted fields are not the parent's shown ones")
+        n_corr = len(r["invalid_fields"])
+        assert n_corr == r["num_invalid_fields"], sid
+        assert r["valid"] or n_corr, (sid, "an invalid subset with no corrupted member")
+        assert not (r["parent_valid"] and (n_corr or not r["valid"])), (sid, "a clean parent's subset that is corrupted or invalid")
+        if not r["valid"]:
+            kind = "invalid"
+        elif r["parent_valid"]:
+            kind = "clean_parent"
+        elif n_corr:
+            kind = "corrupted_member"
+        else:
+            first_corrupt = min(par["fields"].index(f) for f in par["invalid_fields"])   # an invalid parent has one
+            kind = "hidden" if first_corrupt > pos[-1] else "visible"
+        for c, v in zip(SUBSET_COLS, (sid, r["parent_id"], r["pair_id"], r["document_id"], r["cell"], r["cell"].split(":")[0],
+                                      r["parent_valid"], r["size"], ",".join(members), n_corr, r["valid"], kind)):
+            out[c].append(v)
+        out["members"].append(members)
+        out["rows"].append(r)
+    res = {c: np.array(out[c]) for c in SUBSET_COLS}
+    res["y"] = res["y"].astype(bool)
+    res["parent_valid"] = res["parent_valid"].astype(bool)
+    res["members"], res["rows"] = out["members"], out["rows"]
+    res["index"] = {sid: i for i, sid in enumerate(res["subset_id"].tolist())}
+    assert len(res["index"]) == len(rows), f"{subsets_path}: subset_id is not unique"
+    assert set(res["kind"].tolist()) <= set(ROW_KINDS), set(res["kind"].tolist())
     return res
 
 
-def stack(z: dict, pre: str = "") -> dict:
-    """Both members of every subset pair (``pre`` = ``""`` or ``"ctx_"``): ``rows`` (invalid-record subsets,
-    then the twins'), ``y`` (valid: the twin's subset), and every column of ``COLUMNS`` repeated for both."""
-    n = len(z[f"{pre}inv_rows"])
-    return {"rows": z[f"{pre}inv_rows"] + z[f"{pre}val_rows"], "y": np.repeat([False, True], n),
-            **{c: np.concatenate([z[f"{pre}{c}"]] * 2) for c in COLUMNS}}
+def cut(sub: dict, keep: np.ndarray) -> dict:
+    """The rows ``keep`` (positions, kept in the order given) of a frame, with ``index`` rebuilt and ``twin``
+    added: for each valid row of an invalid parent, the position of the same subset (``pair_id``, ``fields``) of the
+    clean parent (-1 for every other row).
+
+    Raises:
+        AssertionError: a context row whose twin is not among ``keep`` or is not valid.
+    """
+    keep = np.asarray(keep, dtype=np.int64)
+    out = {c: sub[c][keep] for c in SUBSET_COLS}
+    out["members"], out["rows"] = [sub["members"][i] for i in keep], [sub["rows"][i] for i in keep]
+    out["index"] = {sid: i for i, sid in enumerate(out["subset_id"].tolist())}
+    assert len(out["index"]) == len(keep), "duplicate rows in the cut"
+    clean = {(pid, f): i for i, (pid, f, pv) in enumerate(zip(out["pair_id"].tolist(), out["fields"].tolist(), out["parent_valid"].tolist())) if pv}
+    out["twin"] = np.full(len(keep), -1, dtype=np.int64)
+    for i in np.flatnonzero(np.isin(out["kind"], CONTEXT_KINDS)):
+        key = (str(out["pair_id"][i]), str(out["fields"][i]))
+        assert key in clean, f"{out['subset_id'][i]}: its clean-parent twin is not among the rows"
+        assert out["y"][clean[key]], f"{out['subset_id'][i]}: its clean-parent twin is not valid"
+        out["twin"][i] = clean[key]
+    return out
+
+
+# ------------------------------------------------------------------------ probe features
+def lm_member_spans(sub: dict, split: dict, data: dict, require_all: bool) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Each row's member spans in a model's run, from the parent's prompt: ``(positions of the rows whose
+    parent is in the run, one span-index array per such row in shown order)``.
+
+    Every span value must equal the row's, a span's corrupted flag must be the row's, and the label rule applied
+    to the row's values must give the row's ``valid``.
+
+    Raises:
+        AssertionError: as ``relation_detection.match_samples`` (a span the row file disagrees with, a pair
+            not judged whole), a disagreement above, or (``require_all``) a row whose parent is not in the run.
+    """
+    by_pair = rr.match_samples(split, rr.group_rows(split), data)
+    idx, spans, missing = [], [], 0
+    for i in range(len(sub["subset_id"])):
+        g = by_pair.get(str(sub["pair_id"][i]), {}).get(bool(sub["parent_valid"][i]))
+        if g is None:
+            missing += 1
+            continue
+        r = sub["rows"][i]
+        s = np.array([g["rows"][g["fields"].index(f)] for f in sub["members"][i]])
+        assert [str(split["value"][j]) for j in s] == [r[f] for f in sub["members"][i]], f"{r['subset_id']}: span values differ from the row"
+        assert [not bool(split["label_valid"][j]) for j in s] == [f in r["invalid_fields"] for f in sub["members"][i]], (
+            f"{r['subset_id']}: a span's corrupted flag differs from the row's")
+        assert rr.is_item_pair({f: r[f] for f in sub["members"][i]}, data["item_keys"][r["document_id"]], data["eq"]) == bool(r["valid"]), (
+            f"{r['subset_id']}: the label rule disagrees with valid={r['valid']}")
+        idx.append(i)
+        spans.append(s)
+    assert not (require_all and missing), f"{missing} rows whose parent is not in the run"
+    assert idx, "no row has its parent in the run"
+    return np.array(idx, dtype=np.int64), spans
 
 
 def subset_features(x: np.ndarray, rows: list[np.ndarray], feature: str) -> np.ndarray:
@@ -141,17 +204,90 @@ def subset_features(x: np.ndarray, rows: list[np.ndarray], feature: str) -> np.n
     return f
 
 
-def prefix_match_dev(x: np.ndarray, z: dict) -> tuple[float, float]:
-    """``(largest ||sum(inv) - sum(twin)|| / ||sum(twin)||, share exactly equal)`` over ``hidden`` context
-    pairs (``(0, 1)`` if there are none). Their members' prompt prefixes are identical, so a difference is
-    bf16 run-to-run noise (small) or a misaligned span (large)."""
-    sel = np.flatnonzero(z["ctx_context_kind"] == "hidden") if "ctx_context_kind" in z else np.array([], int)
-    if not len(sel):
-        return 0.0, 1.0
-    a = subset_features(x, [z["ctx_inv_rows"][i] for i in sel], "sum")
-    b = subset_features(x, [z["ctx_val_rows"][i] for i in sel], "sum")
+def prefix_match_dev(f: np.ndarray, ev: dict) -> tuple[float, float]:
+    """``(largest ||f(row) - f(twin)|| / ||f(twin)||, share exactly equal)`` over ``hidden`` rows, ``f`` being the
+    ``sum`` features of the eval rows. A hidden row's members' prompt prefixes equal its twin's, so a difference is
+    bf16 run-to-run noise (small) or a misaligned span (large).
+
+    Raises:
+        AssertionError: no hidden row (the known answer would be vacuous).
+    """
+    hid = np.flatnonzero(ev["kind"] == "hidden")
+    assert len(hid), "no hidden row: the prefix known answer cannot be checked"
+    a, b = f[hid], f[ev["twin"][hid]]
     rel = np.linalg.norm(a - b, axis=1) / np.linalg.norm(b, axis=1)
     return float(rel.max()), float((rel == 0).mean())
+
+
+# ------------------------------------------------------------------------ direct judges
+def load_judge(spec: dict, runs_root: Path, sub_te: dict) -> dict:
+    """One Clef / Jev run on the test subsets: ``idx`` (positions in ``sub_te``) and ``probs`` (``P(true)``).
+
+    Gates: run.json status / task, counts equal ``metrics.json``, the run is of a ``*-subsets.json`` samples file,
+    unique ids that all are test subsets, and each row's stored label, document, cell and size equal the
+    subsets file's; ``P(true)`` in [0, 1] and, for Clef, the softmax of its stored logits, for Jev on the
+    API's 0.01 grid.
+
+    Returns:
+        ``{idx, probs, n_excluded, extra}`` where ``extra`` is Jev's resolution metrics (empty for Clef).
+    """
+    judge, kind, run_id = spec["judge"], spec["kind"], spec["run_id"]
+    assert judge in JUDGES and kind in JUDGE_TASKS, spec
+    mod = sibling(judge)
+    run_dir = runs_root / run_id
+    manifest = json.loads((run_dir / "run.json").read_text())
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert manifest["status"] == "success", f"{run_id}: status {manifest['status']!r}"
+    assert manifest["task"] == mod.KINDS[kind], f"{run_id}: task {manifest['task']!r}, expected {mod.KINDS[kind]!r}"
+    params = yaml.safe_load((run_dir / "config.snapshot.yaml").read_text())["params"]
+    assert params["samples_path"].endswith("-subsets.json"), f"{run_id}: not a subsets run ({params['samples_path']})"
+    cols = ["p_true", "label_valid", "sample_id", "doc_ids", "cell", "size"] + (["logit_true", "logit_false"] if judge == "clef" else [])
+    with np.load(run_dir / "artifacts" / f"{judge}_predictions.npz", allow_pickle=False) as z:
+        d = {c: z[c] for c in cols}
+    n = len(d["p_true"])
+    assert all(len(v) == n for v in d.values()), run_id
+    assert n == metrics["n_predictions"], f"{run_id}: {n} rows != metrics n_predictions {metrics['n_predictions']}"
+    d["label_valid"] = d["label_valid"].astype(bool)
+    assert int(d["label_valid"].sum()) == metrics["n_valid"], run_id
+    ids = d["sample_id"].tolist()
+    assert len(set(ids)) == n, f"{run_id}: duplicate sample ids"
+    unknown = [s for s in ids if s not in sub_te["index"]]
+    assert not unknown, f"{run_id}: {len(unknown)} ids that are no test subset's, e.g. {unknown[:2]}"
+    idx = np.array([sub_te["index"][s] for s in ids], dtype=np.int64)
+    for name, got, want in (("label", d["label_valid"], sub_te["y"][idx]), ("document", d["doc_ids"], sub_te["doc"][idx]),
+                            ("cell", d["cell"], sub_te["cell"][idx]), ("size", d["size"], sub_te["size"][idx])):
+        assert (got == want).all(), f"{run_id}: stored {name} differs from the subsets file's"
+    p = d["p_true"].astype(np.float64)
+    assert np.isfinite(p).all() and ((0 <= p) & (p <= 1)).all(), f"{run_id}: p_true outside [0, 1]"
+    if judge == "clef":
+        z64 = np.stack([d["logit_true"], d["logit_false"]], axis=1).astype(np.float64)
+        assert np.allclose(p, np.exp(z64[:, 0] - np.logaddexp(z64[:, 0], z64[:, 1])), atol=1e-6), f"{run_id}: p_true is not the softmax of the stored logits"
+    else:
+        assert np.allclose(p / mod.P_GRID, np.round(p / mod.P_GRID), atol=mod.P_GRID_ATOL / mod.P_GRID), f"{run_id}: p_true is not on the {mod.P_GRID} grid"
+    return {"idx": idx, "probs": p, "n_excluded": 0 if judge == "jev" else metrics["n_excluded_overlong"],
+            "extra": mod.resolution_metrics({"p_true": p, "determinism_max_abs_diff": float(metrics["determinism_max_abs_diff"])}) if judge == "jev" else {}}
+
+
+# ------------------------------------------------------------------------ metrics
+def row_stratum_report(y: np.ndarray, probs: np.ndarray, threshold: float, strata: np.ndarray) -> dict:
+    """Per-stratum metrics of an unbalanced row set. For each stratum value ``s``: ``n_<s>``, ``valid_rate_<s>``,
+    ``accuracy_<s>``, ``mean_p_valid_<s>``; ``auroc_<s>`` if it has both classes, ``detect_<s>`` (invalid called
+    invalid) if it has an invalid row, ``valid_acc_<s>`` (valid called valid) if it has a valid one."""
+    assert y.dtype == bool and probs.shape == y.shape == strata.shape
+    pred = probs > threshold
+    out: dict[str, float] = {}
+    for s in sorted(set(strata.tolist())):
+        sel = strata == s
+        ys, ps = y[sel], pred[sel]
+        out[f"n_{s}"], out[f"valid_rate_{s}"] = int(sel.sum()), float(ys.mean())
+        out[f"accuracy_{s}"], out[f"mean_p_valid_{s}"] = float((ps == ys).mean()), float(probs[sel].mean())
+        if ys.any() and (~ys).any():
+            out[f"auroc_{s}"] = float(roc_auc_score(ys, probs[sel]))
+        if (~ys).any():
+            out[f"detect_{s}"] = float((~ps[~ys]).mean())
+        if ys.any():
+            out[f"valid_acc_{s}"] = float(ps[ys].mean())
+    return out
 
 
 def doc_bootstrap_auroc_diff(y: np.ndarray, pa: np.ndarray, pb: np.ndarray, docs: np.ndarray, n_boot: int,
@@ -171,132 +307,157 @@ def doc_bootstrap_auroc_diff(y: np.ndarray, pa: np.ndarray, pb: np.ndarray, docs
     return float(lo), float(hi)
 
 
-def strata_metrics(prefix: str, y: np.ndarray, probs: np.ndarray, thr: float, s: dict) -> dict:
-    """``stratum_report`` by error type, cell, subset size, corrupted members and last-member corruption."""
-    out = {}
-    for strata in (s["error_type"], s["cell"], np.char.add("size", s["size"].astype(str)),
-                   np.char.add("ncorr", s["n_corrupted"].astype(str)),
-                   np.where(s["last_corrupted"], "last_corrupted", "last_clean")):
-        out.update({f"{prefix}_{k}": v for k, v in er.stratum_report(y, probs, thr, strata).items()})
-    return out
+def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int, fig_dir: Path) -> dict:
+    """The metrics every method gets, on the common rows ``ev`` (``probs``: its ``P(valid)`` per row).
+
+    Raises:
+        AssertionError: one class missing, or the permutation-null AUROC not ~0.5.
+    """
+    y, thr = ev["y"], p["decision_threshold"]
+    assert probs.shape == y.shape and y.any() and (~y).any(), f"{label}: bad probabilities or one class missing"
+    ref_rate = float(y.mean())
+    m: dict[str, float] = {"n": int(len(y)), "n_valid": int(y.sum()), "valid_rate": ref_rate, "n_docs": len(set(ev["doc"].tolist())),
+                           "mean_p_valid": float(probs.mean())}
+    m.update(er.probe_metrics("test", y, probs, ref_rate, thr))
+    m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
+    d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
+    m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
+    (fig_dir / label).mkdir(parents=True, exist_ok=True)
+    er.plot_calibration(d, fig_dir / label)
+    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
+    for strata in (ev["error_type"], ev["cell"], np.char.add("size", ev["size"].astype(str)),
+                   np.char.add("ncorr", ev["n_corrupted"].astype(str)),
+                   np.where(ev["parent_valid"], "parent_clean", "parent_invalid"), ev["kind"]):
+        m.update({f"test_{k}": v for k, v in row_stratum_report(y, probs, thr, strata).items()})
+    # Context diagnostic: valid rows of an invalid parent against the same subset of the clean parent.
+    for kind in CONTEXT_KINDS:
+        sel = np.flatnonzero(ev["kind"] == kind)
+        if not len(sel):
+            continue
+        twin = ev["twin"][sel]
+        m[f"test_context_{kind}_mean_p_valid"], m[f"test_context_{kind}_twin_mean_p_valid"] = float(probs[sel].mean()), float(probs[twin].mean())
+        m[f"test_context_{kind}_valid_acc"] = float((probs[sel] > thr).mean())
+        m[f"test_twin_vs_context_{kind}_auroc"] = float(roc_auc_score(
+            np.concatenate([np.zeros(len(sel), bool), np.ones(len(sel), bool)]), np.concatenate([probs[sel], probs[twin]])))
+    mean, std = sibling("clef").permutation_null_auroc(y, probs, p["n_permutations"], seed)   # as the judges' analysis
+    m["control_permutation_auroc"], m["control_permutation_auroc_std"] = mean, std
+    assert abs(mean - 0.5) <= p["permutation_auroc_tolerance"], (
+        f"{label}: mean permuted-label AUROC {mean:.4f} (std {std:.4f}, n={p['n_permutations']}) is not ~0.5")
+    return m
+
+
+def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int) -> dict:
+    """A probe on which fields are shown (one-hot of ``fields``), trained on all train subsets, on the common rows:
+    what structure alone predicts. Reported, not asserted: on unbalanced subsets it is above chance."""
+    cats = sorted(set(sub_tr["fields"].tolist()) | set(ev["fields"].tolist()))
+    clf = er.fit_logreg(er.onehot(sub_tr["fields"], cats), sub_tr["y"], p, seed)
+    probs = clf.predict_proba(er.onehot(ev["fields"], cats))[:, 1]
+    return er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
+
+
+def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[np.ndarray], y_tr: np.ndarray, te: dict,
+           rows_ev: list[np.ndarray], ev: dict, fig_dir: Path, art_dir: Path) -> dict:
+    """One model's probe: logistic regression on the train subsets' ``sum`` features, scored on the common rows, the
+    ablations and the probe controls. ``tr`` / ``te``: the model's centred train / test splits; ``rows_tr`` /
+    ``rows_ev``: the member spans of each train subset / eval row in them."""
+    thr, y_te = p["decision_threshold"], ev["y"]
+    ref_rate = float(y_te.mean())
+    assert y_tr.any() and (~y_tr).any(), f"{label}: one class missing in the train subsets"
+    assert len(rows_tr) == len(y_tr)
+    f_tr = subset_features(tr["X"], rows_tr, "sum")
+    f_te = subset_features(te["X"], rows_ev, "sum")
+    dev, exact = prefix_match_dev(f_te, ev)
+    assert dev <= p["prefix_match_rtol"], f"{label}: hidden rows differ from their twins by {dev:.3g} (relative norm) -- misaligned spans?"
+    metrics: dict[str, float] = {"layer": layer, "prefix_match_dev": dev, "prefix_match_exact_share": exact,
+                                 "n_train": int(len(y_tr)), "n_train_valid": int(y_tr.sum())}
+    clf = er.fit_logreg(f_tr, y_tr, p, seed)
+    probs = clf.predict_proba(f_te)[:, 1]
+    metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(f_tr)[:, 1]))
+    metrics.update(score_method(label, ev, probs, p, seed, fig_dir))
+    abl_probs = {}
+    for a in p["ablations"]:
+        a_tr, a_te = subset_features(tr["X"], rows_tr, a), subset_features(te["X"], rows_ev, a)
+        abl = er.fit_logreg(a_tr, y_tr, p, seed)
+        abl_probs[a] = abl.predict_proba(a_te)[:, 1]
+        metrics.update({f"ablation_{a}_{k}": v for k, v in er.probe_metrics("test", y_te, abl_probs[a], ref_rate, thr).items()})
+        metrics[f"test_auroc_minus_{a}_ci_lo"], metrics[f"test_auroc_minus_{a}_ci_hi"] = doc_bootstrap_auroc_diff(
+            y_te, probs, abl_probs[a], ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
+    if p["run_controls"]:
+        auc_shuf, auc_shuf_std = er.shuffled_label_auroc(f_tr, y_tr, f_te, y_te, p, seed)
+        metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
+        assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
+            f"{label}: mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks")
+        assert np.array_equal(probs, er.fit_logreg(f_tr, y_tr, p, seed).predict_proba(f_te)[:, 1]), f"{label}: same-seed refit gave different probabilities"
+        metrics["control_seed_determinism"] = 1.0
+    np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=y_te,
+                        **{f"prob_valid_{a}": v for a, v in abl_probs.items()})
+    return metrics
 
 
 # ----------------------------------------------------------------------------- main
 def run(cfg: dict, runs_root: Path) -> dict:
+    """Every model's probe and every direct judge on the same test subsets (see the module docstring)."""
     p, seed = cfg["params"], cfg["seed"]
     out = runs_root / cfg["id"]
     fig_dir = FIGURES_DIR / cfg["id"]
     fig_dir.mkdir(parents=True, exist_ok=True)
     (out / "artifacts").mkdir(parents=True, exist_ok=True)
-    layer, thr, sizes, ablations = p["layer"], p["decision_threshold"], p["subset_sizes"], p["ablations"]
-    assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
-    assert isinstance(ablations, list) and set(ablations) <= set(FEATURES) - {"sum"}, ablations
+    assert isinstance(p["ablations"], list) and set(p["ablations"]) <= set(FEATURES) - {"sum"}, p["ablations"]
+    labels = [s["label"] for s in (*p["models"], *p["judges"])]
+    assert len(set(labels)) == len(labels) and labels, f"duplicate or no method labels {labels}"
+    paths = {k: REPO_ROOT / p[k] for k in ("train_subsets", "test_subsets", "train_parents", "test_parents")}
+    assert len(set(paths.values())) == 4, "train and test files overlap"
+    sub_tr, sub_te = load_subsets(paths["train_subsets"], paths["train_parents"]), load_subsets(paths["test_subsets"], paths["test_parents"])
+    assert not (set(sub_tr["doc"].tolist()) & set(sub_te["doc"].tolist())), "train/test documents overlap"
 
-    extra = ("line_index", "value", "pair_id", "cell")
-    tr = er.load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "relation_detection", extra)
-    te = er.load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "relation_detection", extra)
-    assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
-    for s in (tr, te):
-        assert set(np.unique(s["field"]).tolist()) <= set(rr.LINE_FIELDS), "non-line field in the relation run"
-    er.center_per_document(tr["X"], tr["doc_ids"])
-    er.center_per_document(te["X"], te["doc_ids"])
+    lms: dict[str, dict] = {}
+    for spec in p["models"]:
+        layer = spec["layer"]
+        assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
+        extra = ("line_index", "value", "pair_id", "cell")
+        tr = er.load_split(spec["train_run_id"], runs_root, layer, p["max_docs"], "relation_detection", extra)
+        te = er.load_split(spec["test_run_id"], runs_root, layer, p["max_docs"], "relation_detection", extra)
+        assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), f"{spec['label']}: train/test documents overlap"
+        for s in (tr, te):
+            assert set(np.unique(s["field"]).tolist()) <= set(rr.LINE_FIELDS), "non-line field in the relation run"
+        for run_id, parents in ((spec["train_run_id"], paths["train_parents"]), (spec["test_run_id"], paths["test_parents"])):
+            assert er.run_rows_path(run_id, runs_root, rr.REPO_ROOT, "line") == parents, f"{run_id}: judged another file than {parents}"
+        er.center_per_document(tr["X"], tr["doc_ids"])
+        er.center_per_document(te["X"], te["doc_ids"])
+        idx_tr, rows_tr = lm_member_spans(sub_tr, tr, rr.load_line_data(spec["train_run_id"], runs_root, rr.REPO_ROOT), require_all=p["max_docs"] is None)
+        idx_te, rows_te = lm_member_spans(sub_te, te, rr.load_line_data(spec["test_run_id"], runs_root, rr.REPO_ROOT), require_all=False)
+        lms[spec["label"]] = {"tr": tr, "te": te, "idx_tr": idx_tr, "rows_tr": rows_tr, "idx_te": idx_te, "rows_te": dict(zip(idx_te.tolist(), rows_te))}
+    judges = {spec["label"]: load_judge(spec, runs_root, sub_te) for spec in p["judges"]}
 
-    z_tr = build_subsets(tr, rr.group_rows(tr), rr.load_line_data(p["train_run_id"], runs_root, rr.REPO_ROOT), sizes)
-    z_te = build_subsets(te, rr.group_rows(te), rr.load_line_data(p["test_run_id"], runs_root, rr.REPO_ROOT), sizes)
+    # The common set: test rows every method scored; the labels are the file's for all of them.
+    scored = {**{k: v["idx_te"] for k, v in lms.items()}, **{k: v["idx"] for k, v in judges.items()}}
+    common = sorted(set.intersection(*(set(i.tolist()) for i in scored.values())))
+    assert common, "no test row was scored by every method"
+    ev = cut(sub_te, np.array(common))
+    metrics: dict[str, float] = {"n_test_subsets_file": len(sub_te["subset_id"]), "n_common_test_rows": len(common)}
+    for label, i in scored.items():
+        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = int(len(i)), int(len(i)) - len(common)
+    metrics.update(structure_baseline(sub_tr, ev, p, seed))
 
-    # Known-answer: hidden context pairs have identical prompt prefixes, so identical features up to bf16 noise.
-    (dev_tr, eq_tr), (dev_te, eq_te) = prefix_match_dev(tr["X"], z_tr), prefix_match_dev(te["X"], z_te)
-    dev = max(dev_tr, dev_te)
-    assert dev <= p["prefix_match_rtol"], f"hidden context pairs differ by {dev:.3g} (relative norm) -- misaligned spans?"
-
-    s_tr, s_te = stack(z_tr), stack(z_te)
-    f_tr, f_te = subset_features(tr["X"], s_tr["rows"], "sum"), subset_features(te["X"], s_te["rows"], "sum")
-    y_tr, y_te = s_tr["y"], s_te["y"]
-    ref_rate = float(y_tr.mean())
-    assert ref_rate == 0.5 == float(y_te.mean()), "matched subset sets are not 50/50"
-    types = sorted(set(z_tr["error_type"].tolist()))
-    assert types == sorted(set(z_te["error_type"].tolist())), "train and test have different error types"
-    assert set(types) <= set(er.ALL_ERROR_TYPES), types
-
-    metrics: dict[str, float] = {
-        "layer": layer, "subset_sizes": sizes, "prefix_match_dev": dev,
-        "train_prefix_match_exact_share": eq_tr, "test_prefix_match_exact_share": eq_te,
-        "n_train_records": z_tr["n_records"], "n_test_records": z_te["n_records"],
-        "n_train_pairs": len(z_tr["inv_rows"]), "n_test_pairs": len(z_te["inv_rows"]),
-        "n_train_docs": len(set(z_tr["doc"].tolist())), "n_test_docs": len(set(z_te["doc"].tolist())),
-    }
-    for split_name, z in (("train", z_tr), ("test", z_te)):
-        for kind in CONTEXT_KINDS:
-            metrics[f"n_{split_name}_context_{kind}"] = int((z["ctx_context_kind"] == kind).sum()) if "ctx_context_kind" in z else 0
-
-    clf = er.fit_logreg(f_tr, y_tr, p, seed)
-    probs = clf.predict_proba(f_te)[:, 1]
-    assert probs.shape == y_te.shape
-    metrics.update(er.probe_metrics("test", y_te, probs, ref_rate, thr))
-    metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(f_tr)[:, 1]))
-    metrics["test_auroc_ci_lo"], metrics["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(
-        y_te, probs, s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
-
-    d = er.smooth_ece(probs, y_te, p["ece_n_boot"], seed)
-    metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
-    er.plot_calibration(d, fig_dir)
-    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
-    metrics.update(strata_metrics("test", y_te, probs, thr, s_te))
-
-    abl_probs, abl_clf = {}, {}
-    for a in ablations:
-        a_tr, a_te = subset_features(tr["X"], s_tr["rows"], a), subset_features(te["X"], s_te["rows"], a)
-        abl_clf[a] = er.fit_logreg(a_tr, y_tr, p, seed)
-        abl_probs[a] = abl_clf[a].predict_proba(a_te)[:, 1]
-        metrics.update(er.probe_metrics(f"test_ablation_{a}", y_te, abl_probs[a], ref_rate, thr))
-        metrics.update(strata_metrics(f"test_ablation_{a}", y_te, abl_probs[a], thr, s_te))
-        metrics[f"test_auroc_minus_{a}_ci_lo"], metrics[f"test_auroc_minus_{a}_ci_hi"] = doc_bootstrap_auroc_diff(
-            y_te, probs, abl_probs[a], s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
-
-    # Context diagnostic: still-valid subsets of invalid records vs the twin's same subsets, by kind.
-    if "ctx_inv_rows" in z_te:
-        c = stack(z_te, "ctx_")
-        p_ctx = clf.predict_proba(subset_features(te["X"], c["rows"], "sum"))[:, 1]
-        for kind in CONTEXT_KINDS:
-            sel = c["context_kind"] == kind
-            if not sel.any():
-                continue
-            inv, twin = sel & ~c["y"], sel & c["y"]
-            metrics[f"test_context_{kind}_mean_p_valid"] = float(p_ctx[inv].mean())
-            metrics[f"test_context_{kind}_twin_mean_p_valid"] = float(p_ctx[twin].mean())
-            metrics[f"test_context_{kind}_valid_acc"] = float((p_ctx[inv] > thr).mean())
-            metrics[f"test_twin_vs_context_{kind}_auroc"] = float(roc_auc_score(c["y"][sel], p_ctx[sel]))
-        np.savez_compressed(
-            out / "artifacts" / "test_context_predictions.npz",
-            prob_valid=p_ctx, label_valid=c["y"], **{c_: c[c_] for c_ in COLUMNS},
-            **{f"prob_valid_{a}": abl_clf[a].predict_proba(subset_features(te["X"], c["rows"], a))[:, 1] for a in ablations},
-        )
-
-    # Structure baseline: cell x subset (members in shown order); each exactly 50/50 -> AUROC 0.5.
-    struct_tr, struct_te = (np.char.add(np.char.add(s["cell"], "|"), s["fields"]) for s in (s_tr, s_te))
-    metrics.update(er.assert_structure_auroc_is_chance("cell_subset", y_tr, struct_tr, y_te, struct_te, p, seed))
-
-    if p["run_controls"]:
-        auc_shuf, auc_shuf_std = er.shuffled_label_auroc(f_tr, y_tr, f_te, y_te, p, seed)
-        metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
-        assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
-            f"mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks"
-        )
-        assert np.array_equal(probs, er.fit_logreg(f_tr, y_tr, p, seed).predict_proba(f_te)[:, 1]), (
-            "same-seed refit gave different probabilities"
-        )
-        metrics["control_seed_determinism"] = 1.0
-
-    np.savez_compressed(
-        out / "artifacts" / "test_predictions.npz",
-        prob_valid=probs, label_valid=y_te, **{f"prob_valid_{a}": v for a, v in abl_probs.items()},
-        **{c: s_te[c] for c in COLUMNS if c != "context_kind"},
-    )
+    art_dir = out / "artifacts"
+    for spec in p["models"]:
+        label, m = spec["label"], lms[spec["label"]]
+        rows_ev = [m["rows_te"][i] for i in common]
+        for k_, v in run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, fig_dir, art_dir).items():
+            metrics[f"{label}_{k_}"] = v
+    for spec in p["judges"]:
+        label, j = spec["label"], judges[spec["label"]]
+        pos = {int(i): n for n, i in enumerate(j["idx"].tolist())}
+        probs = j["probs"][[pos[i] for i in common]]
+        np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=ev["y"])
+        for k_, v in {**score_method(label, ev, probs, p, seed, fig_dir), "n_excluded_overlong": j["n_excluded"], **j["extra"]}.items():
+            metrics[f"{label}_{k_}"] = v
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
     print(json.dumps(metrics, indent=2))
     return metrics
+
 
 
 def main() -> None:
