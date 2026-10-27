@@ -18,7 +18,7 @@ from dataset_specs import LINE, MAIN
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = "tests/fixtures/entity_detection_mini"
 READ_TOKEN = ' "\n'
-LINE_CELLS = ["cross_item:m2:k2", "cross_item:m3:k2", "intra_document:m2:k1", "intra_document:m5:k2"]
+LINE_CELLS = ["cross_item:k2", "intra_document:k1", "intra_document:k2"]
 END_OF_TURN = {"Qwen/Qwen2.5-0.5B-Instruct": "<|im_end|>", "meta-llama/Llama-3.1-8B-Instruct": "<|eot_id|>"}
 
 

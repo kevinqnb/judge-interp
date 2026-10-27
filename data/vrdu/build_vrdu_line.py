@@ -1,28 +1,35 @@
-"""Build the VRDU line dataset: random ordered field subsets of line items, as minimal pairs.
+"""Build the VRDU line dataset: full-length line items as minimal pairs, and every subset of them.
 
-Reads ``line/{train,test}_base.json`` and writes ``line/{train,test}.json`` and ``line_build.json``
-(provenance). A sample shows ``m`` of one line item's non-null fields, in a random order. Every
-invalid sample has one clean **twin**: the same item, the same ordered fields, the original values.
-So every cell, and every union of cells, has the same items, documents, field sets and orders in
-both classes. A sample is a dataset row (the usual label keys, one key per line field, null if not
-shown) plus ``fields`` (the shown fields, in the order shown), ``m``, ``cell``, ``pair_id``, ``sample_id``.
+Reads ``line/{train,test}_base.json`` and writes, per split, ``line/<split>.json`` (full-length samples),
+``line/<split>_subsets.json`` (their subsets), and ``line_build.json`` (provenance).
 
-Cells (all of size ``n_per_cell`` invalid samples + their twins):
+Full-length sample: one line item shown with ALL its non-null fields (2 to 5 of them; ``m`` is the item's own
+count), always in ``LINE_FIELDS`` order. Every invalid sample has one clean **twin**: the same item, the same
+fields, the original values. A sample is a dataset row (the usual label keys, one key per line field, null if
+not shown) plus ``fields``, ``m``, ``cell``, ``pair_id``, ``sample_id``. An item occurs in one pair per split.
 
-  intra_document  (m, k), 1 <= k <= min(m, max_k): k shown fields each take the same field's value
-                  from a distinct other line item of the document.
-  cross_item      (m, 2): two shown fields swap values.
+Cells (all of size ``n_per_cell`` invalid samples + their twins; ``m`` varies within a cell):
+
+  intra_document  k, 1 <= k <= max_k: k shown fields each take the same field's value from a distinct
+                  other line item of the document.
+  cross_item      k = 2: two shown fields swap values.
+
+Subsets: every subset of a full-length sample with ``subset_min_size`` to ``m`` fields (the full set
+included), fields in ``LINE_FIELDS`` order. Its label is recomputed, never inherited: ``valid`` is
+``matches_item`` of the shown values against every line item of the document. It records its parent
+(``parent_id``, ``parent_index``), the parent's corrupted fields it still shows (``invalid_fields``), the
+parent's ``error_type`` if any remain, and ``size``. ``error_type`` and ``valid`` can disagree: a kept
+corrupted value may still be a real item's (see ``stats["subsets"]``).
 
 Rules: a corruption changes every value it touches (up to ``equivalence_key``); the corrupted sample
 is no real line item's (``matches_item``, the label rule); ``from <= to`` holds whenever both shown
 dates parse; intra date donors are drawn fragment-neutral (``pick_fragment_neutral``); nulls are
-never shown or filled. Items are drawn round-robin over documents; an (item, ordered fields) pair
-occurs once per split.
+never shown or filled. Items are drawn round-robin over documents, cells most constrained first.
 
 Local data preparation (no cluster job):
 
     uv run --python 3.12 python data/vrdu/build_vrdu_line.py \\
-        --config data/vrdu/build-configs/2026-10-24-vrdu-invalids-06.yaml
+        --config data/vrdu/build-configs/2026-10-27-vrdu-invalids-07.yaml
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import math
 import random
 import sys
 from collections import Counter
@@ -47,33 +55,32 @@ SPLITS = ("train", "test")
 INTRA_DOCUMENT, CROSS_ITEM = "intra_document", "cross_item"
 CROSS_ITEM_K = 2  # a swap corrupts exactly two fields
 BUILD_FILE = "line_build.json"
-REQUIRED_LINE_KEYS = {"m_range", "max_k", "n_per_cell"}
+REQUIRED_LINE_KEYS = {"m_range", "max_k", "n_per_cell", "subset_min_size"}
 
 
 # --- Cells ----------------------------------------------------------------------
 
 
 def make_cells(m_range, max_k):
-    """The (error_type, m, k) cells.
+    """The (error_type, k) cells, most constrained first (items are used once, in the first cell that draws them).
 
     Args:
-        m_range: ``[lo, hi]`` subset sizes, inclusive.
+        m_range: ``[lo, hi]`` allowed full-length sizes (non-null fields of an item), inclusive.
         max_k: largest intra k.
 
     Returns:
-        ``[(error_type, m, k)]``, intra first, each by m then k.
+        ``[(error_type, k)]``: intra by descending k, then cross_item.
     """
     lo, hi = m_range
     assert 2 <= lo <= hi <= len(LINE_FIELDS), m_range
     assert 1 <= max_k <= hi, max_k
-    intra = [(INTRA_DOCUMENT, m, k) for m in range(lo, hi + 1) for k in range(1, min(m, max_k) + 1)]
-    return intra + [(CROSS_ITEM, m, CROSS_ITEM_K) for m in range(lo, hi + 1)]
+    return [(INTRA_DOCUMENT, k) for k in range(max_k, 0, -1)] + [(CROSS_ITEM, CROSS_ITEM_K)]
 
 
 def cell_id(cell):
-    """``"<error_type>:m<m>:k<k>"``."""
-    et, m, k = cell
-    return f"{et}:m{m}:k{k}"
+    """``"<error_type>:k<k>"``."""
+    et, k = cell
+    return f"{et}:k{k}"
 
 
 # --- Corruptions ----------------------------------------------------------------
@@ -175,45 +182,39 @@ def line_source(field, line_index, exchanged_with):
     return src
 
 
-def make_candidate(item, doc_items, cell, used, rng, eq, date_fields, year_pivot, frag_rate):
-    """One invalid sample of ``cell`` from ``item``, in an order not yet used for the item.
+def make_candidate(item, doc_items, cell, m_range, used, rng, eq, date_fields, year_pivot, frag_rate):
+    """One invalid sample of ``cell`` from ``item``, shown with all its non-null fields.
 
     Args:
         item: the clean line item.
         doc_items: every valid line item of its document.
-        cell: ``(error_type, m, k)``.
-        used: ``{(document_id, line_index, fields tuple)}`` already in the split.
+        cell: ``(error_type, k)``.
+        m_range: ``[lo, hi]`` allowed full-length sizes.
+        used: ``{(document_id, line_index)}`` already in the split.
         rng, eq, date_fields, year_pivot, frag_rate: as in ``intra_corruption``.
 
     Returns:
         ``{item, fields, values, field_errors}``, or None if the item cannot supply the cell.
     """
-    et, m, k = cell
-    present = [f for f in LINE_FIELDS if item[f] is not None]
-    subsets = list(itertools.combinations(present, m))
-    rng.shuffle(subsets)
-    key = (item["document_id"], item["line_index"])
-    for subset in subsets:
-        orders = [o for o in itertools.permutations(subset) if (*key, o) not in used]
-        if not orders:
-            continue
-        if et == INTRA_DOCUMENT:
-            out = intra_corruption(item, doc_items, subset, k, rng, eq, date_fields, year_pivot, frag_rate)
-            if out is None:
-                continue
-            values, donors = out
-            errors = {f: {"error_type": et, "source": line_source(f, li, None)} for f, li in donors.items()}
-        else:
-            out = cross_item_corruption(item, doc_items, subset, rng, eq, date_fields, year_pivot)
-            if out is None:
-                continue
-            values, (a, b) = out
-            errors = {a: {"error_type": et, "source": line_source(b, item["line_index"], b)},
-                      b: {"error_type": et, "source": line_source(a, item["line_index"], a)}}
-        order = list(orders[rng.randrange(len(orders))])
-        return {"item": item, "fields": order, "values": {f: values[f] for f in order},
-                "field_errors": {f: errors.get(f) for f in order}}
-    return None
+    et, k = cell
+    fields = [f for f in LINE_FIELDS if item[f] is not None]
+    if (item["document_id"], item["line_index"]) in used or not m_range[0] <= len(fields) <= m_range[1]:
+        return None
+    if et == INTRA_DOCUMENT:
+        out = intra_corruption(item, doc_items, fields, k, rng, eq, date_fields, year_pivot, frag_rate)
+        if out is None:
+            return None
+        values, donors = out
+        errors = {f: {"error_type": et, "source": line_source(f, li, None)} for f, li in donors.items()}
+    else:
+        out = cross_item_corruption(item, doc_items, fields, rng, eq, date_fields, year_pivot)
+        if out is None:
+            return None
+        values, (a, b) = out
+        errors = {a: {"error_type": et, "source": line_source(b, item["line_index"], b)},
+                  b: {"error_type": et, "source": line_source(a, item["line_index"], a)}}
+    return {"item": item, "fields": fields, "values": {f: values[f] for f in fields},
+            "field_errors": {f: errors.get(f) for f in fields}}
 
 
 # --- Drawing --------------------------------------------------------------------
@@ -255,7 +256,7 @@ def make_pair(cand, cell):
 
     Args:
         cand: from ``make_candidate``.
-        cell: ``(error_type, m, k)``.
+        cell: ``(error_type, k)``.
 
     Returns:
         ``[invalid, valid]``.
@@ -305,7 +306,7 @@ def build_split(base_rows, line_params, split, seed, eq, date_fields, year_pivot
         cands = {}
         for doc in sorted(by_doc):
             for item in sorted(by_doc[doc], key=lambda r: r["line_index"]):
-                c = make_candidate(item, by_doc[doc], cell, used, rng, eq, date_fields, year_pivot, frag_rate)
+                c = make_candidate(item, by_doc[doc], cell, line_params["m_range"], used, rng, eq, date_fields, year_pivot, frag_rate)
                 if c is not None:
                     cands.setdefault(doc, []).append(c)
         try:
@@ -313,12 +314,13 @@ def build_split(base_rows, line_params, split, seed, eq, date_fields, year_pivot
         except ValueError as e:
             raise ValueError(f"{split} {cell_id(cell)}: {e}") from None
         for c in drawn:
-            used.add((c["item"]["document_id"], c["item"]["line_index"], tuple(c["fields"])))
+            used.add((c["item"]["document_id"], c["item"]["line_index"]))
             samples += make_pair(c, cell)
         docs = Counter(c["item"]["document_id"] for c in drawn)
         stats["cells"][cell_id(cell)] = {
             "n_invalid": len(drawn), "n_docs": len(docs), "effective_docs": round(n * n / sum(v * v for v in docs.values()), 1),
             "eligible_items": sum(len(v) for v in cands.values()), "eligible_docs": len(cands),
+            "m_counts": dict(sorted(Counter(len(c["fields"]) for c in drawn).items())),
         }
     return samples, stats
 
@@ -326,13 +328,14 @@ def build_split(base_rows, line_params, split, seed, eq, date_fields, year_pivot
 # --- Verification ----------------------------------------------------------------
 
 
-def verify_split(samples, base_rows, cells, n_per_cell, eq, date_fields, year_pivot):
+def verify_split(samples, base_rows, cells, m_range, n_per_cell, eq, date_fields, year_pivot):
     """Re-check every sample of a split against its item; raises on any violation.
 
     Args:
         samples: from ``build_split``.
         base_rows: the split's valid line items.
         cells: from ``make_cells``.
+        m_range: ``[lo, hi]`` allowed full-length sizes.
         n_per_cell: invalid samples per cell.
         eq, date_fields, year_pivot: as in ``intra_corruption``.
     """
@@ -351,9 +354,10 @@ def verify_split(samples, base_rows, cells, n_per_cell, eq, date_fields, year_pi
         for key in ("document_id", "line_index", "cell", "m", "fields"):
             assert bad[key] == good[key], (pid, key)
         item = items[(good["document_id"], good["line_index"])]
-        fields, (et, m, k) = good["fields"], cell_of[good["cell"]]
-        assert len(fields) == len(set(fields)) == m == good["m"] and set(fields) <= set(LINE_FIELDS), (pid, fields)
-        shown[(good["document_id"], good["line_index"], tuple(fields))] += 1
+        fields, (et, k) = good["fields"], cell_of[good["cell"]]
+        assert fields == [f for f in LINE_FIELDS if item[f] is not None], (pid, "not the item's non-null fields in LINE_FIELDS order")
+        assert len(fields) == good["m"] and m_range[0] <= good["m"] <= m_range[1], (pid, fields)
+        shown[(good["document_id"], good["line_index"])] += 1
         doc_items = by_doc[good["document_id"]]
         for s in (bad, good):
             assert list(s["field_errors"]) == LINE_FIELDS, (s["sample_id"], "field_errors keys")
@@ -390,7 +394,7 @@ def verify_split(samples, base_rows, cells, n_per_cell, eq, date_fields, year_pi
                 src = bad["field_errors"][x]["source"]
                 assert src["field"] == src["exchanged_with"] == y and src["line_index"] == item["line_index"], (pid, x)
         assert not matches_item(shown_values(bad), doc_items, eq), (pid, "invalid sample is a real item")
-    assert max(shown.values()) == 1, "an (item, ordered fields) pair occurs twice"
+    assert max(shown.values()) == 1, "an item occurs in two pairs"
     per_cell = Counter(s["cell"] for s in samples if not s["valid"])
     assert per_cell == Counter({cid: n_per_cell for cid in cell_of}), per_cell
 
@@ -434,6 +438,108 @@ def cross_item_stats(samples, kind_of):
     return {c: {k: dict(sorted(v.items())) for k, v in d.items()} for c, d in sorted(out.items())}
 
 
+# --- Subsets ----------------------------------------------------------------------
+
+
+def subset_rows(parent, parent_index, doc_items, min_size, eq):
+    """Every subset of one full-length sample, with its recomputed label.
+
+    Args:
+        parent: a row of ``line/<split>.json`` (valid or invalid).
+        parent_index: its position in that file.
+        doc_items: every valid line item of its document.
+        min_size: smallest subset size.
+        eq: from ``make_eq``.
+
+    Returns:
+        One row per subset of ``min_size`` to ``m`` fields (fields in ``LINE_FIELDS`` order), the label
+        keys as in ``parent`` (null if not shown), plus ``subset_id``, ``parent_id``, ``parent_index``, ``pair_id``,
+        ``parent_valid``, ``parent_error_type``, ``cell``, ``size``, ``valid`` (``matches_item`` of the shown
+        values), ``error_type`` (the parent's if a corrupted field is shown, else None), ``invalid_fields``,
+        ``num_invalid_fields``.
+    """
+    fields = parent["fields"]
+    assert fields == [f for f in LINE_FIELDS if f in fields], (parent["sample_id"], "parent fields not in LINE_FIELDS order")
+    rows = []
+    for size in range(min_size, len(fields) + 1):
+        for subset in itertools.combinations(fields, size):
+            invalid = [f for f in subset if f in parent["invalid_fields"]]
+            rows.append({
+                "subset_id": f"{parent['sample_id']}|{'+'.join(subset)}", "parent_id": parent["sample_id"],
+                "parent_index": parent_index, "pair_id": parent["pair_id"], "document_id": parent["document_id"],
+                "line_index": parent["line_index"], "cell": parent["cell"], "parent_valid": parent["valid"],
+                "parent_error_type": parent["error_type"], "fields": list(subset), "size": size,
+                "valid": matches_item({f: parent[f] for f in subset}, doc_items, eq),
+                "error_type": parent["error_type"] if invalid else None, "invalid_fields": invalid,
+                "num_invalid_fields": len(invalid), **{f: parent[f] if f in subset else None for f in LINE_FIELDS}})
+    return rows
+
+
+def build_subsets(samples, base_rows, min_size, eq):
+    """The subsets of every sample of a split.
+
+    Args:
+        samples: from ``build_split``.
+        base_rows: the split's valid line items.
+        min_size: ``params.line.subset_min_size``.
+        eq: from ``make_eq``.
+
+    Returns:
+        ``(rows, stats)``: subset rows parent by parent, and label counts (``valid`` vs the parent's error type
+        still being shown) by size.
+    """
+    by_doc = {}
+    for r in base_rows:
+        by_doc.setdefault(r["document_id"], []).append(r)
+    rows = []
+    for i, parent in enumerate(samples):
+        rows += subset_rows(parent, i, by_doc[parent["document_id"]], min_size, eq)
+    tab = {}
+    for r in rows:
+        key = f"size{r['size']}|parent_{'valid' if r['parent_valid'] else 'invalid'}|corrupted_shown_{bool(r['invalid_fields'])}"
+        tab.setdefault(key, Counter())["valid" if r["valid"] else "invalid"] += 1
+    return rows, {"n_parents": len(samples), "n_subsets": len(rows),
+                  "label_by_size_parent_corrupted_shown": {k: dict(sorted(v.items())) for k, v in sorted(tab.items())}}
+
+
+def verify_subsets(rows, samples, base_rows, min_size, eq):
+    """Re-check every subset against its parent; raises on any violation.
+
+    Args:
+        rows: from ``build_subsets``.
+        samples: the split's full-length samples.
+        base_rows: the split's valid line items.
+        min_size: ``params.line.subset_min_size``.
+        eq: from ``make_eq``.
+    """
+    by_doc = {}
+    for r in base_rows:
+        by_doc.setdefault(r["document_id"], []).append(r)
+    assert len({r["subset_id"] for r in rows}) == len(rows), "duplicate subset_id"
+    expected = sum(sum(math.comb(s["m"], size) for size in range(min_size, s["m"] + 1)) for s in samples)
+    assert len(rows) == expected, (len(rows), expected)
+    per_parent = Counter(r["parent_index"] for r in rows)
+    assert set(per_parent) == set(range(len(samples))), "a parent has no subsets, or a subset has no parent"
+    for r in rows:
+        parent = samples[r["parent_index"]]
+        sid = r["subset_id"]
+        assert r["parent_id"] == parent["sample_id"] and r["pair_id"] == parent["pair_id"], sid
+        assert r["document_id"] == parent["document_id"] and r["line_index"] == parent["line_index"], sid
+        assert r["parent_valid"] == parent["valid"] and r["parent_error_type"] == parent["error_type"], sid
+        fields = r["fields"]
+        assert fields == [f for f in LINE_FIELDS if f in fields] and set(fields) <= set(parent["fields"]), (sid, fields)
+        assert r["size"] == len(fields) and min_size <= r["size"] <= parent["m"], sid
+        assert all(r[f] == parent[f] for f in fields) and all(r[f] is None for f in LINE_FIELDS if f not in fields), sid
+        assert r["invalid_fields"] == [f for f in fields if f in parent["invalid_fields"]], sid
+        assert r["num_invalid_fields"] == len(r["invalid_fields"]), sid
+        assert r["error_type"] == (parent["error_type"] if r["invalid_fields"] else None), sid
+        assert r["valid"] == matches_item({f: r[f] for f in fields}, by_doc[r["document_id"]], eq), (sid, "label")
+        if not r["invalid_fields"]:
+            assert r["valid"], (sid, "a subset with no corrupted field must be valid")
+        if r["size"] == parent["m"]:
+            assert r["valid"] == parent["valid"], (sid, "the full subset must carry its parent's label")
+
+
 # --- Config / main ---------------------------------------------------------------
 
 
@@ -458,6 +564,7 @@ def load_config(path):
     assert all(isinstance(v, int) and v >= 1 for v in line["n_per_cell"].values()), line["n_per_cell"]
     assert len(p["dates"]["line_fields"]) == 2 and set(p["dates"]["line_fields"]) <= set(LINE_FIELDS), p["dates"]
     make_cells(line["m_range"], line["max_k"])
+    assert isinstance(line["subset_min_size"], int) and 1 <= line["subset_min_size"] <= line["m_range"][0], line
     return config
 
 
@@ -466,7 +573,7 @@ def sha256_of(path):
 
 
 def main(argv=None):
-    """Build and write both splits and ``line_build.json`` for the config given on the CLI.
+    """Build and write both splits, their subsets and ``line_build.json`` for the config given on the CLI.
 
     Args:
         argv: CLI arguments (None = ``sys.argv``).
@@ -491,15 +598,21 @@ def main(argv=None):
     for split in SPLITS:
         base = read_base(data_root / "line" / f"{split}_base.json", LINE_FIELDS, ["document_id", "line_index"])
         samples, stats = build_split(base, p["line"], split, config["seed"], eq, date_fields, year_pivot)
-        verify_split(samples, base, cells, p["line"]["n_per_cell"][split], eq, date_fields, year_pivot)
+        verify_split(samples, base, cells, p["line"]["m_range"], p["line"]["n_per_cell"][split], eq, date_fields, year_pivot)
         stats["date_fragments"] = fragment_stats(samples, date_fields, year_pivot)
         stats["cross_item"] = cross_item_stats(samples, kind_of)
+        subsets, stats["subsets"] = build_subsets(samples, base, p["line"]["subset_min_size"], eq)
+        verify_subsets(subsets, samples, base, p["line"]["subset_min_size"], eq)
         rel = f"line/{split}.json"
         (data_root / rel).write_text(json.dumps(samples, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        rel_sub = f"line/{split}_subsets.json"   # one row per line
+        (data_root / rel_sub).write_text("[\n" + ",\n".join(json.dumps(r, ensure_ascii=False) for r in subsets) + "\n]\n", encoding="utf-8")
         out["splits"][split] = stats
-        out["sha256"][rel] = sha256_of(data_root / rel)
+        for r in (rel, rel_sub):
+            out["sha256"][r] = sha256_of(data_root / r)
         tight = min(stats["cells"].items(), key=lambda kv: kv[1]["n_docs"])
-        print(f"{rel}: {len(samples)} samples, {len(cells)} cells; fewest docs: {tight[0]} ({tight[1]['n_docs']})")
+        print(f"{rel}: {len(samples)} samples, {len(cells)} cells; fewest docs: {tight[0]} ({tight[1]['n_docs']}); "
+              f"{rel_sub}: {len(subsets)} subsets")
     (data_root / BUILD_FILE).write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"written to {data_root / BUILD_FILE}")
 

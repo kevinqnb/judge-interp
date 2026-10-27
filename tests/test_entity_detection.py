@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALL_MAIN = ["inter_document", "cross_type"]
 ALL_LINE = ["intra_document", "cross_item"]
 # The line fixture (tests/fixtures/make_line_fixtures.py) has one minimal pair per cell.
-LINE_CELLS = ["cross_item:m2:k2", "cross_item:m3:k2", "intra_document:m2:k1", "intra_document:m5:k2"]
+LINE_CELLS = ["cross_item:k2", "intra_document:k1", "intra_document:k2"]
 
 
 def _rows(dataset):
@@ -125,11 +125,12 @@ def test_line_items_and_null_field():
     items = er.build_items(LINE, _params("line"), 0, REPO_ROOT)
     assert len(items) == 8
     n_spans = sorted(len(it["spans"]) for it in items)
-    assert n_spans == [2, 2, 2, 2, 3, 3, 5, 5]  # each pair: twin and invalid row show the same fields
-    cross = [it for it in items if it["spans"][0]["row_error_type"] == "cross_item" and it["spans"][0]["cell"] == "cross_item:m3:k2"][0]
+    assert n_spans == [4, 4, 5, 5, 5, 5, 5, 5]  # each pair: twin and invalid row show the same fields
+    cross = [it for it in items if it["spans"][0]["row_error_type"] == "cross_item" and it["spans"][0]["cell"] == "cross_item:k2"
+             and it["document_id"] == "doc-a"][0]
     bad = [s for s in cross["spans"] if not s["label_valid"]]
     assert [(s["field"], s["source_field"], s["source_line_index"], s["exchanged_with"], s["line_index"])
-            for s in bad] == [("sub_amount", "channel", 0, "channel", 0), ("channel", "sub_amount", 0, "sub_amount", 0)]
+            for s in bad] == [("channel", "sub_amount", 2, "sub_amount", 2), ("sub_amount", "channel", 2, "channel", 2)]
 
 
 def test_check_row_rejects_inconsistent_labels():

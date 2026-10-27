@@ -35,18 +35,20 @@ def test_conditional_primary_is_the_first_field_and_entities_follow_the_row():
 
 
 def test_known_answer_cross_item_pair():
-    # doc-a li0 = {7, Movie, 01/05/20, 01/10/20, $100.00}; shown [sub_amount, channel, program_end_date],
+    # doc-a li2 = {8, News, 01/21/20, 01/31/20, $400.00}, all five fields shown;
     # channel <-> sub_amount swapped in the invalid sample, original values in its twin
-    pair = [r for r in MINI if r["cell"] == "cross_item:m3:k2"]
+    pair = [r for r in MINI if r["cell"] == "cross_item:k2" and r["document_id"] == "doc-a"]
     bad, good = sorted(pair, key=lambda r: r["valid"])
     one = cs.to_sample(bad, "clef_record_oneshot")
     assert one["error_type"] == "cross_item" and one["pair_id"] == good["pair_id"]
-    assert one["entities"] == [{"field": "sub_amount", "value": "7", "valid": False},
-                               {"field": "channel", "value": "$100.00", "valid": False},
-                               {"field": "program_end_date", "value": "01/10/20", "valid": True}]
+    assert one["entities"] == [{"field": "channel", "value": "$400.00", "valid": False},
+                               {"field": "program_desc", "value": "News", "valid": True},
+                               {"field": "program_start_date", "value": "01/21/20", "valid": True},
+                               {"field": "program_end_date", "value": "01/31/20", "valid": True},
+                               {"field": "sub_amount", "value": "8", "valid": False}]
     twin = cs.to_sample(good, "clef_record_oneshot")
-    assert twin["error_type"] == "" and twin["cell"] == "cross_item:m3:k2"
-    assert [e["value"] for e in twin["entities"]] == ["$100.00", "7", "01/10/20"] and all(e["valid"] for e in twin["entities"])
+    assert twin["error_type"] == "" and twin["cell"] == "cross_item:k2"
+    assert [e["value"] for e in twin["entities"]] == ["8", "News", "01/21/20", "01/31/20", "$400.00"] and all(e["valid"] for e in twin["entities"])
 
 
 def test_oneshot_keeps_the_field_order_and_label():

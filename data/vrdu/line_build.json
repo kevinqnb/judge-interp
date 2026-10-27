@@ -1,12 +1,12 @@
 {
- "generated_at": "2026-10-25T12:53:57.716526+00:00",
+ "generated_at": "2026-10-27T17:04:59.198340+00:00",
  "python": "3.12.5",
  "script": "data/vrdu/build_vrdu_line.py",
- "config_id": "2026-10-24-vrdu-invalids-06",
+ "config_id": "2026-10-27-vrdu-invalids-07",
  "config_snapshot": {
-  "id": "2026-10-24-vrdu-invalids-06",
+  "id": "2026-10-27-vrdu-invalids-07",
   "project": "judge-interp",
-  "description": "Simplified VRDU data. Main (entity detection): inter_document and cross_type rows per achievable k, each document's valid row the clean twin of its invalid rows. Line is built directly as random ordered field subsets of line items, each invalid sample paired with one clean twin (same item, same ordered fields): intra_document over (m, k) cells with k <= 3, and cross_item (k=2), equal size per cell, drawn round-robin over documents. Replaces the -05 line rows, manifest and subsets. -05 numbers do not carry over.",
+  "description": "Line only differs from -06 (main is unchanged; build it with -06). Line samples are now full length: each line item is shown with all its non-null fields (m = 2-5, the item's own count) in LINE_FIELDS order, as minimal pairs (an invalid sample + its clean twin) in (error type, k) cells, each item in at most one pair. Every subset of each sample (size subset_min_size to m) is written to its own line/<split>_subsets.json with a label recomputed by the label rule. Replaces the -06 line rows; -06 line numbers do not carry over.",
   "seed": 0,
   "params": {
    "data_root": "data/vrdu",
@@ -65,289 +65,155 @@
     "n_per_cell": {
      "train": 1250,
      "test": 250
-    }
+    },
+    "subset_min_size": 2
    }
   }
  },
  "cells": [
-  "intra_document:m2:k1",
-  "intra_document:m2:k2",
-  "intra_document:m3:k1",
-  "intra_document:m3:k2",
-  "intra_document:m3:k3",
-  "intra_document:m4:k1",
-  "intra_document:m4:k2",
-  "intra_document:m4:k3",
-  "intra_document:m5:k1",
-  "intra_document:m5:k2",
-  "intra_document:m5:k3",
-  "cross_item:m2:k2",
-  "cross_item:m3:k2",
-  "cross_item:m4:k2",
-  "cross_item:m5:k2"
+  "intra_document:k3",
+  "intra_document:k2",
+  "intra_document:k1",
+  "cross_item:k2"
  ],
  "splits": {
   "train": {
    "fragment_target_rate": 0.20333805230608748,
    "cells": {
-    "intra_document:m2:k1": {
+    "intra_document:k3": {
      "n_invalid": 1250,
-     "n_docs": 432,
-     "effective_docs": 427.1,
-     "eligible_items": 7037,
-     "eligible_docs": 432
+     "n_docs": 291,
+     "effective_docs": 281.4,
+     "eligible_items": 5101,
+     "eligible_docs": 291,
+     "m_counts": {
+      "3": 100,
+      "4": 347,
+      "5": 803
+     }
     },
-    "intra_document:m2:k2": {
+    "intra_document:k2": {
      "n_invalid": 1250,
-     "n_docs": 408,
-     "effective_docs": 399.4,
-     "eligible_items": 6479,
-     "eligible_docs": 408
+     "n_docs": 399,
+     "effective_docs": 383.9,
+     "eligible_items": 5478,
+     "eligible_docs": 399,
+     "m_counts": {
+      "2": 157,
+      "3": 116,
+      "4": 344,
+      "5": 633
+     }
     },
-    "intra_document:m3:k1": {
+    "intra_document:k1": {
      "n_invalid": 1250,
-     "n_docs": 385,
-     "effective_docs": 375.4,
-     "eligible_items": 6353,
-     "eligible_docs": 385
+     "n_docs": 381,
+     "effective_docs": 355.6,
+     "eligible_items": 4567,
+     "eligible_docs": 381,
+     "m_counts": {
+      "2": 186,
+      "3": 115,
+      "4": 341,
+      "5": 608
+     }
     },
-    "intra_document:m3:k2": {
+    "cross_item:k2": {
      "n_invalid": 1250,
-     "n_docs": 368,
-     "effective_docs": 358.5,
-     "eligible_items": 6241,
-     "eligible_docs": 368
-    },
-    "intra_document:m3:k3": {
-     "n_invalid": 1250,
-     "n_docs": 290,
-     "effective_docs": 281.0,
-     "eligible_items": 5115,
-     "eligible_docs": 290
-    },
-    "intra_document:m4:k1": {
-     "n_invalid": 1250,
-     "n_docs": 351,
-     "effective_docs": 341.6,
-     "eligible_items": 5620,
-     "eligible_docs": 351
-    },
-    "intra_document:m4:k2": {
-     "n_invalid": 1250,
-     "n_docs": 337,
-     "effective_docs": 330.2,
-     "eligible_items": 5549,
-     "eligible_docs": 337
-    },
-    "intra_document:m4:k3": {
-     "n_invalid": 1250,
-     "n_docs": 267,
-     "effective_docs": 260.1,
-     "eligible_items": 4638,
-     "eligible_docs": 267
-    },
-    "intra_document:m5:k1": {
-     "n_invalid": 1250,
-     "n_docs": 232,
-     "effective_docs": 223.7,
-     "eligible_items": 3970,
-     "eligible_docs": 232
-    },
-    "intra_document:m5:k2": {
-     "n_invalid": 1250,
-     "n_docs": 225,
-     "effective_docs": 217.6,
-     "eligible_items": 3929,
-     "eligible_docs": 225
-    },
-    "intra_document:m5:k3": {
-     "n_invalid": 1250,
-     "n_docs": 188,
-     "effective_docs": 183.9,
-     "eligible_items": 3648,
-     "eligible_docs": 188
-    },
-    "cross_item:m2:k2": {
-     "n_invalid": 1250,
-     "n_docs": 508,
-     "effective_docs": 480.2,
-     "eligible_items": 7500,
-     "eligible_docs": 508
-    },
-    "cross_item:m3:k2": {
-     "n_invalid": 1250,
-     "n_docs": 450,
-     "effective_docs": 435.0,
-     "eligible_items": 6796,
-     "eligible_docs": 450
-    },
-    "cross_item:m4:k2": {
-     "n_invalid": 1250,
-     "n_docs": 412,
-     "effective_docs": 394.4,
-     "eligible_items": 5980,
-     "eligible_docs": 412
-    },
-    "cross_item:m5:k2": {
-     "n_invalid": 1250,
-     "n_docs": 239,
-     "effective_docs": 226.0,
-     "eligible_items": 3977,
-     "eligible_docs": 239
+     "n_docs": 364,
+     "effective_docs": 330.9,
+     "eligible_items": 3832,
+     "eligible_docs": 364,
+     "m_counts": {
+      "2": 168,
+      "3": 94,
+      "4": 416,
+      "5": 572
+     }
     }
    },
    "date_fragments": {
-    "cross_item:m2:k2": {
-     "invalid_fragment": 48,
-     "non_date_positions": 851,
-     "positions": 50,
-     "twin_fragment": 48
+    "cross_item:k2": {
+     "invalid_fragment": 238,
+     "non_date_positions": 839,
+     "positions": 1309,
+     "twin_fragment": 238
     },
-    "cross_item:m3:k2": {
-     "invalid_fragment": 186,
-     "non_date_positions": 909,
-     "positions": 774,
-     "twin_fragment": 186
+    "intra_document:k1": {
+     "invalid_fragment": 425,
+     "positions": 2152,
+     "twin_fragment": 427
     },
-    "cross_item:m4:k2": {
-     "invalid_fragment": 287,
-     "non_date_positions": 874,
-     "positions": 1346,
-     "twin_fragment": 287
+    "intra_document:k2": {
+     "invalid_fragment": 420,
+     "positions": 2164,
+     "twin_fragment": 432
     },
-    "cross_item:m5:k2": {
-     "invalid_fragment": 332,
-     "non_date_positions": 825,
-     "positions": 1675,
-     "twin_fragment": 332
-    },
-    "intra_document:m2:k1": {
-     "invalid_fragment": 242,
-     "positions": 1148,
-     "twin_fragment": 248
-    },
-    "intra_document:m2:k2": {
-     "invalid_fragment": 213,
-     "positions": 982,
-     "twin_fragment": 217
-    },
-    "intra_document:m3:k1": {
-     "invalid_fragment": 356,
-     "positions": 1565,
-     "twin_fragment": 364
-    },
-    "intra_document:m3:k2": {
-     "invalid_fragment": 369,
-     "positions": 1589,
-     "twin_fragment": 372
-    },
-    "intra_document:m3:k3": {
-     "invalid_fragment": 446,
-     "positions": 1825,
-     "twin_fragment": 462
-    },
-    "intra_document:m4:k1": {
-     "invalid_fragment": 493,
-     "positions": 2132,
-     "twin_fragment": 498
-    },
-    "intra_document:m4:k2": {
-     "invalid_fragment": 502,
-     "positions": 2154,
-     "twin_fragment": 523
-    },
-    "intra_document:m4:k3": {
-     "invalid_fragment": 578,
-     "positions": 2124,
-     "twin_fragment": 601
-    },
-    "intra_document:m5:k1": {
-     "invalid_fragment": 484,
-     "positions": 2500,
-     "twin_fragment": 489
-    },
-    "intra_document:m5:k2": {
-     "invalid_fragment": 485,
-     "positions": 2500,
-     "twin_fragment": 488
-    },
-    "intra_document:m5:k3": {
-     "invalid_fragment": 528,
-     "positions": 2500,
-     "twin_fragment": 540
+    "intra_document:k3": {
+     "invalid_fragment": 610,
+     "positions": 2413,
+     "twin_fragment": 625
     }
    },
    "cross_item": {
-    "cross_item:m2:k2": {
+    "cross_item:k2": {
      "pairs": {
-      "channel~program_desc": 137,
-      "channel~program_end_date": 144,
-      "channel~program_start_date": 135,
-      "channel~sub_amount": 55,
-      "program_desc~program_end_date": 147,
-      "program_desc~program_start_date": 175,
-      "program_desc~sub_amount": 182,
-      "program_end_date~sub_amount": 89,
+      "channel~program_desc": 154,
+      "channel~program_end_date": 149,
+      "channel~program_start_date": 151,
+      "channel~sub_amount": 69,
+      "program_desc~program_end_date": 153,
+      "program_desc~program_start_date": 160,
+      "program_desc~sub_amount": 163,
+      "program_end_date~sub_amount": 85,
       "program_start_date~program_end_date": 25,
-      "program_start_date~sub_amount": 161
+      "program_start_date~sub_amount": 141
      },
      "kind_mix": {
       "cross_kind": 1225,
       "same_kind": 25
      }
-    },
-    "cross_item:m3:k2": {
-     "pairs": {
-      "channel~program_desc": 126,
-      "channel~program_end_date": 159,
-      "channel~program_start_date": 173,
-      "channel~sub_amount": 78,
-      "program_desc~program_end_date": 174,
-      "program_desc~program_start_date": 182,
-      "program_desc~sub_amount": 102,
-      "program_end_date~sub_amount": 107,
-      "program_start_date~program_end_date": 35,
-      "program_start_date~sub_amount": 114
+    }
+   },
+   "subsets": {
+    "n_parents": 10000,
+    "n_subsets": 172310,
+    "label_by_size_parent_corrupted_shown": {
+     "size2|parent_invalid|corrupted_shown_False": {
+      "valid": 9964
      },
-     "kind_mix": {
-      "cross_kind": 1215,
-      "same_kind": 35
-     }
-    },
-    "cross_item:m4:k2": {
-     "pairs": {
-      "channel~program_desc": 158,
-      "channel~program_end_date": 168,
-      "channel~program_start_date": 164,
-      "channel~sub_amount": 98,
-      "program_desc~program_end_date": 179,
-      "program_desc~program_start_date": 167,
-      "program_desc~sub_amount": 81,
-      "program_end_date~sub_amount": 98,
-      "program_start_date~program_end_date": 39,
-      "program_start_date~sub_amount": 98
+     "size2|parent_invalid|corrupted_shown_True": {
+      "invalid": 16620,
+      "valid": 10050
      },
-     "kind_mix": {
-      "cross_kind": 1211,
-      "same_kind": 39
-     }
-    },
-    "cross_item:m5:k2": {
-     "pairs": {
-      "channel~program_desc": 139,
-      "channel~program_end_date": 137,
-      "channel~program_start_date": 130,
-      "channel~sub_amount": 115,
-      "program_desc~program_end_date": 144,
-      "program_desc~program_start_date": 142,
-      "program_desc~sub_amount": 138,
-      "program_end_date~sub_amount": 119,
-      "program_start_date~program_end_date": 33,
-      "program_start_date~sub_amount": 153
+     "size2|parent_valid|corrupted_shown_False": {
+      "valid": 36634
      },
-     "kind_mix": {
-      "cross_kind": 1217,
-      "same_kind": 33
+     "size3|parent_invalid|corrupted_shown_False": {
+      "valid": 3978
+     },
+     "size3|parent_invalid|corrupted_shown_True": {
+      "invalid": 23843,
+      "valid": 4556
+     },
+     "size3|parent_valid|corrupted_shown_False": {
+      "valid": 32377
+     },
+     "size4|parent_invalid|corrupted_shown_False": {
+      "valid": 608
+     },
+     "size4|parent_invalid|corrupted_shown_True": {
+      "invalid": 13193,
+      "valid": 727
+     },
+     "size4|parent_valid|corrupted_shown_False": {
+      "valid": 14528
+     },
+     "size5|parent_invalid|corrupted_shown_True": {
+      "invalid": 2616
+     },
+     "size5|parent_valid|corrupted_shown_False": {
+      "valid": 2616
      }
     }
    }
@@ -355,273 +221,151 @@
   "test": {
    "fragment_target_rate": 0.21856406188020627,
    "cells": {
-    "intra_document:m2:k1": {
-     "n_invalid": 250,
-     "n_docs": 96,
-     "effective_docs": 92.5,
-     "eligible_items": 1254,
-     "eligible_docs": 96
-    },
-    "intra_document:m2:k2": {
-     "n_invalid": 250,
-     "n_docs": 88,
-     "effective_docs": 85.4,
-     "eligible_items": 1151,
-     "eligible_docs": 88
-    },
-    "intra_document:m3:k1": {
-     "n_invalid": 250,
-     "n_docs": 85,
-     "effective_docs": 84.0,
-     "eligible_items": 1131,
-     "eligible_docs": 85
-    },
-    "intra_document:m3:k2": {
-     "n_invalid": 250,
-     "n_docs": 80,
-     "effective_docs": 78.9,
-     "eligible_items": 1115,
-     "eligible_docs": 80
-    },
-    "intra_document:m3:k3": {
-     "n_invalid": 250,
-     "n_docs": 60,
-     "effective_docs": 58.0,
-     "eligible_items": 964,
-     "eligible_docs": 60
-    },
-    "intra_document:m4:k1": {
-     "n_invalid": 250,
-     "n_docs": 77,
-     "effective_docs": 74.2,
-     "eligible_items": 1051,
-     "eligible_docs": 77
-    },
-    "intra_document:m4:k2": {
-     "n_invalid": 250,
-     "n_docs": 72,
-     "effective_docs": 69.8,
-     "eligible_items": 1033,
-     "eligible_docs": 72
-    },
-    "intra_document:m4:k3": {
-     "n_invalid": 250,
-     "n_docs": 54,
-     "effective_docs": 52.1,
-     "eligible_items": 916,
-     "eligible_docs": 54
-    },
-    "intra_document:m5:k1": {
-     "n_invalid": 250,
-     "n_docs": 55,
-     "effective_docs": 51.6,
-     "eligible_items": 829,
-     "eligible_docs": 55
-    },
-    "intra_document:m5:k2": {
-     "n_invalid": 250,
-     "n_docs": 51,
-     "effective_docs": 48.7,
-     "eligible_items": 819,
-     "eligible_docs": 51
-    },
-    "intra_document:m5:k3": {
-     "n_invalid": 250,
-     "n_docs": 42,
-     "effective_docs": 40.5,
-     "eligible_items": 784,
-     "eligible_docs": 42
-    },
-    "cross_item:m2:k2": {
-     "n_invalid": 250,
-     "n_docs": 126,
-     "effective_docs": 119.3,
-     "eligible_items": 1371,
-     "eligible_docs": 126
-    },
-    "cross_item:m3:k2": {
-     "n_invalid": 250,
-     "n_docs": 111,
-     "effective_docs": 102.5,
-     "eligible_items": 1237,
-     "eligible_docs": 111
-    },
-    "cross_item:m4:k2": {
-     "n_invalid": 250,
-     "n_docs": 101,
-     "effective_docs": 93.3,
-     "eligible_items": 1146,
-     "eligible_docs": 101
-    },
-    "cross_item:m5:k2": {
+    "intra_document:k3": {
      "n_invalid": 250,
      "n_docs": 61,
-     "effective_docs": 54.3,
-     "eligible_items": 835,
-     "eligible_docs": 61
+     "effective_docs": 58.3,
+     "eligible_items": 966,
+     "eligible_docs": 61,
+     "m_counts": {
+      "3": 30,
+      "4": 49,
+      "5": 171
+     }
+    },
+    "intra_document:k2": {
+     "n_invalid": 250,
+     "n_docs": 87,
+     "effective_docs": 84.9,
+     "eligible_items": 948,
+     "eligible_docs": 87,
+     "m_counts": {
+      "2": 34,
+      "3": 23,
+      "4": 63,
+      "5": 130
+     }
+    },
+    "intra_document:k1": {
+     "n_invalid": 250,
+     "n_docs": 76,
+     "effective_docs": 66.5,
+     "eligible_items": 755,
+     "eligible_docs": 76,
+     "m_counts": {
+      "2": 45,
+      "3": 16,
+      "4": 51,
+      "5": 138
+     }
+    },
+    "cross_item:k2": {
+     "n_invalid": 250,
+     "n_docs": 77,
+     "effective_docs": 60.6,
+     "eligible_items": 636,
+     "eligible_docs": 77,
+     "m_counts": {
+      "2": 36,
+      "3": 12,
+      "4": 81,
+      "5": 121
+     }
     }
    },
    "date_fragments": {
-    "cross_item:m2:k2": {
-     "invalid_fragment": 5,
-     "non_date_positions": 164,
-     "positions": 8,
-     "twin_fragment": 5
-    },
-    "cross_item:m3:k2": {
-     "invalid_fragment": 19,
-     "non_date_positions": 178,
-     "positions": 148,
-     "twin_fragment": 19
-    },
-    "cross_item:m4:k2": {
+    "cross_item:k2": {
      "invalid_fragment": 41,
      "non_date_positions": 174,
-     "positions": 258,
+     "positions": 264,
      "twin_fragment": 41
     },
-    "cross_item:m5:k2": {
-     "invalid_fragment": 59,
-     "non_date_positions": 168,
-     "positions": 332,
-     "twin_fragment": 59
-    },
-    "intra_document:m2:k1": {
-     "invalid_fragment": 39,
-     "positions": 217,
-     "twin_fragment": 38
-    },
-    "intra_document:m2:k2": {
-     "invalid_fragment": 38,
-     "positions": 196,
-     "twin_fragment": 44
-    },
-    "intra_document:m3:k1": {
-     "invalid_fragment": 46,
-     "positions": 323,
-     "twin_fragment": 51
-    },
-    "intra_document:m3:k2": {
-     "invalid_fragment": 43,
-     "positions": 312,
-     "twin_fragment": 47
-    },
-    "intra_document:m3:k3": {
-     "invalid_fragment": 51,
-     "positions": 347,
-     "twin_fragment": 62
-    },
-    "intra_document:m4:k1": {
-     "invalid_fragment": 72,
-     "positions": 413,
+    "intra_document:k1": {
+     "invalid_fragment": 78,
+     "positions": 434,
      "twin_fragment": 76
     },
-    "intra_document:m4:k2": {
+    "intra_document:k2": {
      "invalid_fragment": 65,
-     "positions": 421,
+     "positions": 436,
      "twin_fragment": 70
     },
-    "intra_document:m4:k3": {
-     "invalid_fragment": 82,
-     "positions": 417,
-     "twin_fragment": 92
-    },
-    "intra_document:m5:k1": {
-     "invalid_fragment": 73,
-     "positions": 500,
-     "twin_fragment": 78
-    },
-    "intra_document:m5:k2": {
-     "invalid_fragment": 73,
-     "positions": 500,
-     "twin_fragment": 74
-    },
-    "intra_document:m5:k3": {
-     "invalid_fragment": 74,
-     "positions": 500,
-     "twin_fragment": 83
+    "intra_document:k3": {
+     "invalid_fragment": 92,
+     "positions": 476,
+     "twin_fragment": 102
     }
    },
    "cross_item": {
-    "cross_item:m2:k2": {
+    "cross_item:k2": {
      "pairs": {
-      "channel~program_desc": 31,
-      "channel~program_end_date": 23,
-      "channel~program_start_date": 34,
-      "channel~sub_amount": 17,
-      "program_desc~program_end_date": 27,
-      "program_desc~program_start_date": 30,
-      "program_desc~sub_amount": 34,
-      "program_end_date~sub_amount": 14,
-      "program_start_date~program_end_date": 4,
-      "program_start_date~sub_amount": 36
+      "channel~program_desc": 29,
+      "channel~program_end_date": 35,
+      "channel~program_start_date": 33,
+      "channel~sub_amount": 15,
+      "program_desc~program_end_date": 21,
+      "program_desc~program_start_date": 32,
+      "program_desc~sub_amount": 29,
+      "program_end_date~sub_amount": 20,
+      "program_start_date~program_end_date": 3,
+      "program_start_date~sub_amount": 33
      },
      "kind_mix": {
-      "cross_kind": 246,
-      "same_kind": 4
+      "cross_kind": 247,
+      "same_kind": 3
      }
-    },
-    "cross_item:m3:k2": {
-     "pairs": {
-      "channel~program_desc": 34,
-      "channel~program_end_date": 25,
-      "channel~program_start_date": 38,
-      "channel~sub_amount": 9,
-      "program_desc~program_end_date": 43,
-      "program_desc~program_start_date": 39,
-      "program_desc~sub_amount": 24,
-      "program_end_date~sub_amount": 12,
-      "program_start_date~program_end_date": 5,
-      "program_start_date~sub_amount": 21
+    }
+   },
+   "subsets": {
+    "n_parents": 2000,
+    "n_subsets": 35366,
+    "label_by_size_parent_corrupted_shown": {
+     "size2|parent_invalid|corrupted_shown_False": {
+      "valid": 2065
      },
-     "kind_mix": {
-      "cross_kind": 245,
-      "same_kind": 5
-     }
-    },
-    "cross_item:m4:k2": {
-     "pairs": {
-      "channel~program_desc": 37,
-      "channel~program_end_date": 29,
-      "channel~program_start_date": 25,
-      "channel~sub_amount": 16,
-      "program_desc~program_end_date": 34,
-      "program_desc~program_start_date": 42,
-      "program_desc~sub_amount": 18,
-      "program_end_date~sub_amount": 18,
-      "program_start_date~program_end_date": 5,
-      "program_start_date~sub_amount": 26
+     "size2|parent_invalid|corrupted_shown_True": {
+      "invalid": 3359,
+      "valid": 1998
      },
-     "kind_mix": {
-      "cross_kind": 245,
-      "same_kind": 5
-     }
-    },
-    "cross_item:m5:k2": {
-     "pairs": {
-      "channel~program_desc": 22,
-      "channel~program_end_date": 28,
-      "channel~program_start_date": 27,
-      "channel~sub_amount": 28,
-      "program_desc~program_end_date": 32,
-      "program_desc~program_start_date": 23,
-      "program_desc~sub_amount": 24,
-      "program_end_date~sub_amount": 37,
-      "program_start_date~program_end_date": 8,
-      "program_start_date~sub_amount": 21
+     "size2|parent_valid|corrupted_shown_False": {
+      "valid": 7422
      },
-     "kind_mix": {
-      "cross_kind": 242,
-      "same_kind": 8
+     "size3|parent_invalid|corrupted_shown_False": {
+      "valid": 854
+     },
+     "size3|parent_invalid|corrupted_shown_True": {
+      "invalid": 4886,
+      "valid": 917
+     },
+     "size3|parent_valid|corrupted_shown_False": {
+      "valid": 6657
+     },
+     "size4|parent_invalid|corrupted_shown_False": {
+      "valid": 138
+     },
+     "size4|parent_invalid|corrupted_shown_True": {
+      "invalid": 2766,
+      "valid": 140
+     },
+     "size4|parent_valid|corrupted_shown_False": {
+      "valid": 3044
+     },
+     "size5|parent_invalid|corrupted_shown_True": {
+      "invalid": 560
+     },
+     "size5|parent_valid|corrupted_shown_False": {
+      "valid": 560
      }
     }
    }
   }
  },
  "sha256": {
-  "line/train.json": "8fe0255a4242d8b640195a79d7d83a0e765ba11a655ac1959eb5f01888d25528",
-  "line/test.json": "04a9abe83e5da7032c50724e3208ad16dc61a7c371f57e417a2386a1dcd21dbf"
+  "line/train.json": "21540c4309376e15d3d4adcf9b783f06b47e4529f54c19516594ba5e33f09b01",
+  "line/train_subsets.json": "98e8f1b004f73346b61302702da682fe9f9e1c8c9f28fa0afe231854f7cba0c4",
+  "line/test.json": "529a45fda486b1f6416cbef3420c876109674e174c7c97d7b284811735617342",
+  "line/test_subsets.json": "f086d7d72e5e73945af1a302090f3e70bc18a313aaceb9faf6eceaa0bf0d40db"
  },
- "git_sha": "4fba69b69171d4bccbecd418ff1777d3e830d87f",
+ "git_sha": "42858d83cee25b17aca44a26eeb9a0ba303c7bcb",
  "git_dirty": true
 }

@@ -1,0 +1,44 @@
+id: 2026-10-27-vrdu-invalids-07
+project: judge-interp
+description: >-
+  Line only differs from -06 (main is unchanged; build it with -06). Line samples are now full length:
+  each line item is shown with all its non-null fields (m = 2-5, the item's own count) in LINE_FIELDS
+  order, as minimal pairs (an invalid sample + its clean twin) in (error type, k) cells, each item in at
+  most one pair. Every subset of each sample (size subset_min_size to m) is written to its own
+  line/<split>_subsets.json with a label recomputed by the label rule. Replaces the -06 line rows;
+  -06 line numbers do not carry over.
+seed: 0
+params:
+  data_root: data/vrdu
+
+  dates:
+    # Every sample keeps parsed(from) <= parsed(to) whenever BOTH shown dates parse (valid twins
+    # included). A null or an OCR fragment (e.g. "/08/20") has no position in time.
+    main_fields: [flight_from, flight_to]
+    line_fields: [program_start_date, program_end_date]
+    year_pivot: 50  # 2-digit year YY -> 20YY if YY < pivot else 19YY
+
+  cross_type:
+    # The kinds define the equivalence key of the label rule (date, amount, folded text).
+    kinds:
+      name: [advertiser, agency, property, tv_address, product]
+      date: [flight_from, flight_to, program_start_date, program_end_date]
+      amount: [gross_amount, sub_amount]
+
+  # Read by build_vrdu_main.py. One invalid row per (document, error type, achievable k in k_range);
+  # inter_document values come from other documents of the split (pool_scope), cross_type values from
+  # other same-kind fields of the document. A null field may be filled (recorded as null_fill); a value is
+  # never nulled.
+  main:
+    k_range: {inter_document: [1, 9], cross_type: [1, 8]}
+    pool_scope: per_split
+    corrupt_from_null: true
+
+  # Read by build_vrdu_line.py. Cells: intra_document k for 1 <= k <= max_k; cross_item k=2. Every cell has
+  # n_per_cell invalid samples plus their twins. m_range: allowed full-length sizes (an item's non-null
+  # field count). subset_min_size: smallest subset written to line/<split>_subsets.json (up to m).
+  line:
+    m_range: [2, 5]
+    max_k: 3
+    n_per_cell: {train: 1250, test: 250}
+    subset_min_size: 2

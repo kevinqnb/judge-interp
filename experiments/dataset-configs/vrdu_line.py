@@ -2,8 +2,8 @@
 
 Defines ``DATASET`` for ``judge_interp.dataset_spec.load_dataset_spec``. The field list
 comes from ``data/vrdu/build_vrdu_dataset.py`` (single source of truth for the schema); the
-descriptions, wording and file layout below are this dataset's. A row is a random ordered subset
-of one line item's fields (``data/vrdu/build_vrdu_line.py``), so the relation tasks apply: the
+descriptions, wording and file layout below are this dataset's. A row is one line item shown with all
+its non-null fields in standard order (``data/vrdu/build_vrdu_line.py``), so the relation tasks apply: the
 entities of a row should all belong to the same line item. Rows come in minimal pairs (an invalid
 row and its clean twin) and are drawn pair by pair.
 """

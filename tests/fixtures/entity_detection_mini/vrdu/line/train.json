@@ -1,10 +1,10 @@
 [
  {
-  "sample_id": "doc-a|0|intra_document:m5:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|invalid",
-  "pair_id": "doc-a|0|intra_document:m5:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
+  "sample_id": "doc-a|0|intra_document:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|invalid",
+  "pair_id": "doc-a|0|intra_document:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
   "line_index": 0,
-  "cell": "intra_document:m5:k2",
+  "cell": "intra_document:k2",
   "m": 5,
   "fields": [
    "channel",
@@ -53,11 +53,11 @@
   "sub_amount": "$400.00"
  },
  {
-  "sample_id": "doc-a|0|intra_document:m5:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|valid",
-  "pair_id": "doc-a|0|intra_document:m5:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
+  "sample_id": "doc-a|0|intra_document:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|valid",
+  "pair_id": "doc-a|0|intra_document:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
   "line_index": 0,
-  "cell": "intra_document:m5:k2",
+  "cell": "intra_document:k2",
   "m": 5,
   "fields": [
    "channel",
@@ -85,24 +85,26 @@
   "sub_amount": "$100.00"
  },
  {
-  "sample_id": "doc-a|0|cross_item:m3:k2|sub_amount+channel+program_end_date|invalid",
-  "pair_id": "doc-a|0|cross_item:m3:k2|sub_amount+channel+program_end_date",
+  "sample_id": "doc-a|2|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|invalid",
+  "pair_id": "doc-a|2|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
-  "line_index": 0,
-  "cell": "cross_item:m3:k2",
-  "m": 3,
+  "line_index": 2,
+  "cell": "cross_item:k2",
+  "m": 5,
   "fields": [
-   "sub_amount",
    "channel",
-   "program_end_date"
+   "program_desc",
+   "program_start_date",
+   "program_end_date",
+   "sub_amount"
   ],
   "valid": false,
   "error_type": "cross_item",
   "k": 2,
   "num_invalid_fields": 2,
   "invalid_fields": [
-   "sub_amount",
-   "channel"
+   "channel",
+   "sub_amount"
   ],
   "field_errors": {
    "channel": {
@@ -112,7 +114,7 @@
      "null_fill": false,
      "dataset": "line",
      "field": "sub_amount",
-     "line_index": 0,
+     "line_index": 2,
      "exchanged_with": "sub_amount"
     }
    },
@@ -126,28 +128,30 @@
      "null_fill": false,
      "dataset": "line",
      "field": "channel",
-     "line_index": 0,
+     "line_index": 2,
      "exchanged_with": "channel"
     }
    }
   },
-  "channel": "$100.00",
-  "program_desc": null,
-  "program_start_date": null,
-  "program_end_date": "01/10/20",
-  "sub_amount": "7"
+  "channel": "$400.00",
+  "program_desc": "News",
+  "program_start_date": "01/21/20",
+  "program_end_date": "01/31/20",
+  "sub_amount": "8"
  },
  {
-  "sample_id": "doc-a|0|cross_item:m3:k2|sub_amount+channel+program_end_date|valid",
-  "pair_id": "doc-a|0|cross_item:m3:k2|sub_amount+channel+program_end_date",
+  "sample_id": "doc-a|2|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|valid",
+  "pair_id": "doc-a|2|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
-  "line_index": 0,
-  "cell": "cross_item:m3:k2",
-  "m": 3,
+  "line_index": 2,
+  "cell": "cross_item:k2",
+  "m": 5,
   "fields": [
-   "sub_amount",
    "channel",
-   "program_end_date"
+   "program_desc",
+   "program_start_date",
+   "program_end_date",
+   "sub_amount"
   ],
   "valid": true,
   "error_type": null,
@@ -161,22 +165,24 @@
    "program_end_date": null,
    "sub_amount": null
   },
-  "channel": "7",
-  "program_desc": null,
-  "program_start_date": null,
-  "program_end_date": "01/10/20",
-  "sub_amount": "$100.00"
+  "channel": "8",
+  "program_desc": "News",
+  "program_start_date": "01/21/20",
+  "program_end_date": "01/31/20",
+  "sub_amount": "$400.00"
  },
  {
-  "sample_id": "doc-a|1|intra_document:m2:k1|program_end_date+channel|invalid",
-  "pair_id": "doc-a|1|intra_document:m2:k1|program_end_date+channel",
+  "sample_id": "doc-a|1|intra_document:k1|channel+program_start_date+program_end_date+sub_amount|invalid",
+  "pair_id": "doc-a|1|intra_document:k1|channel+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
   "line_index": 1,
-  "cell": "intra_document:m2:k1",
-  "m": 2,
+  "cell": "intra_document:k1",
+  "m": 4,
   "fields": [
+   "channel",
+   "program_start_date",
    "program_end_date",
-   "channel"
+   "sub_amount"
   ],
   "valid": false,
   "error_type": "intra_document",
@@ -203,20 +209,22 @@
   },
   "channel": "7",
   "program_desc": null,
-  "program_start_date": null,
+  "program_start_date": "01/11/20",
   "program_end_date": "01/20/20",
-  "sub_amount": null
+  "sub_amount": "$250.00"
  },
  {
-  "sample_id": "doc-a|1|intra_document:m2:k1|program_end_date+channel|valid",
-  "pair_id": "doc-a|1|intra_document:m2:k1|program_end_date+channel",
+  "sample_id": "doc-a|1|intra_document:k1|channel+program_start_date+program_end_date+sub_amount|valid",
+  "pair_id": "doc-a|1|intra_document:k1|channel+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-a",
   "line_index": 1,
-  "cell": "intra_document:m2:k1",
-  "m": 2,
+  "cell": "intra_document:k1",
+  "m": 4,
   "fields": [
+   "channel",
+   "program_start_date",
    "program_end_date",
-   "channel"
+   "sub_amount"
   ],
   "valid": true,
   "error_type": null,
@@ -232,28 +240,31 @@
   },
   "channel": "8",
   "program_desc": null,
-  "program_start_date": null,
+  "program_start_date": "01/11/20",
   "program_end_date": "01/20/20",
-  "sub_amount": null
+  "sub_amount": "$250.00"
  },
  {
-  "sample_id": "doc-b|0|cross_item:m2:k2|program_desc+channel|invalid",
-  "pair_id": "doc-b|0|cross_item:m2:k2|program_desc+channel",
+  "sample_id": "doc-b|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|invalid",
+  "pair_id": "doc-b|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-b",
   "line_index": 0,
-  "cell": "cross_item:m2:k2",
-  "m": 2,
+  "cell": "cross_item:k2",
+  "m": 5,
   "fields": [
+   "channel",
    "program_desc",
-   "channel"
+   "program_start_date",
+   "program_end_date",
+   "sub_amount"
   ],
   "valid": false,
   "error_type": "cross_item",
   "k": 2,
   "num_invalid_fields": 2,
   "invalid_fields": [
-   "program_desc",
-   "channel"
+   "channel",
+   "program_desc"
   ],
   "field_errors": {
    "channel": {
@@ -284,20 +295,23 @@
   },
   "channel": "Weather",
   "program_desc": "9",
-  "program_start_date": null,
-  "program_end_date": null,
-  "sub_amount": null
+  "program_start_date": "02/02/20",
+  "program_end_date": "02/09/20",
+  "sub_amount": "$300.00"
  },
  {
-  "sample_id": "doc-b|0|cross_item:m2:k2|program_desc+channel|valid",
-  "pair_id": "doc-b|0|cross_item:m2:k2|program_desc+channel",
+  "sample_id": "doc-b|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount|valid",
+  "pair_id": "doc-b|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date+sub_amount",
   "document_id": "doc-b",
   "line_index": 0,
-  "cell": "cross_item:m2:k2",
-  "m": 2,
+  "cell": "cross_item:k2",
+  "m": 5,
   "fields": [
+   "channel",
    "program_desc",
-   "channel"
+   "program_start_date",
+   "program_end_date",
+   "sub_amount"
   ],
   "valid": true,
   "error_type": null,
@@ -313,8 +327,8 @@
   },
   "channel": "9",
   "program_desc": "Weather",
-  "program_start_date": null,
-  "program_end_date": null,
-  "sub_amount": null
+  "program_start_date": "02/02/20",
+  "program_end_date": "02/09/20",
+  "sub_amount": "$300.00"
  }
 ]

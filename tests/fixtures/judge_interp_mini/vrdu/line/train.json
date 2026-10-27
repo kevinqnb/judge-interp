@@ -1,10 +1,10 @@
 [
  {
-  "sample_id": "doc-beta|0|cross_item:m4:k2|channel+program_desc+program_start_date+program_end_date|invalid",
-  "pair_id": "doc-beta|0|cross_item:m4:k2|channel+program_desc+program_start_date+program_end_date",
+  "sample_id": "doc-beta|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date|invalid",
+  "pair_id": "doc-beta|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date",
   "document_id": "doc-beta",
   "line_index": 0,
-  "cell": "cross_item:m4:k2",
+  "cell": "cross_item:k2",
   "m": 4,
   "fields": [
    "channel",
@@ -54,11 +54,11 @@
   "sub_amount": null
  },
  {
-  "sample_id": "doc-beta|0|cross_item:m4:k2|channel+program_desc+program_start_date+program_end_date|valid",
-  "pair_id": "doc-beta|0|cross_item:m4:k2|channel+program_desc+program_start_date+program_end_date",
+  "sample_id": "doc-beta|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date|valid",
+  "pair_id": "doc-beta|0|cross_item:k2|channel+program_desc+program_start_date+program_end_date",
   "document_id": "doc-beta",
   "line_index": 0,
-  "cell": "cross_item:m4:k2",
+  "cell": "cross_item:k2",
   "m": 4,
   "fields": [
    "channel",
