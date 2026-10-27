@@ -1,9 +1,13 @@
 #!/bin/bash -l
-# experiments/submit.sh [--analysis <script>] <id>
+# experiments/submit.sh [--analysis <script> | --api] <id>
 #
 # --analysis <script>: CPU-only job that runs `python <script> <config path>`
 # (e.g. analysis/entity_detection.py) instead of run_experiment.py. Requests no GPU
 # and reads only `omp` and `walltime` from params. Explicit flag, never inferred.
+#
+# --api: CPU-only job that runs run_experiment.py for a task whose model is called over an API
+# (the jev_* tasks). Requests no GPU, reads only `omp` and `walltime`, and runs with the repo's
+# .env (TYPESAFE_API_KEY). Explicit flag, never inferred; mutually exclusive with --analysis.
 #
 # One qsub per id. Runs experiments/run_experiment.py under the project venv on a
 # single GPU. Every resource value is READ FROM the id's config's `params`
@@ -24,12 +28,16 @@
 set -euo pipefail
 
 ANALYSIS_SCRIPT=""
+API_JOB=0
 if [ "${1:-}" = "--analysis" ]; then
     ANALYSIS_SCRIPT="${2:?--analysis needs a script path}"
     shift 2
+elif [ "${1:-}" = "--api" ]; then
+    API_JOB=1
+    shift
 fi
 if [ $# -ne 1 ]; then
-    echo "usage: bash experiments/submit.sh [--analysis <script>] <id>" >&2
+    echo "usage: bash experiments/submit.sh [--analysis <script> | --api] <id>" >&2
     exit 1
 fi
 ID="$1"
@@ -53,10 +61,10 @@ CONFIG_PATH="${CONFIG#"$REPO_ROOT"/}"
   IFS= read -r OMP
   IFS= read -r WALLTIME
 } < <(
-  uv run --python 3.12 python - "$CONFIG" "$ANALYSIS_SCRIPT" <<'PY'
+  uv run --python 3.12 python - "$CONFIG" "$ANALYSIS_SCRIPT" "$API_JOB" <<'PY'
 import sys, yaml
 p = yaml.safe_load(open(sys.argv[1]))["params"]
-if sys.argv[2]:  # --analysis: CPU-only, no GPU keys read
+if sys.argv[2] or sys.argv[3] == "1":  # --analysis / --api: CPU-only, no GPU keys read
     for _ in range(3):
         print("")
     print(p["omp"])
@@ -89,7 +97,7 @@ if [ -n "$GPU_TYPE" ]; then
 fi
 
 GPU_FLAGS=(-l gpus=1 "${GPU_TYPE_FLAG[@]}" -l "gpu_memory=${GPU_MEMORY}" -l "gpu_c=${GPU_C}")
-if [ -n "$ANALYSIS_SCRIPT" ]; then
+if [ -n "$ANALYSIS_SCRIPT" ] || [ "$API_JOB" = 1 ]; then
     GPU_FLAGS=()
 fi
 
@@ -98,5 +106,5 @@ qsub -N "$JOB_NAME" -P "$SGE_PROJECT" -j y \
      -o "$REPO_ROOT/experiments/out/${ID}.log" -m e \
      -l "h_rt=${WALLTIME}" -pe omp "$OMP" \
      "${GPU_FLAGS[@]}" \
-     -v "ID=${ID},JOB_REPO_ROOT=${REPO_ROOT},CONFIG_PATH=${CONFIG_PATH},ANALYSIS_SCRIPT=${ANALYSIS_SCRIPT}" \
+     -v "ID=${ID},JOB_REPO_ROOT=${REPO_ROOT},CONFIG_PATH=${CONFIG_PATH},ANALYSIS_SCRIPT=${ANALYSIS_SCRIPT},API_JOB=${API_JOB}" \
      "$REPO_ROOT/experiments/_run_experiment_job.sh" "$ID"

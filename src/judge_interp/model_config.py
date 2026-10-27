@@ -48,3 +48,40 @@ def load_clef_model_config(path: Path) -> dict:
     if not (isinstance(cfg["max_length"], int) and not isinstance(cfg["max_length"], bool) and cfg["max_length"] > 0):
         raise ValueError(f"{path}: max_length must be a positive int, got {cfg['max_length']!r}")
     return cfg
+
+
+JEV_KEYS = frozenset({"model", "retry"})
+_RETRY_KEYS = frozenset({"max_retries", "backoff_max", "timeout"})
+_JEV_VERSIONED = re.compile(r"jev-\d+\.\d+\.\d+")
+
+
+def load_jev_model_config(path: Path) -> dict:
+    """Load and validate a Jev model config.
+
+    Args:
+        path: a ``experiments/model-configs/*.yaml`` file.
+
+    Returns:
+        The config dict with exactly the keys of ``JEV_KEYS``.
+
+    Raises:
+        KeyError: a key is missing or unknown.
+        ValueError: ``model`` is not a versioned id (an alias such as ``jev-latest`` moves between
+            releases), ``retry.max_retries`` is not a non-negative int, or ``retry.backoff_max`` /
+            ``retry.timeout`` is not a positive number.
+    """
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    if set(cfg) != JEV_KEYS:
+        raise KeyError(f"{path}: keys must be exactly {sorted(JEV_KEYS)}, got {sorted(cfg)}")
+    if set(cfg["retry"]) != _RETRY_KEYS:
+        raise KeyError(f"{path}: retry keys must be exactly {sorted(_RETRY_KEYS)}")
+    if not _JEV_VERSIONED.fullmatch(cfg["model"]):
+        raise ValueError(f"{path}: model must be a versioned id like 'jev-1.14.0', not an alias; got {cfg['model']!r}")
+    r = cfg["retry"]
+    if not (isinstance(r["max_retries"], int) and not isinstance(r["max_retries"], bool) and r["max_retries"] >= 0):
+        raise ValueError(f"{path}: retry.max_retries must be a non-negative int, got {r['max_retries']!r}")
+    for k in ("backoff_max", "timeout"):
+        if not (isinstance(r[k], (int, float)) and not isinstance(r[k], bool) and r[k] > 0):
+            raise ValueError(f"{path}: retry.{k} must be a positive number of seconds, got {r[k]!r}")
+    return cfg

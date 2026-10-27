@@ -1,0 +1,11 @@
+# Model config: TypeSafe Jev (System One), the direct judge of the jev_* tasks, called over the API.
+# Experiment configs point here with `model_config:`; the runner snapshots this file into the run directory.
+# The API key is not here: TYPESAFE_API_KEY comes from the environment (the repo's .env, never committed).
+# Versioned id, not an alias (`jev-latest` moves when a new release ships, so results would drift).
+# jev_* runs assert that the response's `model` equals this.
+model: jev-1.14.0
+retry:
+  max_retries: 3
+  # Seconds (typesafe_sdk.RetryPolicy): longest backoff delay, and total retry budget per call.
+  backoff_max: 5.0
+  timeout: 60.0

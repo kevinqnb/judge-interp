@@ -30,6 +30,10 @@ Tasks
     entity task judges dataset rows; the other two judge the samples of a samples file
     (conditional: is a primary entity related to all its conditions; one-shot: is the whole
     record valid). The dataset must have ``supports_relation`` for the latter two.
+``jev_entity_row`` / ``jev_relation_conditional`` / ``jev_record_oneshot`` (``judge_interp.jev``):
+    the same three tasks with TypeSafe Jev, called over the API (needs ``TYPESAFE_API_KEY``;
+    ``params.model_config`` is a ``load_jev_model_config`` file, e.g. ``experiments/model-configs/jev.yaml``).
+    Params are listed in ``jev.TASK_PARAMS``.
 
 Each task module exposes ``TASK_PARAMS`` (its required params) and
 ``run(cfg, spec, run_dir, repo_root, model_cfg)``, which returns the metrics; the runner owns
@@ -90,9 +94,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from judge_interp import clef, entity_detection, relation_detection  # noqa: E402
+from judge_interp import clef, entity_detection, jev, relation_detection  # noqa: E402
 from judge_interp.dataset_spec import load_dataset_spec  # noqa: E402
-from judge_interp.model_config import load_clef_model_config  # noqa: E402
+from judge_interp.model_config import load_clef_model_config, load_jev_model_config  # noqa: E402
 
 
 # task name -> module. Each module exposes TASK_PARAMS (task -> required params) and
@@ -103,6 +107,9 @@ _TASK_MODULES = {
     "clef_entity_row": clef,
     "clef_relation_conditional": clef,
     "clef_record_oneshot": clef,
+    "jev_entity_row": jev,
+    "jev_relation_conditional": jev,
+    "jev_record_oneshot": jev,
 }
 _TASK_PARAMS: dict[str, tuple[str, ...]] = {
     task: module.TASK_PARAMS[task] for task, module in _TASK_MODULES.items()
@@ -167,7 +174,7 @@ def load_config(path: Path) -> dict:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
     spec = load_dataset_spec(REPO_ROOT / params["dataset_config"])
-    if task in ("relation_detection", *clef.SAMPLE_TASKS):
+    if task in ("relation_detection", *clef.SAMPLE_TASKS, *jev.SAMPLE_TASKS):
         spec.require_relation()
     return cfg
 
@@ -202,7 +209,7 @@ def main(argv=None) -> None:
     model_cfg = None
     if "model_config" in _TASK_PARAMS[task]:
         model_config_path = REPO_ROOT / params["model_config"]
-        model_cfg = load_clef_model_config(model_config_path)
+        model_cfg = (load_jev_model_config if task in jev.TASKS else load_clef_model_config)(model_config_path)
         (run_dir / "model_config.snapshot.yaml").write_text(model_config_path.read_text())
 
     manifest = {
@@ -221,14 +228,15 @@ def main(argv=None) -> None:
     (run_dir / "run.json").write_text(json.dumps(manifest, indent=2))
 
     # Determinism: one seed drives python / numpy / torch.
-    import torch
-
     seed = int(cfg["seed"])
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    if task not in jev.TASKS:   # the Jev tasks call an API and load no local model: torch is not needed
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     try:
         metrics = _TASK_MODULES[task].run(cfg, spec, run_dir, REPO_ROOT, model_cfg)

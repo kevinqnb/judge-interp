@@ -46,4 +46,10 @@ if [ -n "${ANALYSIS_SCRIPT}" ]; then
     exec uv run --python 3.12 --extra analysis python "${ANALYSIS_SCRIPT}" "${CONFIG_PATH}"
 fi
 
+# API-backed task (submit.sh --api): no GPU; the key (TYPESAFE_API_KEY) comes from the repo's .env.
+# API_JOB is always passed by submit.sh.
+if [ "${API_JOB}" = 1 ]; then
+    exec uv run --python 3.12 --env-file .env python experiments/run_experiment.py "${CONFIG_PATH}"
+fi
+
 exec uv run --python 3.12 python experiments/run_experiment.py "${CONFIG_PATH}"

@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.26.0",
     "pyyaml>=6.0.3",
+    "typesafe-sdk>=0.7.5",
 ]
 
 [project.optional-dependencies]
