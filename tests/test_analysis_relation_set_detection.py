@@ -1,87 +1,132 @@
 """Unit tests for analysis/relation_set_detection.py on the relation_detection_mini line fixture (see
 tests/test_analysis_relation_detection.py for its items and samples).
 
-``make_split`` gives span ``i`` the activation ``X[i] = [2i, 2i + 1]``; spans follow the row file:
-    rows 0/1  doc-a intra m5 (invalid/twin)  spans 0-4 / 5-9    [CH, DESC, SD, ED, AMT]
-    rows 2/3  doc-a cross m3                 spans 10-12 / 13-15 [AMT, CH, ED]
-    rows 4/5  doc-a intra m2                 spans 16-17 / 18-19 [ED, CH]
-    rows 6/7  doc-b cross m2                 spans 20-21 / 22-23 [DESC, CH]
-Samples are ordered by pair_id (cross m3, intra m5, intra m2, doc-b), invalid members first.
+The fixture's only full (m = 5) record pair is doc-a intra_document:m5:k2: li0 shown [CH, DESC, SD, ED, AMT]
+(spans 0-4 invalid, 5-9 twin), ED <- li1 (01/20/20), AMT <- li2 ($400.00). Its 26 subsets of sizes 2-5:
+the 4 of {CH, DESC, SD} (sizes 2, 3) are still li0's -> context, ``hidden`` (ED and AMT are shown after
+them); the other 22 contain ED or AMT and are no item's -> matched. The other three fixture pairs (m2, m3)
+are dropped. ``make_split`` gives span ``i`` the activation ``X[i] = [2i, 2i + 1]``.
 """
 from __future__ import annotations
 
 import importlib.util
+from math import comb
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from test_analysis_relation_detection import CH, DESC, ED, ITEMS, ROWS, SD, AMT, make_data, make_split, rr
+from test_analysis_relation_detection import AMT, CH, DESC, ED, EQ, ITEMS, ROWS, SD, make_split, rr
+from vrdu_common import item_keys
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("analysis_relation_set_detection", ROOT / "analysis" / "relation_set_detection.py")
 rs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rs)
 
-
-def samples_of(data=None):
-    s = make_split()
-    return s, rs.build_samples(s, rr.group_rows(s), data or make_data())
+SIZES = [2, 3, 4, 5]
+M5 = [r for r in ROWS if r["cell"] == "intra_document:m5:k2"]
 
 
-def test_samples_hand_worked():
-    s, z = samples_of()
-    assert z["n_samples"] == 8 and len(z["rows"]) == 8 and z["y"].tolist() == [False] * 4 + [True] * 4
-    assert [r.tolist() for r in z["rows"]] == [[10, 11, 12], [0, 1, 2, 3, 4], [16, 17], [20, 21],
-                                               [13, 14, 15], [5, 6, 7, 8, 9], [18, 19], [22, 23]]
-    assert z["fields"][0] == f"{AMT},{CH},{ED}" and z["fields"][3] == z["fields"][7] == f"{DESC},{CH}"
-    assert z["cell"][:4].tolist() == ["cross_item:m3:k2", "intra_document:m5:k2", "intra_document:m2:k1", "cross_item:m2:k2"]
-    assert z["error_type"][1] == "intra_document" and z["doc"][3] == "doc-b"
-    assert not z["no_invalid_pair"].any()  # every invalid sample here has an invalid field pair
-    # last shown: cross m3 ED (clean), intra m5 AMT (<- li2), intra m2 CH (<- li0), doc-b CH (swapped)
-    assert z["last_corrupted"].tolist() == [False, True, True, True] * 2
+def make_data(rows=ROWS, items=ITEMS):
+    return {"rows": {(r["pair_id"], r["valid"]): r for r in rows}, "eq": EQ,
+            "item_keys": {d: item_keys(its, rr.LINE_FIELDS, EQ) for d, its in items.items()}}
+
+
+def subsets_of(rows=ROWS, items=ITEMS, sizes=SIZES):
+    s = make_split(rows)
+    return s, rs.build_subsets(s, rr.group_rows(s), make_data(rows, items), sizes)
+
+
+def reorder(rows, order):
+    """The rows with their shown fields in ``order`` (pair ids unchanged: they are opaque keys)."""
+    return [{**r, "fields": list(order)} for r in rows]
+
+
+def test_subsets_hand_worked():
+    s, z = subsets_of()
+    assert z["n_records"] == 1 and z["n_samples"] == 8
+    assert len(z["inv_rows"]) == 22 and len(z["ctx_inv_rows"]) == 4
+    assert sum(comb(5, k) for k in SIZES) == 26
+    assert set(z["ctx_fields"].tolist()) == {f"{CH},{DESC}", f"{CH},{SD}", f"{DESC},{SD}", f"{CH},{DESC},{SD}"}
+    assert set(z["ctx_context_kind"].tolist()) == {"hidden"}
+    assert set(z["cell"].tolist()) == {"intra_document:m5:k2"} and set(z["error_type"].tolist()) == {"intra_document"}
+    # sizes: 10 + 10 + 5 + 1 = 26, minus 3 + 1 context
+    assert [int((z["size"] == k).sum()) for k in SIZES] == [7, 9, 5, 1]
+    # members in shown order, invalid record spans 0-4, twin 5-9
+    k = z["fields"].tolist().index(f"{DESC},{ED},{AMT}")
+    assert z["inv_rows"][k].tolist() == [1, 3, 4] and z["val_rows"][k].tolist() == [6, 8, 9]
+    assert z["n_corrupted"][k] == 2 and z["last_corrupted"][k]
+    k = z["fields"].tolist().index(f"{CH},{SD},{ED}")
+    assert z["n_corrupted"][k] == 1 and z["last_corrupted"][k]
+    k = z["fields"].tolist().index(f"{ED},{AMT}")
+    assert z["n_corrupted"][k] == 2 and z["inv_rows"][k].tolist() == [3, 4]
+    k = z["fields"].tolist().index(f"{CH},{DESC},{ED}")
+    assert z["n_corrupted"][k] == 1 and z["last_corrupted"][k]
+    k = z["fields"].tolist().index(f"{CH},{ED},{AMT}")
+    assert z["n_corrupted"][k] == 2
+    assert (z["n_corrupted"] >= 1).all() and (z["ctx_n_corrupted"] == 0).all()
+
+
+def test_sizes_select_subsets():
+    _, z = subsets_of(sizes=[5])
+    assert len(z["inv_rows"]) == 1 and "ctx_inv_rows" not in z
+    with pytest.raises(AssertionError):
+        subsets_of(sizes=[1, 2])
+
+
+def test_context_kinds_visible_and_corrupted_member():
+    # ED shown first: the clean subsets of {CH, DESC, SD} now follow a corrupted field -> visible
+    rows = reorder(M5, [ED, CH, DESC, SD, AMT])
+    _, z = subsets_of(rows)
+    assert len(z["ctx_inv_rows"]) == 4 and set(z["ctx_context_kind"].tolist()) == {"visible"}
+    # an item with CH 7 and ED 01/20/20 makes (CH, ED) of the invalid record valid despite its corrupted ED
+    extra = {CH: "7", DESC: None, SD: None, ED: "01/20/20", AMT: None}
+    _, z = subsets_of(M5, {**ITEMS, "doc-a": ITEMS["doc-a"] + [extra]})
+    kinds = dict(zip(z["ctx_fields"].tolist(), z["ctx_context_kind"].tolist()))
+    assert kinds[f"{CH},{ED}"] == "corrupted_member" and len(z["inv_rows"]) == 21
 
 
 def test_features_hand_worked():
-    s, z = samples_of()
+    s, z = subsets_of()
     x = s["X"]
-    # sum over spans 0-4 = [2*(0+..+4), 2*(0+..+4) + 5]
-    assert rs.sample_features(x, z["rows"], "sum")[1].tolist() == [20, 25]
-    # doc-b invalid [DESC, CH]: f_k = CH (span 21), context = DESC (span 20)
-    assert rs.sample_features(x, z["rows"], "cond")[3].tolist() == [42, 43, 40, 41]
-    # cross m3 [AMT, CH, ED] spans 10-12: f_k = ED (span 12), context = spans 10 + 11
-    assert rs.sample_features(x, z["rows"], "cond")[0].tolist() == [24, 25, 42, 44]
-    assert rs.sample_features(x, z["rows"], "last")[0].tolist() == [24, 25]
-    assert rs.sample_features(x, z["rows"], "context")[0].tolist() == [42, 44]
-    f = rs.sample_features(x, z["rows"], "cond")
-    assert (f == np.concatenate([rs.sample_features(x, z["rows"], "last"), rs.sample_features(x, z["rows"], "context")], axis=1)).all()
+    k = z["fields"].tolist().index(f"{DESC},{ED},{AMT}")   # spans 1, 3, 4
+    rows = [z["inv_rows"][k]]
+    assert rs.subset_features(x, rows, "sum")[0].tolist() == [16, 19]
+    assert rs.subset_features(x, rows, "last")[0].tolist() == [8, 9]
+    assert rs.subset_features(x, rows, "context")[0].tolist() == [8, 10]
+    st = rs.stack(z)
+    assert len(st["rows"]) == 44 and st["y"].sum() == 22 and (st["fields"][:22] == st["fields"][22:]).all()
     with pytest.raises(AssertionError, match="unknown feature"):
-        rs.sample_features(x, z["rows"], "mean")
+        rs.subset_features(x, rows, "cond")
 
 
-def test_an_invalid_sample_with_only_valid_field_pairs_is_flagged():
-    # an item on which the doc-a cross m3 invalid sample's every field pair, but not the whole sample, lands:
-    # (AMT=7, CH=$100.00), (AMT=7, ED=01/10/20), (CH=$100.00, ED=01/10/20) each matched by a different item
-    extra = [{CH: "$100.00", DESC: None, SD: None, ED: "01/10/20", AMT: "$1.00"},
-             {CH: "1", DESC: None, SD: None, ED: "01/10/20", AMT: "7"},
-             {CH: "$100.00", DESC: None, SD: None, ED: "01/01/99", AMT: "7"}]
-    s, z = samples_of(make_data({**ITEMS, "doc-a": ITEMS["doc-a"] + extra}))
-    assert z["no_invalid_pair"].tolist() == [True] + [False] * 7
+def test_prefix_match_dev_is_zero_only_for_equal_prefixes():
+    s, z = subsets_of()
+    dev, share = rs.prefix_match_dev(s["X"], z)        # arange activations: the twin's spans differ
+    assert dev > 0 and share == 0.0
+    x = s["X"].copy()
+    x[5:10] = x[0:5]                                   # twin activations = invalid record's
+    assert rs.prefix_match_dev(x, z) == (0.0, 1.0)
+    x[7] *= 1.01                                       # SD in the twin: in 3 of the 4 hidden subsets
+    dev, share = rs.prefix_match_dev(x, z)
+    assert 0 < dev < 0.01 and share == 0.25
 
 
-def test_a_twin_that_is_no_items_is_refused():
-    items = {**ITEMS, "doc-b": [{**ITEMS["doc-b"][0], CH: "10"}]}
+def test_paired_bootstrap_diff_of_identical_probes_is_zero():
+    y = np.array([False, True] * 4)
+    p = np.linspace(0.1, 0.9, 8)
+    docs = np.repeat(["a", "b", "c", "d"], 2)
+    assert rs.doc_bootstrap_auroc_diff(y, p, p, docs, 50, 0.9, 0) == (0.0, 0.0)
+
+
+def test_a_twin_subset_that_is_no_items_is_refused():
+    items = {**ITEMS, "doc-a": [{**ITEMS["doc-a"][0], DESC: "Film"}] + ITEMS["doc-a"][1:]}
     with pytest.raises(AssertionError, match="no item's"):
-        samples_of(make_data(items))
-
-
-def test_an_invalid_sample_that_is_an_items_is_refused():
-    items = {**ITEMS, "doc-a": ITEMS["doc-a"] + [{CH: "7", DESC: None, SD: None, ED: "01/20/20", AMT: None}]}
-    with pytest.raises(AssertionError, match="an item's"):
-        samples_of(make_data(items))
+        subsets_of(items=items)
 
 
 def test_a_pair_not_judged_whole_is_refused():
     s = make_split(ROWS[:-1])
     with pytest.raises(AssertionError, match="not judged whole"):
-        rs.build_samples(s, rr.group_rows(s), make_data())
+        rs.build_subsets(s, rr.group_rows(s), make_data(), SIZES)
