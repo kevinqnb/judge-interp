@@ -31,3 +31,20 @@ Decisions: replace `line/{train,test}.json` with the full-length set; subsets ar
 
 ### Commits
 dc9531f vrdu line: full-length pairs plus a separate subsets file (-07)
+
+## Session 2026-10-27 (continued)
+
+### Prompts
+
+> Please draft configs for running both entity detection and relation detection with llama and qwen on the new line dataset -- only on the full `train.json` and `test.json` sets. Also draft configs for running these tasks on the line dataset with clef and jev. IN this case, we ONLY want to run these with the `test_subsets.json` set.
+
+> Yes, use the subset's own valid label instead of per-entity flags. Build out support for running on the subsets sample files.
+
+> Commit the changes and add to the devlog note.
+
+### Implemented
+
+Drafted 8 configs for Llama and Qwen entity/relation detection on the full -07 train and test sets (`experiments/experiment-configs/{entity,relation}-detection/2026-10-27-*-line-{train,test}-01.yaml`, 4 cells each) and two Clef/Jev conditional configs on the test subsets (`relation-detection/{clef,jev}/2026-10-27-*-conditional-subsets-test-01.yaml`). To run on subsets, Clef/Jev sample files now carry an explicit `label_valid` instead of deriving it from the entity flags, and `experiments/clef_samples.py` takes `--source pairs|subsets`; a subset is labelled by its own `matches_item` result. Existing samples files lack the new key and must be regenerated. Nothing has been run.
+
+### Commits
+1e59a46 clef/jev: run on the line subsets; configs for the -07 line sets
