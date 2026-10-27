@@ -275,3 +275,53 @@ def test_fit_logreg_separable_and_shuffle_control():
     assert roc_auc_score(y, clf.predict_proba(x)[:, 1]) > 0.99
     again = er.fit_logreg(x, y, p, 0)
     assert np.array_equal(clf.predict_proba(x), again.predict_proba(x))
+
+
+# ---------------------------------------------------------------- common rows across methods
+def _with_x(rows):
+    s = _main_split(rows)
+    s["X"] = np.arange(len(s["field"]) * 2, dtype=np.float32).reshape(-1, 2)
+    s["run_id"] = "r"
+    return s
+
+
+def test_row_keys_and_restrict_to_rows_cut_every_span_array():
+    s = _with_x(MAIN_ROWS)
+    assert er.row_keys(s) == {("a", "", 0), ("b", "", 0), ("a", "inter_document", 1), ("a", "cross_type", 1), ("b", "inter_document", 1)}
+    keys = {("a", "", 0), ("b", "", 0)}
+    cut = er.restrict_to_rows(s, keys)   # the 4 spans of the two clean rows, in order
+    assert cut["field"].tolist() == ["advertiser", "agency", "advertiser", "product"] and cut["run_id"] == "r"
+    np.testing.assert_array_equal(cut["X"], s["X"][:4])
+    assert er.row_keys(cut) == keys
+    with pytest.raises(AssertionError, match="not in the run"):
+        er.restrict_to_rows(s, keys | {("z", "", 0)})
+
+
+def test_restricting_to_the_common_rows_gives_the_same_pairs_for_every_method():
+    # method 2 judged one row fewer (b's inter_document row); the common set drops it from method 1 too
+    s1, s2 = _with_x(MAIN_ROWS), _with_x([r for r in MAIN_ROWS if not (r["document_id"] == "b" and r["error_type"])])
+    common = er.row_keys(s1) & er.row_keys(s2)
+    sigs = [er.pair_signature(c, er.main_span_pairs(c, MAIN_ROWS, 0)) for c in (er.restrict_to_rows(s, common) for s in (s1, s2))]
+    assert sigs[0] == sigs[1] and len(sigs[0]) == 2
+    assert sigs[0][0] == (("a", "cross_type", 1, "product"), ("b", "", 0, "product"), True)
+    assert sigs[0][1] == (("a", "inter_document", 1, "advertiser"), ("a", "", 0, "advertiser"), False)
+    # unrestricted, the two methods are scored on different pairs
+    assert er.pair_signature(s1, er.main_span_pairs(s1, MAIN_ROWS, 0)) != sigs[0]
+
+
+def test_a_common_set_that_drops_a_clean_row_is_refused():
+    s = _with_x(MAIN_ROWS)
+    cut = er.restrict_to_rows(s, er.row_keys(s) - {("a", "", 0)})
+    with pytest.raises(AssertionError, match="without a clean row"):
+        er.main_span_pairs(cut, MAIN_ROWS, 0)
+
+
+def test_run_rows_path_refuses_another_dataset(tmp_path):
+    ROOT = Path(__file__).resolve().parents[1]
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "config.snapshot.yaml").write_text(
+        "params: {dataset_config: experiments/dataset-configs/vrdu_line.py, data_root: data, split: test}\n")
+    path = er.run_rows_path("r", tmp_path, ROOT, "line")
+    assert path == ROOT / "data" / "vrdu" / "line" / "test.json"
+    with pytest.raises(AssertionError, match="expected 'main'"):
+        er.run_rows_path("r", tmp_path, ROOT, "main")

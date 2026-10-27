@@ -1,29 +1,35 @@
-"""Row-based entity detection on the main dataset: PCA of per-entity activations and a single-entity
-logistic validity probe, scored on minimal pairs.
+"""Entity detection on the main dataset: per-model probes and the direct judges (Clef, Jev), all scored on the
+same minimal pairs of ``params.test_rows`` (``data/vrdu/main/test.json``).
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py analysis/configs/<type>/<id>.yaml``
 
-Reads the ``entity_detection`` train and test runs named in the config, then:
+Methods (``params.models``: a probe per entry; ``params.judges``: a Clef / Jev run per entry, nothing trained).
+Probes train on the ``entity_detection`` train runs, which must have judged ``params.train_rows``
+(``data/vrdu/main/train.json``); every method's test run must have judged ``params.test_rows``. Metric keys and
+figure directories are prefixed with the method's ``label``.
 
-1. Load one layer and subtract each document's mean activation (nothing else).
-2. Pair every corrupted span with its clean twin span (``data/vrdu/main_samples.main_entity_pairs``
-   on the row file the run judged): the same field in the document's clean row, or, for a null-fill
-   span, in another document's clean row. Train and test sets are these pairs, so each (error type,
-   k, field) stratum is exactly 50/50.
-3. PCA on train, coloured by validity.
-4. Logistic regression on one entity's activation, train -> test: smECE, Brier (skill), AUROC (with a
+1. Load one layer per model and subtract each document's mean activation (nothing else), over the model's whole run.
+2. The common set: the test rows every method scored (a judge excludes over-length documents; the LMs have a
+   context limit). Each method's spans are cut to them and each method's dropped rows are reported. Pairs are built
+   per method from these rows (``data/vrdu/main_samples.main_entity_pairs``, same twin seed) and must be
+   identical across methods (asserted): every corrupted span with its clean twin span (the same field in the
+   document's clean row, or, for a null-fill span, in another document's clean row). Each (error type, k,
+   field) stratum is exactly 50/50.
+3. Probes: PCA on train, coloured by validity; logistic regression on one entity's activation, train -> test.
+   Judges: ``analysis/clef.py``'s metrics on the same pairs. Both: smECE, Brier (skill), AUROC (with a
    document-bootstrap interval), accuracy, reliability diagram; per error type, per (type, k), and
    with / without null-fill pairs.
-5. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
-   row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the probe does not just sense "this row
+4. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
+   row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the method does not just sense "this row
    has a corruption somewhere".
-6. Controls: field-identity baseline (exactly 0.5 AUROC on pairs, asserted), shuffled-label AUROC
-   ~ 0.5, seed determinism.
+5. Controls: probes -- field-identity baseline (exactly 0.5 AUROC on pairs, asserted), shuffled-label AUROC
+   ~ 0.5, seed determinism; judges -- permutation null of the metrics.
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -249,12 +255,17 @@ def doc_bootstrap_auroc(y_valid: np.ndarray, probs: np.ndarray, docs: np.ndarray
 
 
 # --------------------------------------------------------------------- minimal pairs (main)
-def load_run_rows(run_id: str, runs_root: Path, repo_root: Path, dataset: str) -> list[dict]:
-    """The row file a run judged (named by its ``config.snapshot.yaml``); refuses a stale file (``check_build``)."""
+def run_rows_path(run_id: str, runs_root: Path, repo_root: Path, dataset: str) -> Path:
+    """Path of the row file a run judged (named by its ``config.snapshot.yaml``)."""
     params = yaml.safe_load((runs_root / run_id / "config.snapshot.yaml").read_text())["params"]
     spec = load_dataset_spec(repo_root / params["dataset_config"])
     assert spec.name == dataset, f"{run_id}: dataset {spec.name!r}, expected {dataset!r}"
-    path = repo_root / params["data_root"] / spec.split_path.format(split=params["split"])
+    return repo_root / params["data_root"] / spec.split_path.format(split=params["split"])
+
+
+def load_run_rows(run_id: str, runs_root: Path, repo_root: Path, dataset: str) -> list[dict]:
+    """The row file a run judged (``run_rows_path``); refuses a stale file (``check_build``)."""
+    path = run_rows_path(run_id, runs_root, repo_root, dataset)
     check_build(path.parent.parent, f"{path.parent.name}/{path.name}")
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -490,42 +501,64 @@ def pair_set(split: dict, rows: list[dict], seed: int | None, dataset: str) -> t
     return z, s
 
 
-def run(cfg: dict, runs_root: Path) -> dict:
-    p, seed = cfg["params"], cfg["seed"]
-    out = runs_root / cfg["id"]
-    fig_dir = FIGURES_DIR / cfg["id"]
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    (out / "artifacts").mkdir(parents=True, exist_ok=True)
-    layer, thr = p["layer"], p["decision_threshold"]
-    assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
+JUDGE_KINDS = ("clef", "jev")
 
-    dataset = p["dataset"]
-    assert dataset in DATASETS, dataset
-    extra = ("value",) if dataset == "main" else ("value", "pair_id", "cell")
-    tr = load_split(p["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", extra)
-    te = load_split(p["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", extra)
-    assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), "train/test documents overlap"
 
-    # The only preprocessing: per-document mean subtraction (asserted ~0 per document).
-    center_per_document(tr["X"], tr["doc_ids"])
-    center_per_document(te["X"], te["doc_ids"])
-    twin_seed = p["twin_seed"] if dataset == "main" else None   # only main has other-document twins
-    z_tr, s_tr = pair_set(tr, load_run_rows(p["train_run_id"], runs_root, REPO_ROOT, dataset), twin_seed, dataset)
-    z_te, s_te = pair_set(te, load_run_rows(p["test_run_id"], runs_root, REPO_ROOT, dataset), twin_seed, dataset)
+def load_sibling(name: str):
+    """Load ``analysis/<name>.py`` as a module. Imported here, not at the top: ``clef.py`` and ``jev.py`` load this file."""
+    spec = importlib.util.spec_from_file_location(f"analysis_{name}", Path(__file__).parent / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def row_keys(split: dict) -> set[tuple]:
+    """The ``(document, row error type, k)`` rows a run has spans of."""
+    return set(zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist()))
+
+
+def restrict_to_rows(split: dict, keys: set[tuple]) -> dict:
+    """``split`` cut to the spans of rows ``keys`` (a subset of its rows): every per-span array (leading
+    dimension = number of spans) is cut, everything else is kept. Per-document centring must come first --
+    it is a mean over the document's spans in the run, not over the common rows.
+
+    Raises:
+        AssertionError: a key the run has no span of.
+    """
+    n = len(split["doc_ids"])
+    keep = np.array([k in keys for k in zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist())], dtype=bool)
+    out = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[:1] == (n,) else v) for k, v in split.items()}
+    assert row_keys(out) == keys, f"{split.get('run_id')}: rows {sorted(keys - row_keys(out))[:3]} not in the run"
+    return out
+
+
+def pair_signature(split: dict, z: dict) -> list[tuple]:
+    """Each pair as ``(invalid span, clean twin span, null_fill)``, a span being ``(document, row error type, k,
+    field)``: identical across methods iff they are scored on the same pairs."""
+    def span(i: int) -> tuple:
+        return (str(split["doc_ids"][i]), str(split["row_error_type"][i]), int(split["row_k"][i]), str(split["field"][i]))
+    return [(span(i), span(j), bool(nf)) for i, j, nf in zip(z["inv"], z["val"], z["null_fill"])]
+
+
+def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr: dict, s_tr: dict, z_te: dict, s_te: dict,
+           fig_dir: Path, art_dir: Path) -> dict:
+    """One model's probe: PCA of train, logistic probe train -> test, the test metrics, row-context diagnostic
+    and controls. ``tr`` is the model's full train split, ``te`` its test split cut to the common rows; both centred.
+    Returns the metrics (unprefixed) and writes the figures to ``fig_dir`` and the predictions to ``art_dir``."""
+    layer, thr = spec["layer"], p["decision_threshold"]
     x_tr, x_te, y_tr, y_te = tr["X"][s_tr["idx"]], te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
     types = sorted(set(z_tr["error_type"].tolist()))
-    assert types == sorted(set(z_te["error_type"].tolist())), "train and test have different error types"
+    assert types == sorted(set(z_te["error_type"].tolist())), f"{label}: train and test have different error types"
     ref_rate = float(y_tr.mean())
-    assert ref_rate == 0.5 == float(y_te.mean()), "minimal-pair sets are not 50/50"
+    assert ref_rate == 0.5 == float(y_te.mean()), f"{label}: minimal-pair sets are not 50/50"
 
     metrics: dict[str, float] = {
-        "layer": layer, "n_train_pairs": int(len(z_tr["inv"])), "n_test_pairs": int(len(z_te["inv"])),
+        "layer": layer, "n_train_pairs": int(len(z_tr["inv"])),
         # one clean span is the twin in every (type, k) stratum, so far fewer valid spans than pairs
         "n_train_unique_valid_spans": len(set(z_tr["val"].tolist())), "n_test_unique_valid_spans": len(set(z_te["val"].tolist())),
         "n_train_docs": len(set(tr["doc_ids"].tolist())), "n_test_docs": len(set(te["doc_ids"].tolist())),
+        "n_train_null_fill_pairs": int(z_tr["null_fill"].sum()),
     }
-    if dataset == "main":   # null-fill exists only on main
-        metrics["n_train_null_fill_pairs"], metrics["n_test_null_fill_pairs"] = int(z_tr["null_fill"].sum()), int(z_te["null_fill"].sum())
 
     pca = PCA(n_components=p["pca_n_components"], svd_solver=p["pca_svd_solver"], random_state=seed)
     scores = pca.fit_transform(x_tr)
@@ -542,15 +575,12 @@ def run(cfg: dict, runs_root: Path) -> dict:
     metrics["test_auroc_ci_lo"], metrics["test_auroc_ci_hi"] = doc_bootstrap_auroc(
         y_te, probs, s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
     no_fill = ~s_te["null_fill"]
-    if dataset == "main":
-        metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
-        metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
-            y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
-        if s_te["null_fill"].any():
-            fill = s_te["null_fill"]
-            metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
-    else:
-        assert no_fill.all(), "line has no null-fill pairs"
+    metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
+    metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
+        y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
+    if s_te["null_fill"].any():
+        fill = s_te["null_fill"]
+        metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
 
     d = smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
@@ -560,9 +590,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
     for col in ("error_type", "stratum"):
         for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
             metrics[f"test_{k_}"] = v
-    if dataset == "main":
-        for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
-            metrics[f"test_no_null_fill_{k_}"] = v
+    for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
+        metrics[f"test_no_null_fill_{k_}"] = v
 
     # Row-context diagnostic: uncorrupted spans of corrupted rows vs the same spans in the clean row.
     p_kept, p_clean = clf.predict_proba(te["X"][z_te["kept"]])[:, 1], clf.predict_proba(te["X"][z_te["clean"]])[:, 1]
@@ -580,18 +609,113 @@ def run(cfg: dict, runs_root: Path) -> dict:
         auc_shuf, auc_shuf_std = shuffled_label_auroc(x_tr, y_tr, x_te, y_te, p, seed)
         metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
         assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
-            f"mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks"
+            f"{label}: mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks"
         )
         assert np.array_equal(probs, fit_logreg(x_tr, y_tr, p, seed).predict_proba(x_te)[:, 1]), (
-            "same-seed refit gave different probabilities"
+            f"{label}: same-seed refit gave different probabilities"
         )
         metrics["control_seed_determinism"] = 1.0
 
     np.savez_compressed(
-        out / "artifacts" / "test_predictions.npz",
+        art_dir / f"{label}_test_predictions.npz",
         prob_valid=probs, label_valid=y_te, span=s_te["idx"], pair_doc=s_te["doc"], doc_ids=te["doc_ids"][s_te["idx"]],
         field=s_te["field"], error_type=s_te["error_type"], k=s_te["k"], null_fill=s_te["null_fill"],
     )
+    return metrics
+
+
+def run_judge(label: str, spec: dict, p: dict, seed: int, mod, judge: dict, rows_te: list[dict], fig_dir: Path) -> tuple[dict, dict]:
+    """One direct judge (Clef / Jev) on the common pairs: the metric code of ``analysis/clef.py``, with Jev's
+    resolution metrics added. ``judge`` is its run cut to the common rows. Returns ``(metrics, eval set)``."""
+    ac = getattr(mod, "ac", mod)   # jev.py reuses clef.py's metric code
+    ev = ac.entity_eval_set(judge, rows_te, p["twin_seed"])
+    m = ac.analyse_run(label, judge, ev, spec, p, fig_dir, seed)
+    if spec["kind"] == "jev":
+        m.update(mod.resolution_metrics(judge))
+    return m, ev
+
+
+def run(cfg: dict, runs_root: Path) -> dict:
+    """Every model's probe and every direct judge on the same test pairs. Probes train on ``params.train_rows``'s
+    runs only; everything is evaluated on ``params.test_rows``, restricted to the rows every method scored
+    (a judge may have excluded over-length documents); each method's dropped rows are reported."""
+    p, seed = cfg["params"], cfg["seed"]
+    out = runs_root / cfg["id"]
+    fig_dir = FIGURES_DIR / cfg["id"]
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    (out / "artifacts").mkdir(parents=True, exist_ok=True)
+    assert p["dataset"] == "main", f"entity detection is evaluated on main only, got {p['dataset']!r}"
+    labels = [s["label"] for s in (*p["models"], *p["judges"])]
+    assert len(set(labels)) == len(labels) and labels, f"duplicate or no method labels {labels}"
+    train_path, test_path = REPO_ROOT / p["train_rows"], REPO_ROOT / p["test_rows"]
+    assert train_path != test_path, "train and test row files are the same file"
+
+    def check_rows_file(run_id: str, expected: Path) -> list[dict]:
+        assert run_rows_path(run_id, runs_root, REPO_ROOT, "main") == expected, f"{run_id}: judged another row file than {expected}"
+        return load_run_rows(run_id, runs_root, REPO_ROOT, "main")
+
+    rows_te = None
+    lms: dict[str, dict] = {}
+    for spec in p["models"]:
+        layer = spec["layer"]
+        assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
+        tr = load_split(spec["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
+        te = load_split(spec["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
+        assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), f"{spec['label']}: train/test documents overlap"
+        # The only preprocessing: per-document mean subtraction (asserted ~0 per document), on the model's whole run.
+        center_per_document(tr["X"], tr["doc_ids"])
+        center_per_document(te["X"], te["doc_ids"])
+        rows_tr = check_rows_file(spec["train_run_id"], train_path)
+        rows_te = check_rows_file(spec["test_run_id"], test_path)
+        lms[spec["label"]] = {"tr": tr, "te": te, "rows_tr": rows_tr}
+    judges: dict[str, dict] = {}
+    for spec in p["judges"]:
+        assert spec["kind"] in JUDGE_KINDS, spec
+        mod = load_sibling(spec["kind"])
+        judge = mod.load_run(spec["run_id"], runs_root, "entity")
+        rows_te = check_rows_file(spec["run_id"], test_path)
+        judges[spec["label"]] = {"mod": mod, "run": judge}
+
+    # The common set: rows every method scored. Pairs are then built per method from identical rows with the
+    # same twin seed, and must come out identical (asserted).
+    scored = {**{k: v["te"] for k, v in lms.items()}, **{k: v["run"] for k, v in judges.items()}}
+    common = set.intersection(*(row_keys(s) for s in scored.values()))
+    assert common, "no test row was scored by every method"
+    metrics: dict[str, float] = {"n_common_test_rows": len(common)}
+    for label, s in scored.items():
+        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = len(row_keys(s)), len(row_keys(s)) - len(common)
+    signature = None
+    for label, s in scored.items():
+        cut = restrict_to_rows(s, common)
+        z = main_span_pairs(cut, rows_te, p["twin_seed"])
+        sig = pair_signature(cut, z)
+        if signature is None:
+            signature = sig
+            metrics["n_test_pairs"], metrics["n_test_null_fill_pairs"] = len(sig), int(z["null_fill"].sum())
+        assert sig == signature, f"{label}: scored on other pairs than {next(iter(scored))}"
+        if label in lms:
+            lms[label]["te"] = cut
+        else:
+            judges[label]["run"] = cut
+
+    art_dir = out / "artifacts"
+    y_ref = None
+    for spec in p["models"]:
+        label, m = spec["label"], lms[spec["label"]]
+        z_tr, s_tr = pair_set(m["tr"], m["rows_tr"], p["twin_seed"], "main")
+        z_te, s_te = pair_set(m["te"], rows_te, p["twin_seed"], "main")
+        assert y_ref is None or np.array_equal(y_ref, s_te["y"]), f"{label}: labels differ from the other methods'"
+        y_ref = s_te["y"]
+        (fig_dir / label).mkdir(parents=True, exist_ok=True)
+        for k_, v in run_lm(label, p, seed, spec, m["tr"], m["te"], z_tr, s_tr, z_te, s_te, fig_dir / label, art_dir).items():
+            metrics[f"{label}_{k_}"] = v
+    for spec in p["judges"]:
+        label, j = spec["label"], judges[spec["label"]]
+        m, ev = run_judge(label, spec, p, seed, j["mod"], j["run"], rows_te, fig_dir)
+        assert y_ref is None or np.array_equal(y_ref, ev["y"]), f"{label}: labels differ from the other methods'"
+        y_ref = ev["y"]
+        for k_, v in m.items():
+            metrics[f"{label}_{k_}"] = v
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
