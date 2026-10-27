@@ -38,6 +38,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -134,6 +135,26 @@ def fit_logreg(x: np.ndarray, y: np.ndarray, p: dict, seed: int) -> LogisticRegr
     return clf
 
 
+def timed_fit_logreg(x: np.ndarray, y: np.ndarray, p: dict, seed: int) -> tuple[LogisticRegression, float]:
+    """``fit_logreg`` and its wall-clock seconds (``time.perf_counter`` around the fit only)."""
+    t0 = time.perf_counter()
+    clf = fit_logreg(x, y, p, seed)
+    return clf, time.perf_counter() - t0
+
+
+def write_probe_train_times(run_id: str, times: dict[str, dict]) -> Path:
+    """Write ``RESULTS_DIR/<run_id>/probe_train_time.json`` (read by ``analysis/efficiency.py``): per method label,
+    ``feature_seconds`` (building the train matrix), ``fit_seconds`` (the probe's logistic-regression fit), ``n_train``,
+    ``n_features``. Only trained methods have an entry."""
+    for label, t in times.items():
+        assert set(t) == set(PROBE_TIME_KEYS), (label, sorted(t))
+        assert t["fit_seconds"] > 0 and t["feature_seconds"] >= 0 and t["n_train"] > 0 and t["n_features"] > 0, (label, t)
+    path = RESULTS_DIR / run_id / "probe_train_time.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(times, indent=2) + "\n")
+    return path
+
+
 def scatter_indices(n: int, max_points: int, seed: int) -> np.ndarray:
     """Random scatter subsample (order also random, so neither class is drawn on top)."""
     rng = np.random.default_rng(seed)
@@ -142,6 +163,8 @@ def scatter_indices(n: int, max_points: int, seed: int) -> np.ndarray:
     return rng.choice(n, size=max_points, replace=False)
 
 FIGURES_DIR = Path(__file__).parent / "figures"
+RESULTS_DIR = Path(__file__).parent / "results"
+PROBE_TIME_KEYS = ("feature_seconds", "fit_seconds", "n_train", "n_features")
 # Every error type of the VRDU datasets (main: inter_document, cross_type; line: intra_document, cross_item).
 ALL_ERROR_TYPES = ("inter_document", "intra_document", "cross_type", "cross_item")
 # Tolerance for "this AUROC is exactly 0.5" (a structure-only baseline on minimal pairs): float rounding only.
@@ -554,7 +577,10 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     and controls. ``tr`` is the model's full train split, ``te`` its test split cut to the common rows; both centred.
     Returns ``(metrics (unprefixed), P(valid) of the test pairs' members)`` and writes the predictions to ``art_dir``."""
     layer, thr = spec["layer"], p["decision_threshold"]
-    x_tr, x_te, y_tr, y_te = tr["X"][s_tr["idx"]], te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
+    t0 = time.perf_counter()
+    x_tr = tr["X"][s_tr["idx"]]
+    feature_seconds = time.perf_counter() - t0
+    x_te, y_tr, y_te = te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
     types = sorted(set(z_tr["error_type"].tolist()))
     assert types == sorted(set(z_te["error_type"].tolist())), f"{label}: train and test have different error types"
     ref_rate = float(y_tr.mean())
@@ -572,7 +598,9 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     pca.fit(x_tr)
     metrics["pca_evr_pc1"], metrics["pca_evr_pc2"] = (float(v) for v in pca.explained_variance_ratio_[:2])
 
-    clf = fit_logreg(x_tr, y_tr, p, seed)
+    clf, fit_seconds = timed_fit_logreg(x_tr, y_tr, p, seed)
+    metrics["probe_train_time"] = {"feature_seconds": feature_seconds, "fit_seconds": fit_seconds,
+                                   "n_train": int(x_tr.shape[0]), "n_features": int(x_tr.shape[1])}
     probs = clf.predict_proba(x_te)[:, 1]
     assert probs.shape == y_te.shape
     metrics.update(probe_metrics("test", y_te, probs, ref_rate, thr))
@@ -705,6 +733,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     y_ref = None
     probs_by_method: dict[str, np.ndarray] = {}
     ref_set = None   # the first method's (docs, error types): every method must be scored on the same pairs, in the same order
+    probe_times: dict[str, dict] = {}
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
         z_tr, s_tr = pair_set(m["tr"], m["rows_tr"], p["twin_seed"], "main")
@@ -713,6 +742,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         y_ref = s_te["y"]
         m_metrics, lm_probs = run_lm(label, p, seed, spec, m["tr"], m["te"], z_tr, s_tr, z_te, s_te, art_dir)
         probs_by_method[label] = lm_probs.astype(np.float64)
+        probe_times[label] = m_metrics.pop("probe_train_time")
         for k_, v in m_metrics.items():
             metrics[f"{label}_{k_}"] = v
         ref_set = ref_set or (s_te["doc"], s_te["error_type"])
@@ -727,6 +757,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         assert np.array_equal(ref_set[0], ev["doc"]) and np.array_equal(ref_set[1], ev["error_type"]), f"{label}: pairs differ from the other methods'"
         for k_, v in m.items():
             metrics[f"{label}_{k_}"] = v
+    write_probe_train_times(cfg["id"], probe_times)
     evset = {"y": y_ref, "docs": ref_set[0], "error_type": ref_set[1], "probs": probs_by_method}
     cr.save_evset(art_dir / "calibration_predictions.npz", evset)
     cr.assert_matches_existing(evset, metrics)

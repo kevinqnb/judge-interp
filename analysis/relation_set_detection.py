@@ -52,6 +52,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -403,13 +404,17 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
     ref_rate = float(y_te.mean())
     assert y_tr.any() and (~y_tr).any(), f"{label}: one class missing in the train subsets"
     assert len(rows_tr) == len(y_tr)
+    t0 = time.perf_counter()
     f_tr = subset_features(tr["X"], rows_tr, "sum")
+    feature_seconds = time.perf_counter() - t0
     f_te = subset_features(te["X"], rows_ev, "sum")
     dev, exact = prefix_match_dev(f_te, ev)
     assert dev <= p["prefix_match_rtol"], f"{label}: hidden rows differ from their twins by {dev:.3g} (relative norm) -- misaligned spans?"
     metrics: dict[str, float] = {"layer": layer, "prefix_match_dev": dev, "prefix_match_exact_share": exact,
                                  "n_train": int(len(y_tr)), "n_train_valid": int(y_tr.sum())}
-    clf = er.fit_logreg(f_tr, y_tr, p, seed)
+    clf, fit_seconds = er.timed_fit_logreg(f_tr, y_tr, p, seed)
+    metrics["probe_train_time"] = {"feature_seconds": feature_seconds, "fit_seconds": fit_seconds,
+                                   "n_train": int(f_tr.shape[0]), "n_features": int(f_tr.shape[1])}
     probs = clf.predict_proba(f_te)[:, 1]
     metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(f_tr)[:, 1]))
     metrics.update(score_method(label, ev, probs, p, seed))
@@ -502,13 +507,16 @@ def run(cfg: dict, runs_root: Path) -> dict:
 
     art_dir = out / "artifacts"
     probs_by_method: dict[str, np.ndarray] = {}
+    probe_times: dict[str, dict] = {}
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
         rows_ev = [m["rows_te"][i] for i in common]
         m_metrics, lm_probs = run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, art_dir)
         probs_by_method[label] = lm_probs.astype(np.float64)
+        probe_times[label] = m_metrics.pop("probe_train_time")
         for k_, v in m_metrics.items():
             metrics[f"{label}_{k_}"] = v
+    er.write_probe_train_times(cfg["id"], probe_times)
     for spec in p["judges"]:
         label, j = spec["label"], judges[spec["label"]]
         pos = {int(i): n for n, i in enumerate(j["idx"].tolist())}
