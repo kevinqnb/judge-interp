@@ -1,0 +1,40 @@
+id: 2026-10-26-qwen7b-relset-m5-smoke-01
+project: judge-interp
+description: >-
+  SMOKE (plumbing only, not a result): first 20 documents of each split. Qwen2.5-7B-Instruct, layer 24 of 28. Subset-level relation detection, line dataset (-06 minimal pairs): every field subset (sizes 2-5) of each full m=5 record and its twin, reusing the m=5 activations; logistic validity probe on the summed member activations, scored on matched subset pairs (label rule matches_item); last-member and context-sum ablations with paired AUROC-difference intervals; context diagnostic by kind; controls.
+  Needs the full train and test runs 2026-10-25-qwen7b-relation-line-train-01 and 2026-10-25-qwen7b-relation-line-test-01 (-06 data, 2026-10-25).
+seed: 0
+params:
+  train_run_id: 2026-10-25-qwen7b-relation-line-train-01
+  test_run_id: 2026-10-25-qwen7b-relation-line-test-01
+  # one of the runs' layers; 0 is the constant null control and is rejected
+  layer: 24
+  # every field subset of these sizes is taken from each full (m=5) record and its twin
+  subset_sizes: [2, 3, 4, 5]
+  # also probed, for comparison: last = the member shown last; context = the sum of the other members
+  ablations: [last, context]
+  # hidden context pairs (identical prompt prefixes) may differ by at most this relative norm. Set after
+  # measuring the full runs (Qwen L24, Llama L28): bf16 noise reaches 0.13-0.14 (97.6-100% exactly
+  # equal); the same fields from another full record of the document differ by a median 1.3
+  prefix_match_rtol: 0.25
+  # logistic regression (lbfgs; ConvergenceWarning is an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  # document-bootstrap intervals of the test AUROC and of AUROC(sum) - AUROC(ablation)
+  auroc_n_boot: 1000
+  ci_level: 0.95
+  ece_n_boot: 2000
+  hist_n_bins: 20
+  run_controls: true
+  # test AUROC is averaged over n_shuffles permuted-train-label fits
+  n_shuffles: 3
+  shuffled_label_auroc_tolerance: 0.1
+  # -- experiments/submit.sh --analysis resources (CPU only; walltime is a placeholder until the smoke run sizes it) --
+  omp: 16
+  # BLAS threads, below omp: jobs at thread_cap == omp were SIGKILLed on a compute node
+  thread_cap: 8
+  walltime: "00:30:00"
+  # restrict each split to its first N documents (null = all)
+  max_docs: 20
