@@ -37,6 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from transformers import DynamicCache
 
 from judge_interp import efficiency as eff
 from judge_interp.dataset_spec import DatasetSpec
@@ -61,7 +62,7 @@ _MODEL_KEYS = ("token_index", "token_id", "token_n_chars", "prompt_n_tokens")
 # Per-row measurements of ``judge_row`` (see ``efficiency``); stored in each shard as ``eff_<key>``.
 EFFICIENCY_KEYS = (
     "seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup",
-    "prompt_n_tokens", "n_spans", "peak_alloc_bytes", "peak_reserved_bytes",
+    "prompt_n_tokens", "reused_n_tokens", "computed_n_tokens", "n_spans", "peak_alloc_bytes", "peak_reserved_bytes",
 )
 
 
@@ -365,12 +366,74 @@ class RowDetectionLM(RepresentationLM):
     ``weights_bytes`` is read at the end of ``collect_rows``.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, prefix_cache: bool, prefix_cache_check_n: int, prefix_cache_atol: float, **kwargs):
+        if not isinstance(prefix_cache, bool):
+            raise ValueError(f"prefix_cache must be a bool, got {prefix_cache!r}")
+        if not (isinstance(prefix_cache_check_n, int) and not isinstance(prefix_cache_check_n, bool) and prefix_cache_check_n >= 0):
+            raise ValueError(f"prefix_cache_check_n must be a non-negative int, got {prefix_cache_check_n!r}")
+        if not (isinstance(prefix_cache_atol, (int, float)) and not isinstance(prefix_cache_atol, bool) and prefix_cache_atol >= 0):
+            raise ValueError(f"prefix_cache_atol must be a non-negative number, got {prefix_cache_atol!r}")
+        if prefix_cache_check_n > 0 and not prefix_cache:
+            raise ValueError("prefix_cache_check_n > 0 needs prefix_cache: there is nothing to compare")
         super().__init__(*args, **kwargs)
+        self.prefix_cache, self.prefix_cache_check_n, self.prefix_cache_atol = prefix_cache, prefix_cache_check_n, prefix_cache_atol
         self.meter = eff.Meter(self.device)
         self.weights_bytes = None   # set at the end of collect_rows
         self.verify_seconds = None  # first-trace time (weight load + verify_read_point); None if verify_read_point is off
         self.shard_write_seconds: list[float] = []  # this process only; a resumed shard's write is not re-measured
+        self._prefix_ids: list[int] | None = None   # token ids of the prefix held in ``_kv``
+        self._kv: DynamicCache | None = None        # KV of ``_prefix_ids`` (instructions + context); never holds more
+        self.n_prefix_checked = 0                   # rows compared against an uncached forward
+        self.prefix_cache_max_abs_diff: float | None = None  # largest |cached - uncached| over the checked rows, all layers
+
+    def _trace_reads(self, input_ids: list[int], positions: list[int], cache: DynamicCache | None) -> dict[int, "torch.Tensor"]:
+        """One forward pass; the hidden state at ``positions`` of ``input_ids`` for every layer.
+
+        Args:
+            input_ids: the tokens fed to the model: the whole prompt, or with ``cache`` only what follows the cached prefix.
+            positions: indices into ``input_ids`` (not into the whole prompt) to read.
+            cache: KV of the prefix preceding ``input_ids``, or ``None`` for the whole prompt. The forward
+                appends ``input_ids`` to it; the caller crops it back.
+
+        Returns:
+            ``{layer: float32 [len(positions), hidden]}`` saved tensors (valid after the call).
+        """
+        idx = torch.tensor(positions, dtype=torch.long)
+        kv = {}
+        if cache is not None:
+            # The explicit all-ones mask is required: without it transformers' packed-sequence detection reads the
+            # suffix's position_ids (which start at the prefix length) as a new sequence and masks the cached
+            # prefix out, silently (reads move by about the signal's size).
+            total = cache.get_seq_length() + len(input_ids)
+            kv = {"past_key_values": cache, "use_cache": True, "attention_mask": torch.ones(1, total, dtype=torch.long)}
+        saved: dict[int, "torch.Tensor"] = {}
+        with torch.no_grad(), self.llm.trace(input_ids, logits_to_keep=1, **kv):
+            for layer in self.layers:
+                h = self._read_point(layer)
+                seq = h[0] if h.ndim == 3 else h
+                saved[layer] = seq[idx, :].detach().to(torch.float32).save()
+        return saved
+
+    def _prefix_cache_for(self, prefix_ids: list[int]) -> tuple[DynamicCache, int]:
+        """The KV cache of ``prefix_ids``, computed only if it is not the one held.
+
+        Args:
+            prefix_ids: the prompt's tokens before the extracted record.
+
+        Returns:
+            ``(cache, reused)``: the cache, holding exactly ``prefix_ids``, and the number of tokens
+            reused (``len(prefix_ids)`` on a hit, 0 when it had to be computed).
+        """
+        if self._prefix_ids == prefix_ids:
+            assert self._kv.get_seq_length() == len(prefix_ids)
+            return self._kv, len(prefix_ids)
+        self._kv, self._prefix_ids = None, None   # free the old prefix before building the next
+        cache = DynamicCache()
+        with torch.no_grad(), self.llm.trace(prefix_ids, past_key_values=cache, use_cache=True, logits_to_keep=1):
+            pass
+        assert cache.get_seq_length() == len(prefix_ids), (cache.get_seq_length(), len(prefix_ids))
+        self._kv, self._prefix_ids = cache, list(prefix_ids)
+        return cache, 0
 
     def judge_row(self, instructions: str, context: str, query: str, spans: list[dict]) -> dict:
         """Run one prefill pass and read the hidden state at each closing quote.
@@ -425,16 +488,24 @@ class RowDetectionLM(RepresentationLM):
             token_id.append(tid)
             n_chars.append(e - s)
         assert len(set(token_index)) == len(token_index), "two quotes resolved to the same token"
-        idx_tensor = torch.tensor(token_index, dtype=torch.long)
+        prefix_n = 0
+        if self.prefix_cache:
+            # The prefix is every token before the record. The split must fall between tokens, and every read
+            # must be in the suffix; the model is causal, so the prefix's KV does not depend on the record.
+            prefix_n = sum(1 for _, e in offsets if e <= shift)
+            assert all(e <= shift or s >= shift for s, e in offsets), "a token straddles the start of the record"
+            assert 0 < prefix_n <= min(token_index), (prefix_n, min(token_index))
 
-        saved: dict[int, "torch.Tensor"] = {}
         t1 = self.meter.now()
         self.meter.reset_peaks()
-        with torch.no_grad(), self.llm.trace(input_ids, logits_to_keep=1):
-            for layer in self.layers:
-                h = self._read_point(layer)
-                seq = h[0] if h.ndim == 3 else h
-                saved[layer] = seq[idx_tensor, :].detach().to(torch.float32).save()
+        if self.prefix_cache:
+            cache, reused = self._prefix_cache_for(input_ids[:prefix_n])
+            saved = self._trace_reads(input_ids[prefix_n:], [i - prefix_n for i in token_index], cache)
+            cache.crop(-(len(input_ids) - prefix_n))   # drop the suffix; a positive length is deprecated
+            assert cache.get_seq_length() == prefix_n, (cache.get_seq_length(), prefix_n)
+        else:
+            reused = 0
+            saved = self._trace_reads(input_ids, token_index, None)
         t2 = self.meter.now()
 
         representations = {
@@ -458,10 +529,14 @@ class RowDetectionLM(RepresentationLM):
             "seconds_readout": t3 - t2,      # device-to-host copy and finiteness checks
             "seconds_cleanup": t4 - t3,      # empty_cache + gc, run after every row
             "prompt_n_tokens": prompt_n_tokens,
+            "reused_n_tokens": reused,                    # prefix tokens served from the KV cache
+            "computed_n_tokens": prompt_n_tokens - reused,  # tokens actually run through the model
             "n_spans": n_spans,
             **peaks,
         }
         assert set(efficiency) == set(EFFICIENCY_KEYS), sorted(efficiency)
+        if self.n_prefix_checked < self.prefix_cache_check_n:
+            self._check_against_uncached(input_ids, token_index, representations)
         return {
             "efficiency": efficiency,
             "representations": representations,
@@ -471,6 +546,29 @@ class RowDetectionLM(RepresentationLM):
             "prompt_n_tokens": prompt_n_tokens,
         }
 
+    def _check_against_uncached(self, input_ids: list[int], token_index: list[int], cached: dict[int, np.ndarray]) -> None:
+        """Require the cached reads of a row to match an uncached forward of the whole prompt.
+
+        Args:
+            input_ids: the whole prompt.
+            token_index: the read positions in it.
+            cached: the row's representations as read with the prefix cache.
+
+        Raises:
+            AssertionError: some layer differs by more than ``prefix_cache_atol`` anywhere.
+        """
+        ref = self._trace_reads(input_ids, token_index, None)
+        worst = 0.0
+        for layer in self.layers:
+            diff = float(np.abs(np.asarray(ref[layer].cpu().numpy(), dtype=np.float32) - cached[layer]).max())
+            print(f"prefix_cache check: layer {layer:>2d} max|cached - uncached| = {diff:.4g}")
+            assert diff <= self.prefix_cache_atol, (
+                f"prefix cache changes layer {layer} reads by {diff:.4g} > prefix_cache_atol {self.prefix_cache_atol}"
+            )
+            worst = max(worst, diff)
+        self.n_prefix_checked += 1
+        self.prefix_cache_max_abs_diff = worst if self.prefix_cache_max_abs_diff is None else max(self.prefix_cache_max_abs_diff, worst)
+
     def _item_fingerprint(self, it: dict) -> str:
         """Hash of everything that determines an item's stored rows.
 
@@ -478,10 +576,10 @@ class RowDetectionLM(RepresentationLM):
             it: an item from ``build_items``.
 
         Returns:
-            Hex digest over model name, instructions, context and query.
+            Hex digest over model name, ``prefix_cache``, instructions, context and query.
         """
         h = hashlib.sha256()
-        for part in (self.model_name, it["instructions"], it["context"], it["query"]):
+        for part in (self.model_name, f"prefix_cache={self.prefix_cache}", it["instructions"], it["context"], it["query"]):
             h.update(part.encode())
             h.update(b"\x00")
         return h.hexdigest()
@@ -770,6 +868,7 @@ def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
 ROW_PARAMS = (
     "data_root", "model", "dataset_config", "split", "layers", "dtype", "device",
     "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
+    "prefix_cache", "prefix_cache_check_n", "prefix_cache_atol",
 )
 
 
@@ -818,6 +917,17 @@ def write_efficiency(run_dir: Path, rlm: "RowDetectionLM", result: dict, npz_pat
     m["eff_first_prompt_seconds"] = float(per_prompt[0])   # CUDA warmup is in here unless verify_read_point ran first
     m.update(eff.column_stats("eff_prompt_n_tokens", rows["prompt_n_tokens"]))
     m["eff_prompt_tokens_per_second_trace"] = float(rows["prompt_n_tokens"].sum() / rows["seconds_trace"].sum())
+    # Tokens: logical prompt length vs what the model ran. With the prefix cache the first row of a document computes
+    # its whole prompt (the prefix included) and later rows only their record; so computed = prompt - reused.
+    assert (rows["reused_n_tokens"] + rows["computed_n_tokens"] == rows["prompt_n_tokens"]).all()
+    assert rlm.prefix_cache or (rows["reused_n_tokens"] == 0).all()
+    m["eff_reused_tokens_total"] = int(rows["reused_n_tokens"].sum())
+    m["eff_computed_tokens_total"] = int(rows["computed_n_tokens"].sum())
+    m["eff_reused_token_fraction"] = m["eff_reused_tokens_total"] / m["eff_prompt_n_tokens_total"]
+    m["eff_computed_tokens_per_second_trace"] = float(rows["computed_n_tokens"].sum() / rows["seconds_trace"].sum())
+    m["eff_prefix_cache"] = int(rlm.prefix_cache)
+    m["eff_prefix_cache_n_checked"] = rlm.n_prefix_checked   # this process only; None diff below if 0
+    m["eff_prefix_cache_max_abs_diff"] = rlm.prefix_cache_max_abs_diff
     m["eff_output_tokens_total"] = 0   # prefill only: nothing is decoded
     if result["efficiency"]["gpu_name"] == "cpu":
         peak_a = peak_r = [None] * n_prompts
@@ -860,6 +970,9 @@ def write_efficiency(run_dir: Path, rlm: "RowDetectionLM", result: dict, npz_pat
             "peak_alloc_bytes": "max_memory_allocated over the trace and readout of one row, includes weights",
             "rep_bytes_layer": "float32 array as stored; the forward runs in the config dtype",
             "tokens": "input (prompt) tokens only; output tokens are 0 (no decoding)",
+            "prompt_n_tokens": "length of the whole prompt, as if nothing were cached",
+            "reused_n_tokens": "prefix (instructions + context) tokens whose KV came from the prefix cache; 0 for the first row of a document and when prefix_cache is off",
+            "computed_n_tokens": "prompt_n_tokens - reused_n_tokens: tokens actually run through the model (the prefix is counted once, in the document's first row)",
         },
     }, indent=2))
     np.savez_compressed(run_dir / "artifacts" / "efficiency_rows.npz", **{k: v for k, v in rows.items()})
@@ -885,7 +998,10 @@ def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build
     p, seed = cfg["params"], int(cfg["seed"])
     meter = eff.Meter(p["device"])
     t0 = meter.now()
-    rlm = lm_class(model_name=p["model"], layers=p["layers"], device=p["device"], dtype=p["dtype"], verbose=True)
+    rlm = lm_class(
+        model_name=p["model"], layers=p["layers"], device=p["device"], dtype=p["dtype"], verbose=True,
+        prefix_cache=p["prefix_cache"], prefix_cache_check_n=p["prefix_cache_check_n"], prefix_cache_atol=p["prefix_cache_atol"],
+    )
     model_load_seconds = meter.now() - t0
     limit = p["context_token_limit"]
     tokenizer = AutoTokenizer.from_pretrained(p["model"]) if limit is not None else None

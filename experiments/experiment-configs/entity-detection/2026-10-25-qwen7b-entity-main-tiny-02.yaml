@@ -16,6 +16,9 @@ params:
   device: cuda
   context_token_limit: 28000
   verify_read_point: true
+  prefix_cache: false
+  prefix_cache_check_n: 0
+  prefix_cache_atol: 0.01
   error_types: [inter_document, cross_type]
   rows_per_stratum:
     valid: 4

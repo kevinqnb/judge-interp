@@ -37,6 +37,9 @@ params:
   # dtype) outside 2026-09-27-qwen7b-relation-smoke-01 -- run that smoke
   # first and keep this on until it passes.
   verify_read_point: true
+  prefix_cache: false
+  prefix_cache_check_n: 0
+  prefix_cache_atol: 0.01
   min_valid_per_type: 1
 
   # -- experiments/submit.sh resources --

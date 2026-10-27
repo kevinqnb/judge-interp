@@ -35,6 +35,9 @@ params:
   # since it's cheap and this exact (model, device, dtype) combination is
   # still unconfirmed.
   verify_read_point: true
+  prefix_cache: false
+  prefix_cache_check_n: 0
+  prefix_cache_atol: 0.01
   min_valid_per_type: 1
 
   # -- experiments/submit.sh resources --

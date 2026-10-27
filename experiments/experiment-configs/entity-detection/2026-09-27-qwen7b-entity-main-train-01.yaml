@@ -46,6 +46,9 @@ params:
   # dtype) outside 2026-09-27-qwen7b-entity-smoke-01 -- run that smoke first
   # and keep this on until it passes.
   verify_read_point: true
+  prefix_cache: false
+  prefix_cache_check_n: 0
+  prefix_cache_atol: 0.01
   min_valid_per_list: 1
   min_invalid_per_list: 1
   # Moderate cap: main lists never reach it (natural max is 9 decoys), so this

@@ -47,7 +47,9 @@ def _rows(n_prompts, spans_each):
     return {
         "seconds_prompt": np.full(n_prompts, 0.1), "seconds_trace": np.full(n_prompts, 0.5),
         "seconds_readout": np.full(n_prompts, 0.2), "seconds_cleanup": np.full(n_prompts, 0.2),
-        "prompt_n_tokens": np.full(n_prompts, 1000), "n_spans": np.full(n_prompts, spans_each),
+        "prompt_n_tokens": np.full(n_prompts, 1000),
+        "reused_n_tokens": np.array([0] + [900] * (n_prompts - 1)), "computed_n_tokens": np.array([1000] + [100] * (n_prompts - 1)),
+        "n_spans": np.full(n_prompts, spans_each),
         "peak_alloc_bytes": np.full(n_prompts, -1), "peak_reserved_bytes": np.full(n_prompts, -1),
     }
 
@@ -63,12 +65,18 @@ def test_row_write_efficiency_hand_worked_on_cpu(tmp_path):
     }
     npz = tmp_path / "artifacts" / "span_representations.npz"
     rd.write_span_representations({k: v for k, v in result.items() if k != "efficiency"}, npz)
-    rlm = SimpleNamespace(hidden_size=hidden, weights_bytes=None, verify_seconds=2.5, shard_write_seconds=[0.5, 0.25], device="cpu", model_name="m")
+    rlm = SimpleNamespace(hidden_size=hidden, weights_bytes=None, verify_seconds=2.5, shard_write_seconds=[0.5, 0.25], device="cpu", model_name="m",
+                         prefix_cache=True, n_prefix_checked=2, prefix_cache_max_abs_diff=0.004)
     m = rd.write_efficiency(tmp_path, rlm, result, npz, dict(
         model_load_seconds=1.0, build_items_seconds=2.0, collect_seconds=3.0, final_write_seconds=4.0))
     assert m["eff_seconds_per_prompt_total"] == pytest.approx(4 * 1.0)
     assert m["eff_seconds_per_span_mean"] == pytest.approx(4.0 / 12)
     assert m["eff_prompt_n_tokens_total"] == 4000 and m["eff_output_tokens_total"] == 0
+    # known answer: the first row computes all 1000 tokens, the other three reuse 900 and compute 100
+    assert m["eff_reused_tokens_total"] == 2700 and m["eff_computed_tokens_total"] == 1300
+    assert m["eff_reused_token_fraction"] == pytest.approx(0.675) and m["eff_prefix_cache"] == 1
+    assert m["eff_computed_tokens_per_second_trace"] == pytest.approx(1300 / 2.0)
+    assert m["eff_prefix_cache_n_checked"] == 2 and m["eff_prefix_cache_max_abs_diff"] == 0.004
     assert m["eff_rep_bytes_layer_0"] == n * hidden * 4 == m["eff_rep_bytes_layer_5"]
     assert m["eff_rep_bytes_per_span_per_layer"] == hidden * 4
     assert m["eff_gpu_peak_alloc_bytes_max"] is None and m["eff_gpu_peak_activation_bytes_max"] is None
