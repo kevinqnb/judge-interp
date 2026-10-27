@@ -5,6 +5,7 @@
   "error_type": "",
   "pair_id": "p5",
   "cell": "intra_document:m3:k1",
+  "label_valid": true,
   "entities": [
    {
     "field": "sub_amount",
@@ -29,6 +30,7 @@
   "error_type": "intra_document",
   "pair_id": "p6",
   "cell": "intra_document:m2:k1",
+  "label_valid": false,
   "entities": [
    {
     "field": "channel",
@@ -48,6 +50,7 @@
   "error_type": "",
   "pair_id": "p7",
   "cell": "cross_item:m2:k2",
+  "label_valid": true,
   "entities": [
    {
     "field": "program_end_date",
@@ -67,6 +70,7 @@
   "error_type": "intra_document",
   "pair_id": "p8",
   "cell": "intra_document:m3:k2",
+  "label_valid": false,
   "entities": [
    {
     "field": "program_end_date",

@@ -1,0 +1,22 @@
+id: 2026-10-27-jev-conditional-subsets-test-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Jev (jev-1.14.0, TypeSafe API) relation detection (conditional): the first field of each sample is the primary entity and every other field a condition; one noul question per sample. Line dataset (-07), test SUBSETS only (data/vrdu/line/test_subsets.json): every subset of 2 to m fields of every test full-length sample (clean and invalid parents), 35366 samples, label = the subset's own `valid` (matches_item against the document's real items), so it is NOT balanced: 23795 valid, 11571 invalid, and 6112 invalid-parent subsets show a corrupted field yet are valid. Samples file experiments/clef-samples/conditional-test-subsets.json, built by `experiments/clef_samples.py --split test --source subsets`; its `label_valid` is the subset's `valid` (not derived from the entity flags, which mark the parent's corrupted fields), and `sample_id` is the subset id. Each sample is scored once. No length pre-filter (no local tokenizer): a request over the API's context limit raises and fails the run; nothing is excluded. Efficiency per request: wall time and API-reported input / output tokens (artifacts/efficiency_records.npz).
+  The known-answer record is scored first and the first 5 samples are rescored; P(true) must move by at most determinism_atol = 0.15 (the API is nondeterministic for an identical request, see 2026-10-27-jev-conditional-line-tiny-01).
+  Predicted: n_predictions = 35366 (23795 valid), ~0.1 s per request, i.e. ~1 h; walltime ~4x. Not preceded by a tiny run on subsets.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-test-subsets.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  # ~0.1 s/request in the tiny run -> ~1 h for 35366; walltime ~4x that.
+  omp: 1
+  walltime: "04:00:00"

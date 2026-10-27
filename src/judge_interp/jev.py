@@ -219,7 +219,7 @@ def _sample_unit(s: dict, ents: list[dict], state: dict, question: Noul) -> dict
         **{k: s[k] for k in clef._CARRIED_KEYS},
         "fields": [e["field"] for e in ents],
         "invalid_fields": bad,
-        "label_valid": not bad,
+        "label_valid": s["label_valid"],
         "record": {"id": s["sample_id"], "state": state, "questions": {"q": question}},
     }
 
@@ -229,7 +229,7 @@ def conditional_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str
 
     Returns:
         One dict per sample with the keys of ``clef.conditional_units`` (``fields`` primary first,
-        ``label_valid`` = primary and every condition valid) and ``record`` (one ``noul`` question).
+        ``label_valid`` = the sample's own label) and ``record`` (one ``noul`` question).
     """
     units = []
     for s in samples:
@@ -240,7 +240,6 @@ def conditional_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str
         u = _sample_unit(s, [prim, *conds], state, conditional_question(prim["field"], [e["field"] for e in conds], spec))
         u.update(primary=prim["field"], conditions=[e["field"] for e in conds], primary_valid=prim["valid"],
                  invalid_conditions=[e["field"] for e in conds if not e["valid"]])
-        assert u["label_valid"] == (u["primary_valid"] and not u["invalid_conditions"])
         units.append(u)
     return units
 
@@ -249,8 +248,8 @@ def oneshot_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str, st
     """Build one Jev unit per one-shot sample (output of ``clef.load_samples``).
 
     Returns:
-        One dict per sample with the keys of ``clef.oneshot_units`` (``label_valid`` = every entity
-        valid) and ``record`` (one ``noul`` question over the whole record).
+        One dict per sample with the keys of ``clef.oneshot_units`` (``label_valid`` = the sample's own
+        label) and ``record`` (one ``noul`` question over the whole record).
     """
     units = []
     for s in samples:

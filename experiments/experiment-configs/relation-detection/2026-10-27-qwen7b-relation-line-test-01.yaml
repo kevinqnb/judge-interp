@@ -1,0 +1,37 @@
+id: 2026-10-27-qwen7b-relation-line-test-01
+project: judge-interp
+task: relation_detection
+description: >-
+  Row-based relation detection, line dataset, -07 full-length minimal pairs (4 cells: intra_document k1-k3, cross_item k2; every invalid row is paired with its clean twin; each row shows all of one item's non-null fields, m = 2-5), test split, Qwen2.5-7B-Instruct: one prompt per row (2000 prompts, every row),
+  representations read at each non-null entity's closing quote at the layers below, labelled per entity from field_errors.
+  Efficiency is measured on every run (artifacts/efficiency.json, efficiency_*.npz, flat eff_* keys in metrics.json): per-prompt wall time (prompt build / trace / readout / cleanup), input tokens, peak GPU memory, and per-layer bytes in memory and in the npz; no output tokens, nothing is decoded.
+  Expected: n_prompts = 2000; one read token id; same row set for both models (context_token_limit is shared).
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  split: test
+  # 28 blocks: 0 = token embedding (identical for every entity -> null control), 28 = post-final-norm.
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  error_types: [intra_document, cross_item]
+  # Every row: null = all rows of the stratum ("valid" + error types, or the 4 cells of the -07 paired dataset).
+  rows_per_stratum:
+    intra_document:k3: null
+    intra_document:k2: null
+    intra_document:k1: null
+    cross_item:k2: null
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is ~2x the tiny-test estimate (2026-10-25-*-tiny-0*: ~0.5 s/prompt
+  # for the representation models, 0.7-1.2 s/record for Clef). Shards resume if a job is killed.
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "01:30:00"

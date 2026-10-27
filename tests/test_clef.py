@@ -174,6 +174,9 @@ def test_load_samples_refuses_malformed_files(tmp_path):
     bad(lambda d: d[0].pop("error_type"), "keys")
     bad(lambda d: d[0].pop("pair_id"), "keys")
     bad(lambda d: d[0].update(cell=None), "must be strings")
+    bad(lambda d: d[0].pop("label_valid"), "keys")
+    bad(lambda d: d[0].update(label_valid="yes"), "must be a bool")
+    bad(lambda d: d[0].update(label_valid=False), "every entity valid but label_valid false")   # o1: all entities valid
     bad(lambda d: d.clear(), "non-empty")
     cond = SAMPLES / "conditional.json"
     with pytest.raises(AssertionError, match="keys"):  # a conditional file under the one-shot task
@@ -260,3 +263,18 @@ def test_filter_overlong_modes(jsm):
         clef.filter_overlong([mk(5), mk(50)], jsm, tok, fixed + 10, "error")
     with pytest.raises(AssertionError):
         clef.filter_overlong([mk(5)], jsm, tok, fixed + 10, "drop")
+
+
+def test_a_sample_label_is_its_own_not_the_entity_flags(tmp_path):
+    """A corrupted entity with label_valid true (a subset equal to a real item) stays valid; invalid_fields keeps the entity."""
+    import json
+    data = json.loads((SAMPLES / "oneshot.json").read_text())
+    o2 = next(s for s in data if s["sample_id"] == "o2")
+    assert not all(e["valid"] for e in o2["entities"]) and o2["label_valid"] is False
+    o2["label_valid"] = True
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps(data))
+    samples = clef.load_samples(path, LINE, "clef_record_oneshot")
+    contexts = {d: "x" for d in {s["document_id"] for s in samples}}
+    (u,) = [u for u in clef.oneshot_units(samples, LINE, contexts) if u["sample_id"] == "o2"]
+    assert u["label_valid"] is True and u["invalid_fields"] != []

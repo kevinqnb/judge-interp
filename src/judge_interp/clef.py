@@ -260,8 +260,8 @@ def entity_units(items: list[dict], spec: DatasetSpec, contexts: dict[str, str])
 ENTITY_KEYS = {"field", "value", "valid"}
 _CARRIED_KEYS = ("error_type", "pair_id", "cell")   # opaque strings carried through to the predictions
 SAMPLE_KEYS = {
-    "clef_relation_conditional": {"sample_id", "document_id", *_CARRIED_KEYS, "primary", "conditions"},
-    "clef_record_oneshot": {"sample_id", "document_id", *_CARRIED_KEYS, "entities"},
+    "clef_relation_conditional": {"sample_id", "document_id", *_CARRIED_KEYS, "label_valid", "primary", "conditions"},
+    "clef_record_oneshot": {"sample_id", "document_id", *_CARRIED_KEYS, "label_valid", "entities"},
 }
 
 
@@ -276,9 +276,11 @@ def load_samples(path: Path, spec: DatasetSpec, task: str) -> list[dict]:
 
     The file is a JSON list. Every sample has ``sample_id`` (unique), ``document_id``,
     ``error_type``, ``pair_id`` and ``cell`` (strings, ``""`` if none; carried through to the
-    predictions for stratification) and entities, each
+    predictions for stratification), ``label_valid`` (the sample's ground-truth label) and entities, each
     ``{"field", "value", "valid"}`` (``valid``: whether the value is correct for its field in the
-    document, the ground truth). A conditional sample has ``primary`` (one entity) and
+    document). ``label_valid`` is the sample's own label, not derived from the entities: a sample with a
+    corrupted entity may still be valid (a subset whose shown values equal a real item's), but a sample
+    whose entities are all valid must be. A conditional sample has ``primary`` (one entity) and
     ``conditions`` (a non-empty list of entities); a one-shot sample has ``entities`` (a list of at
     least two). The order given is the order shown to the judge. A field occurs at most once per
     sample. Nothing here depends on how the samples were drawn.
@@ -304,10 +306,12 @@ def load_samples(path: Path, spec: DatasetSpec, task: str) -> list[dict]:
         assert set(s) == SAMPLE_KEYS[task], f"{where}: keys {sorted(s)} != {sorted(SAMPLE_KEYS[task])}"
         assert isinstance(s["document_id"], str) and s["document_id"], where
         assert all(isinstance(s[k], str) for k in _CARRIED_KEYS), f"{where}: {_CARRIED_KEYS} must be strings"
+        assert isinstance(s["label_valid"], bool), f"{where}: label_valid must be a bool"
         ents = [s["primary"], *s["conditions"]] if task == "clef_relation_conditional" else s["entities"]
         assert isinstance(ents, list) and len(ents) >= 2, f"{where}: needs at least two entities"
         for e in ents:
             _check_entity(e, spec, where)
+        assert s["label_valid"] or not all(e["valid"] for e in ents), f"{where}: every entity valid but label_valid false"
         fields = [e["field"] for e in ents]
         assert len(set(fields)) == len(fields), f"{where}: a field occurs twice: {fields}"
     return samples
@@ -322,7 +326,7 @@ def _sample_unit(s: dict, ents: list[dict], state: str, question: dict) -> dict:
         **{k: s[k] for k in _CARRIED_KEYS},
         "fields": [e["field"] for e in ents],
         "invalid_fields": bad,
-        "label_valid": not bad,
+        "label_valid": s["label_valid"],
         "record": {"id": s["sample_id"], "state": state, "questions": {"q": question}},
     }
 
@@ -339,8 +343,8 @@ def conditional_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str
     Returns:
         One dict per sample with ``sample_id``, ``doc_id``, ``error_type``, ``primary``,
         ``conditions``, ``fields`` (primary first, then the conditions in order),
-        ``primary_valid``, ``invalid_conditions``, ``invalid_fields``, ``label_valid`` (primary
-        and every condition valid) and ``record`` (one ``noul`` question).
+        ``primary_valid``, ``invalid_conditions``, ``invalid_fields`` (the corrupted entities), ``label_valid``
+        (the sample's own label) and ``record`` (one ``noul`` question).
     """
     units = []
     for s in samples:
@@ -353,7 +357,6 @@ def conditional_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str
         u = _sample_unit(s, [prim, *conds], state, conditional_question(prim["field"], [e["field"] for e in conds], spec))
         u.update(primary=prim["field"], conditions=[e["field"] for e in conds], primary_valid=prim["valid"],
                  invalid_conditions=[e["field"] for e in conds if not e["valid"]])
-        assert u["label_valid"] == (u["primary_valid"] and not u["invalid_conditions"])
         units.append(u)
     return units
 
@@ -368,7 +371,7 @@ def oneshot_units(samples: list[dict], spec: DatasetSpec, contexts: dict[str, st
 
     Returns:
         One dict per sample with ``sample_id``, ``doc_id``, ``error_type``, ``fields`` (in the
-        order shown), ``invalid_fields``, ``label_valid`` (every entity valid) and ``record``
+        order shown), ``invalid_fields`` (the corrupted entities), ``label_valid`` (the sample's own label) and ``record``
         (one ``noul`` question over the whole record).
     """
     units = []
