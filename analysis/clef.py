@@ -124,7 +124,7 @@ def sample_eval_set(run: dict) -> dict:
 
 
 # ------------------------------------------------------------------------ metrics
-def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: Path, seed: int) -> dict:
+def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: Path | None, seed: int) -> dict:
     y, probs, thr = ev["y"], ev["probs"], p["decision_threshold"]
     assert y.any() and (~y).any(), f"{label}: one class missing"
     ref = spec["bss_ref_rate"]
@@ -140,9 +140,10 @@ def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: P
     m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
     d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
     m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
-    (fig_dir / label).mkdir(parents=True, exist_ok=True)
-    er.plot_calibration(d, fig_dir / label)
-    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
+    if fig_dir is not None:   # None: the caller draws its own figures (entity_detection.py)
+        (fig_dir / label).mkdir(parents=True, exist_ok=True)
+        er.plot_calibration(d, fig_dir / label)
+        er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
 
     if run["kind"] == "entity":
         for col in ("error_type", "type_k"):
