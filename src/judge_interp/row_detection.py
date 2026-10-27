@@ -366,17 +366,17 @@ class RowDetectionLM(RepresentationLM):
     ``weights_bytes`` is read at the end of ``collect_rows``.
     """
 
-    def __init__(self, *args, prefix_cache: bool, prefix_cache_check_n: int, prefix_cache_atol: float, **kwargs):
+    def __init__(self, *args, prefix_cache: bool, prefix_cache_check_n: int, prefix_cache_rtol: float, **kwargs):
         if not isinstance(prefix_cache, bool):
             raise ValueError(f"prefix_cache must be a bool, got {prefix_cache!r}")
         if not (isinstance(prefix_cache_check_n, int) and not isinstance(prefix_cache_check_n, bool) and prefix_cache_check_n >= 0):
             raise ValueError(f"prefix_cache_check_n must be a non-negative int, got {prefix_cache_check_n!r}")
-        if not (isinstance(prefix_cache_atol, (int, float)) and not isinstance(prefix_cache_atol, bool) and prefix_cache_atol >= 0):
-            raise ValueError(f"prefix_cache_atol must be a non-negative number, got {prefix_cache_atol!r}")
+        if not (isinstance(prefix_cache_rtol, (int, float)) and not isinstance(prefix_cache_rtol, bool) and prefix_cache_rtol >= 0):
+            raise ValueError(f"prefix_cache_rtol must be a non-negative number, got {prefix_cache_rtol!r}")
         if prefix_cache_check_n > 0 and not prefix_cache:
             raise ValueError("prefix_cache_check_n > 0 needs prefix_cache: there is nothing to compare")
         super().__init__(*args, **kwargs)
-        self.prefix_cache, self.prefix_cache_check_n, self.prefix_cache_atol = prefix_cache, prefix_cache_check_n, prefix_cache_atol
+        self.prefix_cache, self.prefix_cache_check_n, self.prefix_cache_rtol = prefix_cache, prefix_cache_check_n, prefix_cache_rtol
         self.meter = eff.Meter(self.device)
         self.weights_bytes = None   # set at the end of collect_rows
         self.verify_seconds = None  # first-trace time (weight load + verify_read_point); None if verify_read_point is off
@@ -384,7 +384,7 @@ class RowDetectionLM(RepresentationLM):
         self._prefix_ids: list[int] | None = None   # token ids of the prefix held in ``_kv``
         self._kv: DynamicCache | None = None        # KV of ``_prefix_ids`` (instructions + context); never holds more
         self.n_prefix_checked = 0                   # rows compared against an uncached forward
-        self.prefix_cache_max_abs_diff: float | None = None  # largest |cached - uncached| over the checked rows, all layers
+        self.prefix_cache_max_rel_diff: float | None = None  # largest per-layer max|cached - uncached| / max|uncached| over the checked rows
 
     def _trace_reads(self, input_ids: list[int], positions: list[int], cache: DynamicCache | None) -> dict[int, "torch.Tensor"]:
         """One forward pass; the hidden state at ``positions`` of ``input_ids`` for every layer.
@@ -555,19 +555,23 @@ class RowDetectionLM(RepresentationLM):
             cached: the row's representations as read with the prefix cache.
 
         Raises:
-            AssertionError: some layer differs by more than ``prefix_cache_atol`` anywhere.
+            AssertionError: some layer differs by more than ``prefix_cache_rtol`` of its own scale.
         """
         ref = self._trace_reads(input_ids, token_index, None)
         worst = 0.0
         for layer in self.layers:
-            diff = float(np.abs(np.asarray(ref[layer].cpu().numpy(), dtype=np.float32) - cached[layer]).max())
-            print(f"prefix_cache check: layer {layer:>2d} max|cached - uncached| = {diff:.4g}")
-            assert diff <= self.prefix_cache_atol, (
-                f"prefix cache changes layer {layer} reads by {diff:.4g} > prefix_cache_atol {self.prefix_cache_atol}"
+            r = np.asarray(ref[layer].cpu().numpy(), dtype=np.float32)
+            scale = float(np.abs(r).max())
+            assert scale > 0, f"layer {layer}: uncached reads are all zero, a relative comparison is meaningless"
+            diff = float(np.abs(r - cached[layer]).max())
+            rel = diff / scale
+            print(f"prefix_cache check: layer {layer:>2d} max|cached - uncached| = {diff:.4g}, max|uncached| = {scale:.4g}, relative = {rel:.4g}")
+            assert rel <= self.prefix_cache_rtol, (
+                f"prefix cache changes layer {layer} reads by {diff:.4g} = {rel:.4g} of max|uncached| {scale:.4g} > prefix_cache_rtol {self.prefix_cache_rtol}"
             )
-            worst = max(worst, diff)
+            worst = max(worst, rel)
         self.n_prefix_checked += 1
-        self.prefix_cache_max_abs_diff = worst if self.prefix_cache_max_abs_diff is None else max(self.prefix_cache_max_abs_diff, worst)
+        self.prefix_cache_max_rel_diff = worst if self.prefix_cache_max_rel_diff is None else max(self.prefix_cache_max_rel_diff, worst)
 
     def _item_fingerprint(self, it: dict) -> str:
         """Hash of everything that determines an item's stored rows.
@@ -868,7 +872,7 @@ def compute_metrics(result: dict, spec: DatasetSpec) -> dict:
 ROW_PARAMS = (
     "data_root", "model", "dataset_config", "split", "layers", "dtype", "device",
     "context_token_limit", "verify_read_point", "error_types", "rows_per_stratum",
-    "prefix_cache", "prefix_cache_check_n", "prefix_cache_atol",
+    "prefix_cache", "prefix_cache_check_n", "prefix_cache_rtol",
 )
 
 
@@ -927,7 +931,7 @@ def write_efficiency(run_dir: Path, rlm: "RowDetectionLM", result: dict, npz_pat
     m["eff_computed_tokens_per_second_trace"] = float(rows["computed_n_tokens"].sum() / rows["seconds_trace"].sum())
     m["eff_prefix_cache"] = int(rlm.prefix_cache)
     m["eff_prefix_cache_n_checked"] = rlm.n_prefix_checked   # this process only; None diff below if 0
-    m["eff_prefix_cache_max_abs_diff"] = rlm.prefix_cache_max_abs_diff
+    m["eff_prefix_cache_max_rel_diff"] = rlm.prefix_cache_max_rel_diff
     m["eff_output_tokens_total"] = 0   # prefill only: nothing is decoded
     if result["efficiency"]["gpu_name"] == "cpu":
         peak_a = peak_r = [None] * n_prompts
@@ -1000,7 +1004,7 @@ def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build
     t0 = meter.now()
     rlm = lm_class(
         model_name=p["model"], layers=p["layers"], device=p["device"], dtype=p["dtype"], verbose=True,
-        prefix_cache=p["prefix_cache"], prefix_cache_check_n=p["prefix_cache_check_n"], prefix_cache_atol=p["prefix_cache_atol"],
+        prefix_cache=p["prefix_cache"], prefix_cache_check_n=p["prefix_cache_check_n"], prefix_cache_rtol=p["prefix_cache_rtol"],
     )
     model_load_seconds = meter.now() - t0
     limit = p["context_token_limit"]

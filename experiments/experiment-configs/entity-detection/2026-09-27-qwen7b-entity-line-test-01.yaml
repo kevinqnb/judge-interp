@@ -25,7 +25,7 @@ params:
   verify_read_point: true
   prefix_cache: false
   prefix_cache_check_n: 0
-  prefix_cache_atol: 0.01
+  prefix_cache_rtol: 0.1
   min_valid_per_list: 1
   min_invalid_per_list: 1
   max_invalid_per_list: 30

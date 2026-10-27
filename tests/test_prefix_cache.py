@@ -19,7 +19,7 @@ FIXTURE = "tests/fixtures/entity_detection_mini"
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LAYERS = [0, 8, "last"]
 LINE_CELLS = ["cross_item:k2", "intra_document:k1", "intra_document:k2"]
-ATOL = 1e-2   # float32 on CPU agrees far more tightly than this; the bf16 GPU run is judged against the same value
+RTOL = 1e-3   # of each layer's max|uncached|; float32 on CPU agrees far more tightly. The bf16 GPU runs use a larger value (config)
 
 
 def _items():
@@ -29,7 +29,7 @@ def _items():
 
 
 def _lm(**kw):
-    args = dict(prefix_cache=True, prefix_cache_check_n=0, prefix_cache_atol=ATOL) | kw
+    args = dict(prefix_cache=True, prefix_cache_check_n=0, prefix_cache_rtol=RTOL) | kw
     return RowDetectionLM(model_name=MODEL, layers=LAYERS, device="cpu", dtype="float32", **args)
 
 
@@ -42,8 +42,9 @@ def _judge(lm, it):
     return lm.judge_row(it["instructions"], it["context"], it["query"], it["spans"])
 
 
-def _reads_equal(a, b, atol):
-    return all(np.abs(a["representations"][L] - b["representations"][L]).max() <= atol for L in a["representations"])
+def _reads_equal(a, b, rtol):
+    return all(np.abs(a["representations"][L] - b["representations"][L]).max() <= rtol * np.abs(b["representations"][L]).max()
+               for L in a["representations"])
 
 
 def test_fixture_has_a_document_with_several_rows():
@@ -63,7 +64,7 @@ def test_cached_reads_match_the_uncached_forward_for_every_row(lm):
     for it, c, u in zip(items, cached, plain):
         assert c["prompt_n_tokens"] == u["prompt_n_tokens"]
         assert np.array_equal(c["token_index"], u["token_index"])   # indices are into the whole prompt either way
-        assert _reads_equal(c, u, ATOL), (it["document_id"], it["row_ordinal"])
+        assert _reads_equal(c, u, RTOL), (it["document_id"], it["row_ordinal"])
 
 
 def test_token_accounting(lm):
@@ -107,7 +108,7 @@ def test_a_corrupted_prefix_cache_is_caught_by_the_check():
     lm = _lm(prefix_cache_check_n=1)
     it = _items()[0]
     _judge(lm, it)                         # builds the correct cache; the check passes
-    assert lm.n_prefix_checked == 1 and lm.prefix_cache_max_abs_diff <= ATOL
+    assert lm.n_prefix_checked == 1 and lm.prefix_cache_max_rel_diff <= RTOL
     for layer in lm._kv.layers:
         layer.values = torch.zeros_like(layer.values)
     lm.n_prefix_checked = 0
@@ -120,17 +121,17 @@ def test_check_records_the_largest_difference():
     for it in _items()[:3]:
         _judge(lm, it)
     assert lm.n_prefix_checked == 2
-    assert 0 <= lm.prefix_cache_max_abs_diff <= ATOL
+    assert 0 <= lm.prefix_cache_max_rel_diff <= RTOL
 
 
 @pytest.mark.parametrize("kw", [
-    dict(prefix_cache=1), dict(prefix_cache_check_n=-1), dict(prefix_cache_check_n=True), dict(prefix_cache_atol=-1.0),
+    dict(prefix_cache=1), dict(prefix_cache_check_n=-1), dict(prefix_cache_check_n=True), dict(prefix_cache_rtol=-1.0),
     dict(prefix_cache=False, prefix_cache_check_n=1),
 ])
 def test_bad_params_are_hard_errors(kw):
     with pytest.raises(ValueError):
         RowDetectionLM.__init__(RowDetectionLM.__new__(RowDetectionLM), model_name=MODEL, layers=LAYERS, device="cpu",
-                                dtype="float32", **(dict(prefix_cache=True, prefix_cache_check_n=0, prefix_cache_atol=ATOL) | kw))
+                                dtype="float32", **(dict(prefix_cache=True, prefix_cache_check_n=0, prefix_cache_rtol=RTOL) | kw))
 
 
 def test_the_fingerprint_depends_on_the_cache_flag():

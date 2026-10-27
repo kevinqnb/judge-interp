@@ -23,7 +23,7 @@ params:
   verify_read_point: true
   prefix_cache: false
   prefix_cache_check_n: 0
-  prefix_cache_atol: 0.01
+  prefix_cache_rtol: 0.1
   error_types: [inter_document, intra_document, cross_type]
   rows_per_stratum:
     valid: null

@@ -61,7 +61,7 @@ config loading, snapshots, the manifest (``status`` is ``success`` or ``failed``
                        row of a document still computes its whole prompt; see the ``eff_*_tokens_*`` metrics.
     prefix_cache_check_n  int >= 0 (needs prefix_cache if > 0); compare the first n rows' reads with an uncached
                        forward of the whole prompt
-    prefix_cache_atol  number >= 0; largest |cached - uncached| allowed in that comparison
+    prefix_cache_rtol  number >= 0; largest per-layer max|cached - uncached| / max|uncached| allowed in that comparison
     error_types        invalid-row error types to include alongside every valid row
                        (members of the dataset config's ``error_types``); for a paired
                        dataset (line), the pairs whose invalid row has one of these types
