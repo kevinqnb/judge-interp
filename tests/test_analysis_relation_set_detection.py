@@ -238,7 +238,7 @@ P = dict(tac.P, n_permutations=50, permutation_auroc_tolerance=0.5, lr_C=1.0, lr
 def test_score_method_hand_worked(tmp_path):
     ev = rs.cut(frame(tmp_path), np.arange(16))
     probs = np.where(ev["y"], 0.9, 0.1)
-    m = rs.score_method("m", ev, probs, P, 0, tmp_path / "fig")
+    m = rs.score_method("m", ev, probs, P, 0)
     assert m["n"] == 16 and m["valid_rate"] == 11 / 16 and m["test_auroc"] == 1.0 and m["test_accuracy"] == 1.0
     assert m["test_brier"] == pytest.approx(0.01)
     assert m["test_brier_ref"] == pytest.approx(11 / 16 * (5 / 16) ** 2 + 5 / 16 * (11 / 16) ** 2)
@@ -247,17 +247,16 @@ def test_score_method_hand_worked(tmp_path):
     assert m["test_n_invalid"] == 5 and m["test_detect_invalid"] == 1.0 and m["test_n_size3"] == 4 and m["test_n_parent_clean"] == 8
     assert m["test_context_hidden_mean_p_valid"] == 0.9 and m["test_context_visible_twin_mean_p_valid"] == 0.9
     assert m["test_twin_vs_context_corrupted_member_auroc"] == 0.5   # tied: the method cannot tell a corrupted-member row from its twin
-    assert (tmp_path / "fig" / "m" / "calibration.png").exists()
     wrong = np.where(ev["y"], 0.1, 0.9)   # perfectly wrong ranks
-    assert rs.score_method("w", ev, wrong, P, 0, tmp_path / "fig")["test_auroc"] == 0.0
+    assert rs.score_method("w", ev, wrong, P, 0)["test_auroc"] == 0.0
 
 
 def test_score_method_asserts_the_permutation_null(tmp_path):
     ev = rs.cut(frame(tmp_path), np.arange(16))
     with pytest.raises(AssertionError, match="not ~0.5"):
-        rs.score_method("m", ev, np.where(ev["y"], 0.9, 0.1), {**P, "permutation_auroc_tolerance": 0.0}, 0, tmp_path / "fig")
+        rs.score_method("m", ev, np.where(ev["y"], 0.9, 0.1), {**P, "permutation_auroc_tolerance": 0.0}, 0)
     with pytest.raises(AssertionError, match="one class missing"):
-        rs.score_method("m", rs.cut(ev, np.flatnonzero(ev["y"])), np.full(11, 0.5), P, 0, tmp_path / "fig")
+        rs.score_method("m", rs.cut(ev, np.flatnonzero(ev["y"])), np.full(11, 0.5), P, 0)
 
 
 def test_structure_baseline_reports_what_fields_alone_predict(tmp_path):
@@ -369,6 +368,7 @@ def test_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
                     {"label": "jev", "judge": "jev", "kind": "conditional", "run_id": "jev-run"}],
          "max_docs": None, "run_controls": False, "prefix_match_rtol": 1e-6, "n_shuffles": 3, "shuffled_label_auroc_tolerance": 0.5}
     monkeypatch.setattr(rs, "FIGURES_DIR", tmp_path / "figures")
+    monkeypatch.setattr(rs, "report", lambda *a, **k: {})   # one document, one error type here: the report has its own tests below
     m = rs.run({"id": "r1", "seed": 0, "params": p}, runs)
     assert m["n_common_test_rows"] == 16 and all(m[f"{k}_n_dropped_rows"] == 0 for k in ("m", "clef", "jev"))
     assert m["clef_test_auroc"] == 1.0 and m["jev_test_auroc"] == 1.0 and m["clef_n_excluded_overlong"] == 3
@@ -388,3 +388,80 @@ def test_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
     p2 = {**p, "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-half"}]}
     m2 = rs.run({"id": "r2", "seed": 0, "params": p2}, runs)
     assert m2["n_common_test_rows"] == 8 and m2["m_n_dropped_rows"] == 8 and m2["clef_n_dropped_rows"] == 0 and m2["m_n"] == 8
+
+
+# ----------------------------------------------------------------------------- report and control
+def test_parent_size_and_control_mask_hand_counted(tmp_path):
+    ev = rs.cut(frame(tmp_path), np.arange(16))
+    assert (ev["parent_size"] == 3).all()                      # every parent shows CH, DESC, ED
+    rs.check_pairs(ev)                                         # both pairs have an invalid parent and a clean twin
+    keep = rs.control_mask(ev)
+    # dropped: the strict subsets (size 2) of the two clean parents = 3 each; kept: 8 rows of invalid parents + 2 full clean rows
+    assert int((~keep).sum()) == 6 and int(keep.sum()) == 10
+    assert (ev["parent_valid"][~keep]).all() and (ev["size"][~keep] == 2).all()
+    assert int((ev["parent_valid"] & keep).sum()) == 2 and (ev["size"][ev["parent_valid"] & keep] == 3).all()
+    assert sorted(set(ev["kind"][keep].tolist())) == ["clean_parent", "corrupted_member", "hidden", "invalid", "visible"]
+
+
+def test_control_mask_alerts_when_a_full_row_lost_its_counterpart(tmp_path):
+    ev = rs.cut(frame(tmp_path), np.arange(16))
+    full_bad = np.flatnonzero(~ev["parent_valid"] & (ev["size"] == 3))[0]
+    with pytest.raises(AssertionError, match="not matched by pair"):
+        rs.control_mask(_drop(ev, full_bad))
+
+
+def _drop(ev, i):
+    """``ev`` without row ``i`` (no twin needed: only column arrays are used by the control checks)."""
+    keep = np.array([j for j in range(len(ev["y"])) if j != i])
+    return {c: ev[c][keep] for c in rs.SUBSET_COLS}
+
+
+def test_check_pairs_alerts_on_a_pair_with_one_parent(tmp_path):
+    ev = rs.cut(frame(tmp_path), np.arange(16))
+    only_bad = {c: ev[c][~ev["parent_valid"]] for c in rs.SUBSET_COLS}
+    with pytest.raises(AssertionError, match="only one of the pair's parents"):
+        rs.check_pairs(only_bad)
+
+
+def _report_ev(n_docs=30, seed=0):
+    """Two error types x ``n_docs`` documents; per (doc, type) one pair: a clean full row, a corrupted full row, a
+    corrupted strict subset (valid for half the docs), a clean strict subset."""
+    rng = np.random.default_rng(seed)
+    cols = {c: [] for c in rs.SUBSET_COLS}
+    for et in ("intra_document", "cross_item"):
+        for d in range(n_docs):
+            pid = f"{et}-d{d}"
+            for parent_valid, size, y in ((True, 3, True), (False, 3, False), (False, 2, bool(d % 2)), (True, 2, True)):
+                for c, v in zip(rs.SUBSET_COLS, (f"{pid}-{parent_valid}-{size}", pid, pid, f"d{d}-{et}", f"{et}:k1", et, parent_valid, size, 3,
+                                                 "CH,DESC", 0 if parent_valid else 1, y, "x")):
+                    cols[c].append(v)
+    ev = {c: np.array(v) for c, v in cols.items()}
+    ev["y"], ev["parent_valid"] = ev["y"].astype(bool), ev["parent_valid"].astype(bool)
+    return ev
+
+
+def test_report_writes_both_reports_and_the_control_drops_only_clean_strict_subsets(tmp_path):
+    ev = _report_ev()
+    rng = np.random.default_rng(1)
+    probs = {l: np.clip(np.where(ev["y"], 0.7, 0.3) + rng.normal(0, 0.2, len(ev["y"])), 0.01, 0.99) for l in ("m1", "m2")}
+    metrics = {}
+    for l, f in probs.items():
+        sc, _ = rs.cr.score_sample(ev["y"], f)
+        metrics.update({f"{l}_test_{k}": v for k, v in sc.items()})
+    p = {"ci_level": 0.95, "report": {"n_boot": 20, "methods": {"m1": "one", "m2": "two"},
+                                       "error_type_names": {"intra_document": "Intra-document", "cross_item": "Cross-item"},
+                                       "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "min_density_frac": 0.02,
+                                       "shuffled_auroc_tolerance": 0.2, "figsize": [3.0, 3.0]}}
+    fig_dir, out = tmp_path / "fig", tmp_path / "out"
+    (out / "artifacts").mkdir(parents=True)
+    fig_dir.mkdir()
+    m = rs.report(ev, probs, metrics, p, 0, fig_dir, out)
+    n_pairs = 2 * 30
+    assert m["control_n_dropped_strict_clean_subsets"] == n_pairs and m["control_n_rows"] == 3 * n_pairs
+    assert m["calibration_n_intra_document"] == 4 * 30 and m["control_calibration_n_intra_document"] == 3 * 30
+    assert m["control_calibration_n_valid_cross_item"] == 30 + 15 and m["control_calibration_n_invalid_cross_item"] == 30 + 15
+    for stem in ("calibration", "control_calibration"):
+        for name in (f"{stem}_intra_document.pdf", f"{stem}_cross_item.pdf", f"{stem}_legend.pdf"):
+            assert (fig_dir / name).stat().st_size > 0, name
+        assert (out / f"{stem}_table.tex").exists() and (out / f"{stem}_results.csv").exists()
+    assert not list(fig_dir.glob("*.png"))                      # calibration figures only

@@ -35,6 +35,14 @@ nothing trained). Metric keys and figure directories are prefixed with the metho
    twin's, so their features must too (relative difference <= ``params.prefix_match_rtol``, asserted).
    All methods: the structure baseline (a probe on which fields are shown, trained on the train subsets).
 
+7. Report (``analysis/calibration_report.py``, ``params.report``): the only figures. Per error type (intra_document,
+   cross_item), a calibration diagram of all methods and a smECE / BSS / AUROC table, every interval over
+   ``report.n_boot`` resamples of documents; the pooled values are asserted equal to the metrics above. A second, CONTROL
+   report (``control_calibration_*``) scores the same predictions on the rows that are either full-length (a corrupted
+   parent and its clean twin) or a strict subset of a corrupted parent, dropping strict subsets of clean parents:
+   a clean parent's strict subsets are all valid, so without the control "clean parent" and "short" are confounded
+   with the label. Nothing is refit; ``control_*`` metrics are new keys.
+
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
 from __future__ import annotations
@@ -57,6 +65,9 @@ _spec = importlib.util.spec_from_file_location("analysis_relation_detection", _h
 rr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)  # sample matching and label rule
 er = rr.er  # shared loader, metrics and plots
+_cr_spec = importlib.util.spec_from_file_location("analysis_calibration_report", _here / "calibration_report.py")
+cr = importlib.util.module_from_spec(_cr_spec)
+_cr_spec.loader.exec_module(cr)
 REPO_ROOT = rr.REPO_ROOT
 
 FIGURES_DIR = _here / "figures"
@@ -66,7 +77,7 @@ CONTEXT_KINDS = ("corrupted_member", "visible", "hidden")   # valid rows of an i
 JUDGES = ("clef", "jev")
 JUDGE_TASKS = ("conditional", "oneshot")
 # Per-row columns of a subsets frame (besides the python lists ``members``, ``rows``).
-SUBSET_COLS = ("subset_id", "parent_id", "pair_id", "doc", "cell", "error_type", "parent_valid", "size", "fields",
+SUBSET_COLS = ("subset_id", "parent_id", "pair_id", "doc", "cell", "error_type", "parent_valid", "size", "parent_size", "fields",
                "n_corrupted", "y", "kind")
 
 
@@ -80,7 +91,7 @@ def sibling(name: str):
 def load_subsets(subsets_path: Path, parents_path: Path) -> dict:
     """The rows of a ``line/<split>_subsets.json`` as a frame, checked against the parent samples file.
 
-    Returns arrays ``SUBSET_COLS`` (``fields``: members joined by ``,``; ``y``: the row's ``valid``; ``kind``:
+    Returns arrays ``SUBSET_COLS`` (``parent_size``: the parent's number of fields; ``fields``: members joined by ``,``; ``y``: the row's ``valid``; ``kind``:
     one of ``ROW_KINDS``), the lists ``members`` (field names in shown order) and ``rows`` (the raw rows),
     and ``index`` (``{subset_id: position}``).
 
@@ -122,7 +133,7 @@ def load_subsets(subsets_path: Path, parents_path: Path) -> dict:
             first_corrupt = min(par["fields"].index(f) for f in par["invalid_fields"])   # an invalid parent has one
             kind = "hidden" if first_corrupt > pos[-1] else "visible"
         for c, v in zip(SUBSET_COLS, (sid, r["parent_id"], r["pair_id"], r["document_id"], r["cell"], r["cell"].split(":")[0],
-                                      r["parent_valid"], r["size"], ",".join(members), n_corr, r["valid"], kind)):
+                                      r["parent_valid"], r["size"], len(par["fields"]), ",".join(members), n_corr, r["valid"], kind)):
             out[c].append(v)
         out["members"].append(members)
         out["rows"].append(r)
@@ -307,7 +318,7 @@ def doc_bootstrap_auroc_diff(y: np.ndarray, pa: np.ndarray, pb: np.ndarray, docs
     return float(lo), float(hi)
 
 
-def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int, fig_dir: Path) -> dict:
+def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int) -> dict:
     """The metrics every method gets, on the common rows ``ev`` (``probs``: its ``P(valid)`` per row).
 
     Raises:
@@ -322,9 +333,6 @@ def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int, fi
     m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
     d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
     m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
-    (fig_dir / label).mkdir(parents=True, exist_ok=True)
-    er.plot_calibration(d, fig_dir / label)
-    er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
     for strata in (ev["error_type"], ev["cell"], np.char.add("size", ev["size"].astype(str)),
                    np.char.add("ncorr", ev["n_corrupted"].astype(str)),
                    np.where(ev["parent_valid"], "parent_clean", "parent_invalid"), ev["kind"]):
@@ -355,11 +363,42 @@ def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int) -> dict:
     return er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
 
 
+def check_pairs(ev: dict) -> None:
+    """The rows split cleanly by error type and pair: each ``pair_id`` has one error type and rows of both its invalid
+    parent and its clean twin.
+
+    Raises:
+        AssertionError: a pair with two error types or with rows of only one of its parents.
+    """
+    for pid in sorted(set(ev["pair_id"].tolist())):
+        sel = ev["pair_id"] == pid
+        assert len(set(ev["error_type"][sel].tolist())) == 1, f"{pid}: more than one error type"
+        assert set(ev["parent_valid"][sel].tolist()) == {True, False}, f"{pid}: rows of only one of the pair's parents"
+
+
+def control_mask(ev: dict) -> np.ndarray:
+    """Rows of the control: every row of an invalid parent (the full-length row and its strict subsets, valid or
+    not) and the full-length rows of clean parents; i.e. all but the strict subsets of clean parents.
+
+    Raises:
+        AssertionError: a pair whose full-length clean row and full-length corrupted row are not both present (the
+            control's matched counterparts), or a full-length corrupted row that is not invalid.
+    """
+    full = ev["size"] == ev["parent_size"]
+    clean_full, bad_full = ev["parent_valid"] & full, ~ev["parent_valid"] & full
+    a, b = set(ev["pair_id"][clean_full].tolist()), set(ev["pair_id"][bad_full].tolist())
+    assert a == b, (f"full-length rows are not matched by pair: {len(a - b)} pairs with only the clean one, {len(b - a)} with only the "
+                    f"corrupted one (an over-length exclusion?), e.g. {sorted(a ^ b)[:2]}")
+    assert not ev["y"][bad_full].any(), "a full-length row of a corrupted parent is valid"
+    assert ev["y"][clean_full].all(), "a full-length row of a clean parent is invalid"
+    return ~ev["parent_valid"] | full
+
+
 def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[np.ndarray], y_tr: np.ndarray, te: dict,
-           rows_ev: list[np.ndarray], ev: dict, fig_dir: Path, art_dir: Path) -> dict:
+           rows_ev: list[np.ndarray], ev: dict, art_dir: Path) -> tuple[dict, np.ndarray]:
     """One model's probe: logistic regression on the train subsets' ``sum`` features, scored on the common rows, the
     ablations and the probe controls. ``tr`` / ``te``: the model's centred train / test splits; ``rows_tr`` /
-    ``rows_ev``: the member spans of each train subset / eval row in them."""
+    ``rows_ev``: the member spans of each train subset / eval row in them. Returns ``(metrics, P(valid) per eval row)``."""
     thr, y_te = p["decision_threshold"], ev["y"]
     ref_rate = float(y_te.mean())
     assert y_tr.any() and (~y_tr).any(), f"{label}: one class missing in the train subsets"
@@ -373,7 +412,7 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
     clf = er.fit_logreg(f_tr, y_tr, p, seed)
     probs = clf.predict_proba(f_te)[:, 1]
     metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(f_tr)[:, 1]))
-    metrics.update(score_method(label, ev, probs, p, seed, fig_dir))
+    metrics.update(score_method(label, ev, probs, p, seed))
     abl_probs = {}
     for a in p["ablations"]:
         a_tr, a_te = subset_features(tr["X"], rows_tr, a), subset_features(te["X"], rows_ev, a)
@@ -391,7 +430,29 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
         metrics["control_seed_determinism"] = 1.0
     np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=y_te,
                         **{f"prob_valid_{a}": v for a, v in abl_probs.items()})
-    return metrics
+    return metrics, probs
+
+
+# ----------------------------------------------------------------------------- report
+def report(ev: dict, probs_by_method: dict[str, np.ndarray], metrics: dict, p: dict, seed: int, fig_dir: Path, out: Path) -> dict:
+    """The calibration report on the common rows, then the control report on ``control_mask`` of them (see the module
+    docstring). Returns the new ``metrics`` entries: split counts per error type, and the control's row counts."""
+    rep_cfg, ets = p["report"], list(p["report"]["error_type_names"])
+    evset = {"y": ev["y"], "docs": ev["doc"], "error_type": ev["error_type"], "probs": probs_by_method}
+    cr.check_evset(evset, list(rep_cfg["methods"]))
+    cr.assert_matches_existing(evset, metrics)
+    check_pairs(ev)
+    cr.save_evset(out / "artifacts" / "calibration_predictions.npz", evset, subset_id=ev["subset_id"], parent_valid=ev["parent_valid"],
+                  size=ev["size"], parent_size=ev["parent_size"], pair_id=ev["pair_id"])
+    m = cr.write_report(evset, rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "calibration", "Evaluation: all common test subset rows.")
+    keep = control_mask(ev)   # after the main report: a control that cannot be formed must not cost the main figures
+    n_drop = int((~keep).sum())
+    assert n_drop == int((ev["parent_valid"] & (ev["size"] < ev["parent_size"])).sum())
+    m["control_n_rows"], m["control_n_dropped_strict_clean_subsets"] = int(keep.sum()), n_drop
+    m.update(cr.write_report(cr.subset_evset(evset, keep), rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "control_calibration",
+                             "Control: full-length rows (corrupted parent and clean twin) and strict subsets of corrupted parents only; "
+                             "strict subsets of clean parents are dropped."))
+    return m
 
 
 # ----------------------------------------------------------------------------- main
@@ -440,18 +501,23 @@ def run(cfg: dict, runs_root: Path) -> dict:
     metrics.update(structure_baseline(sub_tr, ev, p, seed))
 
     art_dir = out / "artifacts"
+    probs_by_method: dict[str, np.ndarray] = {}
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
         rows_ev = [m["rows_te"][i] for i in common]
-        for k_, v in run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, fig_dir, art_dir).items():
+        m_metrics, lm_probs = run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, art_dir)
+        probs_by_method[label] = lm_probs.astype(np.float64)
+        for k_, v in m_metrics.items():
             metrics[f"{label}_{k_}"] = v
     for spec in p["judges"]:
         label, j = spec["label"], judges[spec["label"]]
         pos = {int(i): n for n, i in enumerate(j["idx"].tolist())}
         probs = j["probs"][[pos[i] for i in common]]
         np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=ev["y"])
-        for k_, v in {**score_method(label, ev, probs, p, seed, fig_dir), "n_excluded_overlong": j["n_excluded"], **j["extra"]}.items():
+        probs_by_method[label] = probs.astype(np.float64)
+        for k_, v in {**score_method(label, ev, probs, p, seed), "n_excluded_overlong": j["n_excluded"], **j["extra"]}.items():
             metrics[f"{label}_{k_}"] = v
+    metrics.update(report(ev, probs_by_method, metrics, p, seed, fig_dir, out))
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures

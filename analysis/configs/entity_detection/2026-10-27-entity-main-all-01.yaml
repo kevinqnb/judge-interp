@@ -29,6 +29,18 @@ params:
   ci_level: 0.95
   ece_n_boot: 2000
   hist_n_bins: 20
+  # calibration figures and tables (analysis/calibration_report.py): intervals over n_boot document resamples
+  report:
+    n_boot: 2000
+    # label -> name in the table / legend; the order is the row and legend order and fixes the tab10 colours
+    methods: {qwen7b_l24: qwen, llama8b_l28: llama, clef: clef, jev: jev}
+    error_type_names: {inter_document: Inter-document, cross_type: Cross-type}
+    font: Nimbus Roman
+    white_frac: 0.35   # tab10 colours mixed with this share of white
+    mesh_pts: 101
+    min_density_frac: 0.02   # a curve is drawn where the predictions' density is at least this share of its maximum
+    shuffled_auroc_tolerance: 0.05   # the shuffled-label baseline's AUROC must be within this of 0.5
+    figsize: [3.0, 3.0]
   run_controls: true
   # probes: test AUROC is averaged over n_shuffles permuted-train-label fits
   n_shuffles: 30

@@ -17,13 +17,17 @@ figure directories are prefixed with the method's ``label``.
    field) stratum is exactly 50/50.
 3. Probes: PCA on train, coloured by validity; logistic regression on one entity's activation, train -> test.
    Judges: ``analysis/clef.py``'s metrics on the same pairs. Both: smECE, Brier (skill), AUROC (with a
-   document-bootstrap interval), accuracy, reliability diagram; per error type, per (type, k), and
-   with / without null-fill pairs.
+   document-bootstrap interval), accuracy; per error type, per (type, k), and with / without null-fill pairs.
 4. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
    row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the method does not just sense "this row
    has a corruption somewhere".
 5. Controls: probes -- field-identity baseline (exactly 0.5 AUROC on pairs, asserted), shuffled-label AUROC
    ~ 0.5, seed determinism; judges -- permutation null of the metrics.
+
+6. Report (``analysis/calibration_report.py``, ``params.report``): the only figures. Per error type, a calibration
+   diagram of all methods and a smECE / BSS / AUROC table, every interval over ``report.n_boot`` resamples of documents
+   (a null-fill pair is resampled with its invalid member's document, as in the AUROC interval above). The
+   pooled values are asserted equal to the metrics above.
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
@@ -49,6 +53,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from judge_interp.dataset_spec import load_dataset_spec
+
+_cr_spec = importlib.util.spec_from_file_location("analysis_calibration_report", Path(__file__).parent / "calibration_report.py")
+cr = importlib.util.module_from_spec(_cr_spec)
+_cr_spec.loader.exec_module(cr)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "data" / "vrdu"))
@@ -541,10 +549,10 @@ def pair_signature(split: dict, z: dict) -> list[tuple]:
 
 
 def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr: dict, s_tr: dict, z_te: dict, s_te: dict,
-           fig_dir: Path, art_dir: Path) -> dict:
+           art_dir: Path) -> tuple[dict, np.ndarray]:
     """One model's probe: PCA of train, logistic probe train -> test, the test metrics, row-context diagnostic
     and controls. ``tr`` is the model's full train split, ``te`` its test split cut to the common rows; both centred.
-    Returns the metrics (unprefixed) and writes the figures to ``fig_dir`` and the predictions to ``art_dir``."""
+    Returns ``(metrics (unprefixed), P(valid) of the test pairs' members)`` and writes the predictions to ``art_dir``."""
     layer, thr = spec["layer"], p["decision_threshold"]
     x_tr, x_te, y_tr, y_te = tr["X"][s_tr["idx"]], te["X"][s_te["idx"]], s_tr["y"], s_te["y"]
     types = sorted(set(z_tr["error_type"].tolist()))
@@ -561,11 +569,8 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     }
 
     pca = PCA(n_components=p["pca_n_components"], svd_solver=p["pca_svd_solver"], random_state=seed)
-    scores = pca.fit_transform(x_tr)
-    plot_pca_validity(scores, scatter_indices(len(y_tr), p["max_scatter_points"], seed), y_tr,
-                      pca.explained_variance_ratio_, fig_dir, f"train X (layer {layer})")
+    pca.fit(x_tr)
     metrics["pca_evr_pc1"], metrics["pca_evr_pc2"] = (float(v) for v in pca.explained_variance_ratio_[:2])
-    del scores
 
     clf = fit_logreg(x_tr, y_tr, p, seed)
     probs = clf.predict_proba(x_te)[:, 1]
@@ -584,8 +589,6 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
 
     d = smooth_ece(probs, y_te, p["ece_n_boot"], seed)
     metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
-    plot_calibration(d, fig_dir)
-    plot_prob_histogram(probs, p["hist_n_bins"], fig_dir)
 
     for col in ("error_type", "stratum"):
         for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
@@ -621,15 +624,15 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
         prob_valid=probs, label_valid=y_te, span=s_te["idx"], pair_doc=s_te["doc"], doc_ids=te["doc_ids"][s_te["idx"]],
         field=s_te["field"], error_type=s_te["error_type"], k=s_te["k"], null_fill=s_te["null_fill"],
     )
-    return metrics
+    return metrics, probs
 
 
-def run_judge(label: str, spec: dict, p: dict, seed: int, mod, judge: dict, rows_te: list[dict], fig_dir: Path) -> tuple[dict, dict]:
+def run_judge(label: str, spec: dict, p: dict, seed: int, mod, judge: dict, rows_te: list[dict]) -> tuple[dict, dict]:
     """One direct judge (Clef / Jev) on the common pairs: the metric code of ``analysis/clef.py``, with Jev's
     resolution metrics added. ``judge`` is its run cut to the common rows. Returns ``(metrics, eval set)``."""
     ac = getattr(mod, "ac", mod)   # jev.py reuses clef.py's metric code
     ev = ac.entity_eval_set(judge, rows_te, p["twin_seed"])
-    m = ac.analyse_run(label, judge, ev, spec, p, fig_dir, seed)
+    m = ac.analyse_run(label, judge, ev, spec, p, None, seed)
     if spec["kind"] == "jev":
         m.update(mod.resolution_metrics(judge))
     return m, ev
@@ -700,22 +703,35 @@ def run(cfg: dict, runs_root: Path) -> dict:
 
     art_dir = out / "artifacts"
     y_ref = None
+    probs_by_method: dict[str, np.ndarray] = {}
+    ref_set = None   # the first method's (docs, error types): every method must be scored on the same pairs, in the same order
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
         z_tr, s_tr = pair_set(m["tr"], m["rows_tr"], p["twin_seed"], "main")
         z_te, s_te = pair_set(m["te"], rows_te, p["twin_seed"], "main")
         assert y_ref is None or np.array_equal(y_ref, s_te["y"]), f"{label}: labels differ from the other methods'"
         y_ref = s_te["y"]
-        (fig_dir / label).mkdir(parents=True, exist_ok=True)
-        for k_, v in run_lm(label, p, seed, spec, m["tr"], m["te"], z_tr, s_tr, z_te, s_te, fig_dir / label, art_dir).items():
+        m_metrics, lm_probs = run_lm(label, p, seed, spec, m["tr"], m["te"], z_tr, s_tr, z_te, s_te, art_dir)
+        probs_by_method[label] = lm_probs.astype(np.float64)
+        for k_, v in m_metrics.items():
             metrics[f"{label}_{k_}"] = v
+        ref_set = ref_set or (s_te["doc"], s_te["error_type"])
+        assert np.array_equal(ref_set[0], s_te["doc"]) and np.array_equal(ref_set[1], s_te["error_type"]), f"{label}: pairs differ from the other methods'"
     for spec in p["judges"]:
         label, j = spec["label"], judges[spec["label"]]
-        m, ev = run_judge(label, spec, p, seed, j["mod"], j["run"], rows_te, fig_dir)
+        m, ev = run_judge(label, spec, p, seed, j["mod"], j["run"], rows_te)
         assert y_ref is None or np.array_equal(y_ref, ev["y"]), f"{label}: labels differ from the other methods'"
         y_ref = ev["y"]
+        probs_by_method[label] = ev["probs"].astype(np.float64)
+        ref_set = ref_set or (ev["doc"], ev["error_type"])
+        assert np.array_equal(ref_set[0], ev["doc"]) and np.array_equal(ref_set[1], ev["error_type"]), f"{label}: pairs differ from the other methods'"
         for k_, v in m.items():
             metrics[f"{label}_{k_}"] = v
+    evset = {"y": y_ref, "docs": ref_set[0], "error_type": ref_set[1], "probs": probs_by_method}
+    cr.save_evset(art_dir / "calibration_predictions.npz", evset)
+    cr.assert_matches_existing(evset, metrics)
+    metrics.update(cr.write_report(evset, p["report"], list(p["report"]["error_type_names"]), p["ci_level"], seed, fig_dir, out,
+                                   "calibration", "Evaluation: minimal pairs of the main test split."))
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
