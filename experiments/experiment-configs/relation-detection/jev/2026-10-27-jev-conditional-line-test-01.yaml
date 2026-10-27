@@ -1,0 +1,23 @@
+id: 2026-10-27-jev-conditional-line-test-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Jev (jev-1.14.0, TypeSafe API) relation detection (conditional): the first field of each sample is the primary entity and every other field a condition; one noul question per sample. Line dataset (-06 minimal pairs), test split, all 7500 samples (half valid), the same samples file as 2026-10-25-clef-conditional-line-test-01 (built by experiments/clef_samples.py). Each sample is scored once.
+  No length pre-filter (no local tokenizer): a request over the API's context limit raises and fails the run; nothing is excluded. Efficiency per request: wall time and API-reported input / output tokens (artifacts/efficiency_records.npz).
+  The known-answer record is scored first and the first 5 samples are rescored; P(true) must move by at most determinism_atol = 0.15 (the API is nondeterministic for an identical request: steps of 0.01, up to ~0.12 where P is mid-range, see the smoke and tiny runs of 2026-10-27).
+  Predicted from 2026-10-27-jev-conditional-line-tiny-01: n_predictions = 7500 (3750 valid), mean_p_true_valid well above mean_p_true_invalid, ~0.1 s per request.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-test.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  # ~0.1 s/request in the tiny run -> ~15 min for 7500; walltime ~4x that.
+  omp: 1
+  walltime: "01:00:00"

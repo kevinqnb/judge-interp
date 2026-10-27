@@ -1,0 +1,23 @@
+id: 2026-10-27-jev-conditional-smoke-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Smoke for the jev_relation_conditional task over the hand-built samples in tests/fixtures/clef_samples_mini/conditional.json
+  (contexts from tests/fixtures/relation_detection_mini, line). Confirms the API plumbing, response checks and bookkeeping only;
+  no result is interpreted. determinism_atol 0.15: the API returns P(true) in steps of 0.01 and is nondeterministic for an identical request, by up to 0.12 (6 repeats) where P is mid-range and ~0.01 where saturated (probed 2026-10-27; 0.0 and 0.02 failed).
+  Expected bookkeeping: n_items = n_units = n_predictions = 4, n_valid = 2, n_invalid = 2, eff_n_requests = 4,
+  known-answer check passes, eff_output_tokens_total >= 0.
+seed: 0
+params:
+  data_root: tests/fixtures/relation_detection_mini
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  samples_path: tests/fixtures/clef_samples_mini/conditional.json
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 2
+  determinism_atol: 0.15
+  known_answer_check: true
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  omp: 1
+  walltime: "00:30:00"

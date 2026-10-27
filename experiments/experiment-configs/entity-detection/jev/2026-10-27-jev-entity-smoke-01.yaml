@@ -1,0 +1,26 @@
+id: 2026-10-27-jev-entity-smoke-01
+project: judge-interp
+task: jev_entity_row
+description: >-
+  Smoke for the jev_entity_row task over the hand-built tests/fixtures/entity_detection_mini (main, every row).
+  Confirms the API plumbing and bookkeeping only; no result is interpreted. determinism_atol 0.15: see the conditional smoke. Expected bookkeeping: n_items = n_units = 4,
+  n_predictions = 33 (one per non-null field), n_valid = 30, n_invalid = 3, eff_n_requests = 4, eff_n_questions_total = 33.
+seed: 0
+params:
+  data_root: tests/fixtures/entity_detection_mini
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  split: train
+  error_types: [inter_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 2
+  determinism_atol: 0.15
+  known_answer_check: true
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  omp: 1
+  walltime: "00:30:00"

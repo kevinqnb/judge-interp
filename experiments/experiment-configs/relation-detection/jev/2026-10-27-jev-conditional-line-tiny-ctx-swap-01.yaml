@@ -1,0 +1,20 @@
+id: 2026-10-27-jev-conditional-line-tiny-ctx-swap-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Context-swap control for 2026-10-27-jev-conditional-line-tiny-01: identical samples, but each document's context text is replaced by another document's (context_control other_document).
+  Predicted in advance: AUROC of p_true vs label_valid collapses toward 0.5 and mean_p_true_valid falls well below the unswapped 0.89, since the entities are no longer in the context. If AUROC stays near 1.0 something other than the document evidence carries the label.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: other_document
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-tiny.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  omp: 1
+  walltime: "00:30:00"

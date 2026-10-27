@@ -1,0 +1,23 @@
+id: 2026-10-27-jev-conditional-line-tiny-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Tiny end-to-end of Jev conditional on the line test split: 30 samples = the first pair (by pair_id) of each of the 15 cells, from experiments/clef-samples/conditional-tiny.json
+  (the same samples as 2026-10-25-clef-conditional-line-tiny-01, so the two are directly comparable).
+  Predicted in advance: n_items = n_units = n_predictions = 30 (15 valid, 15 invalid); known-answer check passes; the 5-record rescoring moves P(true) by at most determinism_atol;
+  eff_n_requests = 30; mean_p_true_valid > mean_p_true_invalid, by a margin of the order of Clef's (0.72 vs 0.39). Post hoc, outside the run: AUROC of p_true vs label_valid clearly above 0.5, and
+  about 0.5 under a permutation of the labels. If the direction is wrong or the permuted AUROC is not near 0.5, stop; do not scale up.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-tiny.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  omp: 1
+  walltime: "00:30:00"

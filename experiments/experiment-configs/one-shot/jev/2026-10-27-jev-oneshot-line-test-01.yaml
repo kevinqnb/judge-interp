@@ -1,0 +1,23 @@
+id: 2026-10-27-jev-oneshot-line-test-01
+project: judge-interp
+task: jev_record_oneshot
+description: >-
+  Jev (jev-1.14.0, TypeSafe API) one-shot validation (entity and relation detection combined): all fields of a sample are the entities of one record; one noul question per sample (is the whole record valid). Line dataset (-06 minimal pairs), test split, all 7500 samples (half valid), the same samples file as 2026-10-25-clef-oneshot-line-test-01 (built by experiments/clef_samples.py). Each sample is scored once.
+  No length pre-filter (no local tokenizer): Clef excluded 114 samples (up to 17.6k tokens) that Jev scores, so n_predictions = 7500 here against 7386 there, and a request over the API's context limit would raise and fail the run. Efficiency per request: wall time and API-reported input / output tokens (artifacts/efficiency_records.npz).
+  The known-answer record is scored first and the first 5 samples are rescored; P(true) must move by at most determinism_atol = 0.15 (the API is nondeterministic for an identical request, see 2026-10-27-jev-conditional-line-tiny-01).
+  No tiny run of this task preceded it; the fixture smoke (2026-10-27-jev-oneshot-smoke-01) did. Predicted: n_predictions = 7500 (3750 valid), mean_p_true_valid well above mean_p_true_invalid, ~0.1 s per request.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/oneshot-test.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  # ~0.1 s/request in the tiny conditional run -> ~15 min for 7500; walltime ~4x that.
+  omp: 1
+  walltime: "01:00:00"
