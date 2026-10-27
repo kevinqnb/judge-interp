@@ -1,0 +1,38 @@
+id: 2026-10-27-qwen7b-entity-line-tiny-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Tiny end-to-end gate for the -07 line configs: test split, 1 row (pair id order drawn with the seed) per stratum. Confirms GPU plumbing, prefix-cache equivalence check (check_n 4 of 8 rows), and label bookkeeping only.
+  Expected: n_prompts = 8 (4 cells x 2 twins), eff_prefix_cache_max_rel_diff <= prefix_cache_rtol, eff_n_shards_resumed = 0.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  split: test
+  # 28 blocks: 0 = token embedding (identical for every entity -> null control), 28 = post-final-norm.
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  prefix_cache: true
+  prefix_cache_check_n: 4
+  prefix_cache_rtol: 0.1
+  error_types: [intra_document, cross_item]
+  # Every row: null = all rows of the stratum ("valid" + error types, or the 4 cells of the -07 paired dataset).
+  rows_per_stratum:
+    intra_document:k3: 1
+    intra_document:k2: 1
+    intra_document:k1: 1
+    cross_item:k2: 1
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is ~2x the tiny-test estimate (2026-10-25-*-tiny-0*: ~0.5 s/prompt
+  # for the representation models, 0.7-1.2 s/record for Clef). Shards resume if a job is killed.
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "00:30:00"

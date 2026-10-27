@@ -18,5 +18,5 @@ params:
 
   # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
   # ~0.1 s/request in the tiny run -> ~1 h for 35366; walltime ~4x that.
-  omp: 1
+  omp: 4
   walltime: "04:00:00"

@@ -1,0 +1,27 @@
+id: 2026-10-27-clef-conditional-subsets-tiny-01
+project: judge-interp
+task: clef_relation_conditional
+description: >-
+  Tiny end-to-end gate for the subsets runs: 30 test subsets (15 valid, 15 invalid by the subset's own valid label, seeded draw) from experiments/clef-samples/conditional-test-subsets-tiny.json.
+  Expected: n_predictions = 30 (15 valid), known-answer and rescoring checks pass, label_valid used as the label; mean P(true) higher on valid than invalid subsets.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-test-subsets-tiny.json
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is ~2x the tiny-test estimate (2026-10-25-*-tiny-0*: ~0.5 s/prompt
+  # for the representation models, 0.7-1.2 s/record for Clef). Shards resume if a job is killed.
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "00:30:00"
