@@ -9,12 +9,12 @@ params:
   train_rows: data/vrdu/main/train.json
   test_rows: data/vrdu/main/test.json
   models:
-    - {label: qwen7b_l24, train_run_id: 2026-10-25-qwen7b-entity-main-train-01, test_run_id: 2026-10-25-qwen7b-entity-main-test-01, layer: 24}
-    - {label: llama8b_l28, train_run_id: 2026-10-25-llama8b-entity-main-train-01, test_run_id: 2026-10-25-llama8b-entity-main-test-01, layer: 28}
+    - {label: qwen7b_l24, train_run_id: 2026-10-28-qwen7b-entity-main-train-01, test_run_id: 2026-10-28-qwen7b-entity-main-test-01, layer: 24}
+    - {label: llama8b_l28, train_run_id: 2026-10-28-llama8b-entity-main-train-01, test_run_id: 2026-10-28-llama8b-entity-main-test-01, layer: 28}
   # kind: clef | jev. bss_ref_rate: a float in (0, 1), or "evaluation_set_rate"
   judges:
-    - {label: clef, kind: clef, run_id: 2026-10-25-clef-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
-    - {label: jev, kind: jev, run_id: 2026-10-27-jev-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
+    - {label: clef, kind: clef, run_id: 2026-10-28-clef-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
+    - {label: jev, kind: jev, run_id: 2026-10-28-jev-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
   twin_seed: 0   # seeds the other-document twins of null-fill spans
   # k stratum (analysis/entity_detection.py): corrupted-field counts kept, clean rows always kept; null = all k
   train_k: [1]
