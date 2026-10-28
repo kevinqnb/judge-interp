@@ -9,6 +9,16 @@ not balanced: a clean parent and its invalid twin share subsets, a subset of an 
 and rows repeat by content. So nothing here assumes 50/50: the Brier reference is the evaluation set's own valid
 rate, intervals are bootstrapped by document (the report), and the structure baseline is reported, not asserted.
 
+``params.selection`` (required) turns this into a PAIRED set, for the train subsets and the test subsets alike. null
+keeps every row (the above). Otherwise it maps each error type to ``{cell, n_corrupted}`` and keeps, per error type,
+the rows that are INVALID by the label rule, of that cell, with exactly ``n_corrupted`` corrupted members, plus each
+one's clean counterpart (the clean parent's row with the same ``pair_id`` and ``fields``, so the same size). Valid rows
+of a corrupted parent are left out, including rows that show a corrupted member and are valid anyway (counted as
+``*_n_valid_with_n_corrupted_<error type>``). The set is then exactly 50/50, every field set is 50/50, and the structure
+baseline is exactly 0.5 AUROC (asserted). The checks that need valid rows of corrupted parents change: the context
+diagnostic is empty; the prefix known answer (step 6) runs on all of the model's test rows, not the selected ones; the
+control report is skipped (its confound, "short means clean", cannot arise: a counterpart has its row's size).
+
 Methods (``params.models``: a probe per entry; ``params.judges``: a Clef / Jev ``subsets`` run per entry,
 nothing trained). Metric keys and figure directories are prefixed with the method's ``label``.
 
@@ -173,6 +183,60 @@ def cut(sub: dict, keep: np.ndarray) -> dict:
 
 
 # ------------------------------------------------------------------------ probe features
+def select_paired(sub: dict, selection: dict | None) -> tuple[np.ndarray, dict]:
+    """The rows of a frame that make up a train / test set (see ``params.selection`` in the module docstring), as
+    ascending positions, and counts. ``None`` keeps every row.
+
+    Returns:
+        ``(positions, counts)``; ``counts``: ``n_pairs_<error type>`` (selected invalid rows) and
+        ``n_valid_with_n_corrupted_<error type>`` (valid rows of the same cell and corrupted-member count, left out).
+
+    Raises:
+        AssertionError: a malformed selection, a cell that is not of its error type, a rule that selects nothing, or a
+            clean counterpart that is missing, duplicated or not valid.
+    """
+    if selection is None:
+        return np.arange(len(sub["y"])), {}
+    assert isinstance(selection, dict) and selection, selection
+    clean: dict[tuple, int] = {}
+    for i, (pid, f, pv) in enumerate(zip(sub["pair_id"].tolist(), sub["fields"].tolist(), sub["parent_valid"].tolist())):
+        if pv:
+            assert (pid, f) not in clean, f"two clean-parent rows for {(pid, f)}"
+            clean[(pid, f)] = i
+    chosen: list[int] = []
+    counts: dict[str, int] = {}
+    for et, rule in selection.items():
+        assert isinstance(rule, dict) and set(rule) == {"cell", "n_corrupted"}, (et, rule)
+        assert rule["cell"].split(":")[0] == et and type(rule["n_corrupted"]) is int and rule["n_corrupted"] >= 1, (et, rule)
+        in_cell = (sub["cell"] == rule["cell"]) & ~sub["parent_valid"] & (sub["n_corrupted"] == rule["n_corrupted"])
+        inv = np.flatnonzero(in_cell & ~sub["y"])
+        assert len(inv), f"{et}: no invalid row for {rule}"
+        partners = []
+        for i in inv.tolist():
+            j = clean.get((str(sub["pair_id"][i]), str(sub["fields"][i])))
+            assert j is not None, f"{sub['subset_id'][i]}: its clean counterpart is missing"
+            assert sub["y"][j], f"{sub['subset_id'][i]}: its clean counterpart is not valid"
+            partners.append(j)
+        chosen += inv.tolist() + partners
+        counts[f"n_pairs_{et}"], counts[f"n_valid_with_n_corrupted_{et}"] = len(inv), int((in_cell & sub["y"]).sum())
+    out = np.array(sorted(chosen), dtype=np.int64)
+    assert len(np.unique(out)) == len(out), "a row is selected twice"
+    return out, counts
+
+
+def check_paired(ev: dict) -> None:
+    """A paired set holds only invalid rows of corrupted parents and valid rows of clean parents, and every invalid row
+    has exactly one counterpart (same ``pair_id`` and ``fields``) and the other way round: so it is exactly 50/50.
+
+    Raises:
+        AssertionError: otherwise (e.g. a pair split by one method not scoring one of its rows).
+    """
+    inv = ~ev["parent_valid"]
+    assert not ev["y"][inv].any() and ev["y"][~inv].all(), "a paired set holds only invalid corrupted-parent rows and valid clean-parent rows"
+    a, b = (sorted(zip(ev["pair_id"][m].tolist(), ev["fields"][m].tolist())) for m in (inv, ~inv))
+    assert a == b and len(set(a)) == len(a), f"rows and counterparts do not match one to one ({len(a)} invalid, {len(b)} clean)"
+
+
 def lm_member_spans(sub: dict, split: dict, data: dict, require_all: bool) -> tuple[np.ndarray, list[np.ndarray]]:
     """Each row's member spans in a model's run, from the parent's prompt: ``(positions of the rows whose
     parent is in the run, one span-index array per such row in shown order)``.
@@ -350,13 +414,17 @@ def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int) ->
     return m
 
 
-def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int) -> dict:
-    """A probe on which fields are shown (one-hot of ``fields``), trained on all train subsets, on the common rows:
-    what structure alone predicts. Reported, not asserted: on unbalanced subsets it is above chance."""
+def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int, paired: bool) -> dict:
+    """A probe on which fields are shown (one-hot of ``fields``), trained on the train rows, on the common rows:
+    what structure alone predicts. Reported on unbalanced subsets (it is above chance there); on a paired set every field
+    set is exactly 50/50, so its AUROC is exactly 0.5 (``paired``: asserted, a known answer)."""
     cats = sorted(set(sub_tr["fields"].tolist()) | set(ev["fields"].tolist()))
     clf = er.fit_logreg(er.onehot(sub_tr["fields"], cats), sub_tr["y"], p, seed)
     probs = clf.predict_proba(er.onehot(ev["fields"], cats))[:, 1]
-    return er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
+    m = er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
+    assert not paired or abs(m["test_baseline_fields_auroc"] - 0.5) <= er.EXACT_AUROC_ATOL, (
+        f"structure baseline AUROC {m['test_baseline_fields_auroc']} != 0.5 on a paired set -- the pairing is broken")
+    return m
 
 
 def check_pairs(ev: dict) -> None:
@@ -391,10 +459,11 @@ def control_mask(ev: dict) -> np.ndarray:
 
 
 def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[np.ndarray], y_tr: np.ndarray, te: dict,
-           rows_ev: list[np.ndarray], ev: dict, art_dir: Path) -> tuple[dict, np.ndarray]:
+           rows_ev: list[np.ndarray], ev: dict, prefix: tuple[float, float], art_dir: Path) -> tuple[dict, np.ndarray]:
     """One model's probe: logistic regression on the train subsets' ``sum`` features, scored on the common rows, the
     ablations and the probe controls. ``tr`` / ``te``: the model's centred train / test splits; ``rows_tr`` /
-    ``rows_ev``: the member spans of each train subset / eval row in them. Returns ``(metrics, P(valid) per eval row)``."""
+    ``rows_ev``: the member spans of each train subset / eval row in them. ``prefix``: the ``prefix_match_dev`` of ALL
+    the model's test rows (not only the eval rows: a paired set has no ``hidden`` row). Returns ``(metrics, P(valid) per eval row)``."""
     thr, y_te = p["decision_threshold"], ev["y"]
     ref_rate = float(y_te.mean())
     assert y_tr.any() and (~y_tr).any(), f"{label}: one class missing in the train subsets"
@@ -403,7 +472,7 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
     f_tr = subset_features(tr["X"], rows_tr, "sum")
     feature_seconds = time.perf_counter() - t0
     f_te = subset_features(te["X"], rows_ev, "sum")
-    dev, exact = prefix_match_dev(f_te, ev)
+    dev, exact = prefix
     assert dev <= p["prefix_match_rtol"], f"{label}: hidden rows differ from their twins by {dev:.3g} (relative norm) -- misaligned spans?"
     metrics: dict[str, float] = {"layer": layer, "prefix_match_dev": dev, "prefix_match_exact_share": exact,
                                  "n_train": int(len(y_tr)), "n_train_valid": int(y_tr.sum())}
@@ -437,7 +506,8 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
 # ----------------------------------------------------------------------------- report
 def report(ev: dict, probs_by_method: dict[str, np.ndarray], metrics: dict, p: dict, seed: int, fig_dir: Path, out: Path) -> dict:
     """The calibration report on the common rows, then the control report on ``control_mask`` of them (see the module
-    docstring). Returns the new ``metrics`` entries: split counts per error type, and the control's row counts."""
+    docstring). Returns the new ``metrics`` entries: split counts per error type, and the control's row counts.
+    On a paired set (``params.selection``) there is no control report: ``control_report_skipped_paired`` = 1."""
     rep_cfg, ets = p["report"], list(p["report"]["error_type_names"])
     evset = {"y": ev["y"], "docs": ev["doc"], "error_type": ev["error_type"], "probs": probs_by_method}
     cr.check_evset(evset, list(rep_cfg["methods"]))
@@ -445,7 +515,13 @@ def report(ev: dict, probs_by_method: dict[str, np.ndarray], metrics: dict, p: d
     check_pairs(ev)
     cr.save_evset(out / "artifacts" / "calibration_predictions.npz", evset, subset_id=ev["subset_id"], parent_valid=ev["parent_valid"],
                   size=ev["size"], parent_size=ev["parent_size"], pair_id=ev["pair_id"])
-    m = cr.write_report(evset, rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "calibration", "Evaluation: all common test subset rows.")
+    paired = p["selection"] is not None
+    m = cr.write_report(evset, rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "calibration",
+                        "Evaluation: paired test subset rows (invalid rows and their clean counterparts)." if paired
+                        else "Evaluation: all common test subset rows.")
+    if paired:
+        m["control_report_skipped_paired"] = 1
+        return m
     keep = control_mask(ev)   # after the main report: a control that cannot be formed must not cost the main figures
     n_drop = int((~keep).sum())
     assert n_drop == int((ev["parent_valid"] & (ev["size"] < ev["parent_size"])).sum())
@@ -473,6 +549,11 @@ def run(cfg: dict, runs_root: Path) -> dict:
     assert len(set(paths.values())) == 4, "train and test files overlap"
     sub_tr, sub_te = load_subsets(paths["train_subsets"], paths["train_parents"]), load_subsets(paths["test_subsets"], paths["test_parents"])
     assert not (set(sub_tr["doc"].tolist()) & set(sub_te["doc"].tolist())), "train/test documents overlap"
+    paired = p["selection"] is not None
+    pos_tr, counts_tr = select_paired(sub_tr, p["selection"])
+    pos_te, counts_te = select_paired(sub_te, p["selection"])   # sub_te stays whole: the judges' ids are positions in it, and the prefix check reads all its rows
+    if paired:
+        sub_tr = cut(sub_tr, pos_tr)
 
     lms: dict[str, dict] = {}
     for spec in p["models"]:
@@ -490,18 +571,28 @@ def run(cfg: dict, runs_root: Path) -> dict:
         er.center_per_document(te["X"], te["doc_ids"])
         idx_tr, rows_tr = lm_member_spans(sub_tr, tr, rr.load_line_data(spec["train_run_id"], runs_root, rr.REPO_ROOT), require_all=p["max_docs"] is None)
         idx_te, rows_te = lm_member_spans(sub_te, te, rr.load_line_data(spec["test_run_id"], runs_root, rr.REPO_ROOT), require_all=False)
-        lms[spec["label"]] = {"tr": tr, "te": te, "idx_tr": idx_tr, "rows_tr": rows_tr, "idx_te": idx_te, "rows_te": dict(zip(idx_te.tolist(), rows_te))}
+        # the prefix known answer on every test row the model scored (hidden rows are not in a paired set)
+        prefix = prefix_match_dev(subset_features(te["X"], rows_te, "sum"), cut(sub_te, idx_te))
+        lms[spec["label"]] = {"tr": tr, "te": te, "idx_tr": idx_tr, "rows_tr": rows_tr, "idx_te": idx_te, "rows_te": dict(zip(idx_te.tolist(), rows_te)),
+                              "prefix": prefix}
     judges = {spec["label"]: load_judge(spec, runs_root, sub_te) for spec in p["judges"]}
 
     # The common set: test rows every method scored; the labels are the file's for all of them.
-    scored = {**{k: v["idx_te"] for k, v in lms.items()}, **{k: v["idx"] for k, v in judges.items()}}
-    common = sorted(set.intersection(*(set(i.tolist()) for i in scored.values())))
+    selected = set(pos_te.tolist())
+    scored = {k: sorted(set(i.tolist()) & selected)
+              for k, i in {**{k: v["idx_te"] for k, v in lms.items()}, **{k: v["idx"] for k, v in judges.items()}}.items()}
+    common = sorted(set.intersection(*(set(i) for i in scored.values())))
     assert common, "no test row was scored by every method"
     ev = cut(sub_te, np.array(common))
-    metrics: dict[str, float] = {"n_test_subsets_file": len(sub_te["subset_id"]), "n_common_test_rows": len(common)}
+    if paired:
+        check_paired(ev)   # a pair one method did not score whole is an error, never silently thinned
+    metrics: dict[str, float] = {"n_test_subsets_file": len(sub_te["subset_id"]), "n_common_test_rows": len(common),
+                                 "n_selected_train_rows": int(len(pos_tr)), "n_selected_test_rows": int(len(pos_te))}
+    metrics.update({f"train_{k}": v for k, v in counts_tr.items()})
+    metrics.update({f"test_{k}": v for k, v in counts_te.items()})
     for label, i in scored.items():
-        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = int(len(i)), int(len(i)) - len(common)
-    metrics.update(structure_baseline(sub_tr, ev, p, seed))
+        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = len(i), len(i) - len(common)
+    metrics.update(structure_baseline(sub_tr, ev, p, seed, paired))
 
     art_dir = out / "artifacts"
     probs_by_method: dict[str, np.ndarray] = {}
@@ -509,7 +600,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
         rows_ev = [m["rows_te"][i] for i in common]
-        m_metrics, lm_probs = run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, art_dir)
+        m_metrics, lm_probs = run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, m["prefix"], art_dir)
         probs_by_method[label] = lm_probs.astype(np.float64)
         probe_times[label] = m_metrics.pop("probe_train_time")
         for k_, v in m_metrics.items():

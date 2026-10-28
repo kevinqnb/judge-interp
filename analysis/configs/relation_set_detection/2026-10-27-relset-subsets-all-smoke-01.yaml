@@ -11,6 +11,8 @@ params:
   test_subsets: data/vrdu/line/test_subsets.json
   train_parents: data/vrdu/line/train.json
   test_parents: data/vrdu/line/test.json
+  # null = every row (the unpaired set); see analysis/relation_set_detection.py, params.selection
+  selection: null
   models:
     - {label: qwen7b_l24, train_run_id: 2026-10-27-qwen7b-relation-line-train-01, test_run_id: 2026-10-27-qwen7b-relation-line-test-01, layer: 24}
     - {label: llama8b_l28, train_run_id: 2026-10-27-llama8b-relation-line-train-01, test_run_id: 2026-10-27-llama8b-relation-line-test-01, layer: 28}

@@ -261,7 +261,7 @@ def test_score_method_needs_both_classes_and_has_no_permutation_null(tmp_path):
 def test_structure_baseline_reports_what_fields_alone_predict(tmp_path):
     tr, te = frame(tmp_path, "train", "dtr"), frame(tmp_path, "test", "d")
     ev = rs.cut(te, np.arange(16))
-    m = rs.structure_baseline(tr, ev, P, 0)
+    m = rs.structure_baseline(tr, ev, P, 0, False)
     # (CH,ED) and (DESC,ED), (CH,DESC,ED) are invalid in 1 of 4 rows of each fields group, (CH,DESC) in 0 of 4: not constant
     assert 0.0 <= m["test_baseline_fields_auroc"] <= 1.0 and m["test_baseline_fields_auroc"] != 0.5
 
@@ -365,7 +365,7 @@ def test_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
          "models": [{"label": "m", "train_run_id": "m-train", "test_run_id": "m-test", "layer": 3}],
          "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-run"},
                     {"label": "jev", "judge": "jev", "kind": "conditional", "run_id": "jev-run"}],
-         "max_docs": None, "run_controls": False, "report": {"n_boot": 20}, "prefix_match_rtol": 1e-6, "n_train_label_shuffles": 3, "train_label_shuffle_auroc_tolerance": 0.5}
+         "max_docs": None, "selection": None, "run_controls": False, "report": {"n_boot": 20}, "prefix_match_rtol": 1e-6, "n_train_label_shuffles": 3, "train_label_shuffle_auroc_tolerance": 0.5}
     monkeypatch.setattr(rs, "FIGURES_DIR", tmp_path / "figures")
     monkeypatch.setattr(rs, "report", lambda *a, **k: {})   # one document, one error type here: the report has its own tests below
     m = rs.run({"id": "r1", "seed": 0, "params": p}, runs)
@@ -387,6 +387,105 @@ def test_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
     p2 = {**p, "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-half"}]}
     m2 = rs.run({"id": "r2", "seed": 0, "params": p2}, runs)
     assert m2["n_common_test_rows"] == 8 and m2["m_n_dropped_rows"] == 8 and m2["clef_n_dropped_rows"] == 0 and m2["m_n"] == 8
+
+
+# ------------------------------------------------------------------------ paired selection
+SEL = {"intra_document": {"cell": "intra_document:k1", "n_corrupted": 1}}
+
+
+def test_select_paired_hand_worked(tmp_path):
+    f = frame(tmp_path)
+    assert rs.select_paired(f, None)[0].tolist() == list(range(16)) and rs.select_paired(f, None)[1] == {}
+    pos, counts = rs.select_paired(f, SEL)
+    # p1: (CH,ED), (DESC,ED), (CH,DESC,ED) invalid; p2: (CH,ED), (CH,DESC,ED) invalid. Left out: p1's hidden (CH,DESC), p2's
+    # corrupted_member (CH,DESC) (valid although CH is corrupted) and visible (DESC,ED), and the 3 clean rows with no invalid twin.
+    inv = [sid("p1", False, CH, ED), sid("p1", False, DESC, ED), sid("p1", False, CH, DESC, ED),
+           sid("p2", False, CH, ED), sid("p2", False, CH, DESC, ED)]
+    want = {s for i in inv for s in (i, i.replace("|invalid|", "|valid|"))}
+    assert pos.tolist() == sorted(pos.tolist()) and {f["subset_id"][i] for i in pos} == want and len(pos) == 10
+    assert counts == {"n_pairs_intra_document": 5, "n_valid_with_n_corrupted_intra_document": 1}
+    ev = rs.cut(f, pos)
+    assert ev["y"].mean() == 0.5 and sorted(set(ev["kind"].tolist())) == ["clean_parent", "invalid"]
+    rs.check_paired(ev)
+
+
+def test_select_paired_refuses_bad_rules_and_missing_counterparts(tmp_path):
+    f = frame(tmp_path)
+    for bad in ({}, {"intra_document": {"cell": "intra_document:k1"}},                       # empty; a rule missing a key
+                {"cross_item": {"cell": "intra_document:k1", "n_corrupted": 1}},                 # a cell of another error type
+                {"intra_document": {"cell": "intra_document:k1", "n_corrupted": 0}},
+                {"intra_document": {"cell": "intra_document:k1", "n_corrupted": True}}):
+        with pytest.raises(AssertionError):
+            rs.select_paired(f, bad)
+    with pytest.raises(AssertionError, match="no invalid row"):                                   # no row has two corrupted members here
+        rs.select_paired(f, {"intra_document": {"cell": "intra_document:k1", "n_corrupted": 2}})
+    no_twin = rs.cut(f, np.array([i for i in range(16) if f["subset_id"][i] != sid("p1", True, CH, ED)]))
+    with pytest.raises(AssertionError, match="clean counterpart is missing"):
+        rs.select_paired(no_twin, SEL)
+
+
+def test_check_paired_alerts_on_a_split_pair_or_a_non_paired_set(tmp_path):
+    f = frame(tmp_path)
+    ev = rs.cut(f, rs.select_paired(f, SEL)[0])
+    rs.check_paired(ev)
+    with pytest.raises(AssertionError, match="one to one"):
+        rs.check_paired(_drop(ev, int(np.flatnonzero(ev["parent_valid"])[0])))
+    with pytest.raises(AssertionError, match="only invalid corrupted-parent rows"):
+        rs.check_paired(rs.cut(f, np.arange(16)))
+
+
+def test_structure_baseline_is_exactly_chance_on_a_paired_set(tmp_path):
+    tr, te = frame(tmp_path, "train", "dtr"), frame(tmp_path, "test", "d")
+    tr_p, ev_p = rs.cut(tr, rs.select_paired(tr, SEL)[0]), rs.cut(te, rs.select_paired(te, SEL)[0])
+    assert rs.structure_baseline(tr_p, ev_p, P, 0, True)["test_baseline_fields_auroc"] == pytest.approx(0.5, abs=1e-9)
+    # the unpaired set is not balanced per field set: asserting chance there is the pairing-is-broken alarm
+    with pytest.raises(AssertionError, match="pairing is broken"):
+        rs.structure_baseline(tr, rs.cut(te, np.arange(16)), P, 0, True)
+
+
+def test_paired_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
+    runs, repo = tmp_path / "runs", tmp_path / "repo"
+    runs.mkdir()
+    (repo / "data" / "vrdu").mkdir(parents=True)
+    sub_tr, par_tr = write_files(repo / "data" / "vrdu", "train", "dtr")
+    sub_te, par_te = write_files(repo / "data" / "vrdu", "test", "d")
+    ptr, pte = parents_of("dtr"), parents_of("d")
+    write_lm_run(runs, "m-train", ptr, 3)
+    write_lm_run(runs, "m-test", pte, 3)
+    f_te = rs.load_subsets(sub_te, par_te)
+    ids = f_te["subset_id"].tolist()
+    c = judge_cols(f_te, ids)
+    write_judge(runs, "clef-run", "clef", ids, np.where(f_te["y"], 0.8, 0.3), f_te["y"], "clef_relation_conditional", cell=c["cell"], size=c["size"])
+    monkeypatch.setattr(rs, "REPO_ROOT", repo)
+    monkeypatch.setattr(rs.rr, "load_line_data", lambda run_id, runs_root, repo_root: make_data(ptr if "train" in run_id else pte))
+    monkeypatch.setattr(rs.er, "run_rows_path", lambda run_id, runs_root, repo_root, dataset: par_tr if "train" in run_id else par_te)
+    p = {**P, "train_subsets": "data/vrdu/line/train_subsets.json", "test_subsets": "data/vrdu/line/test_subsets.json",
+         "train_parents": "data/vrdu/line/train.json", "test_parents": "data/vrdu/line/test.json", "ablations": [], "selection": SEL,
+         "models": [{"label": "m", "train_run_id": "m-train", "test_run_id": "m-test", "layer": 3}],
+         "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-run"}],
+         "max_docs": None, "run_controls": False, "report": {"n_boot": 20}, "prefix_match_rtol": 1e-6, "n_train_label_shuffles": 3, "train_label_shuffle_auroc_tolerance": 0.5}
+    monkeypatch.setattr(rs, "FIGURES_DIR", tmp_path / "figures")
+    monkeypatch.setattr(rs, "report", lambda *a, **k: {})
+    m = rs.run({"id": "r1", "seed": 0, "params": p}, runs)
+    # predicted by hand: 5 invalid rows + 5 counterparts per split; the corrupted_member row (p2: CH,DESC) is the one valid row left out
+    assert m["n_selected_test_rows"] == m["n_common_test_rows"] == m["m_n"] == m["clef_n"] == 10 and m["n_selected_train_rows"] == m["m_n_train"] == 10
+    assert m["test_n_pairs_intra_document"] == m["train_n_pairs_intra_document"] == 5
+    assert m["test_n_valid_with_n_corrupted_intra_document"] == 1 and m["m_valid_rate"] == 0.5 and m["m_n_train_valid"] == 5
+    assert m["test_baseline_fields_auroc"] == pytest.approx(0.5, abs=1e-9)
+    assert m["m_prefix_match_dev"] == 0.0 and m["n_test_subsets_file"] == 16   # the prefix check read the hidden row the paired set leaves out
+    assert m["clef_test_auroc"] == 1.0 and "m_test_context_hidden_mean_p_valid" not in m
+    saved = np.load(runs / "r1" / "artifacts" / "clef_test_predictions.npz")
+    assert len(saved["subset_id"]) == 10 and saved["label_valid"].mean() == 0.5
+
+    # a judge that dropped one row of a pair splits it: refused, never thinned
+    drop = ids.index(sid("p1", False, CH, ED))
+    keep = [i for i in range(len(ids)) if i != drop]
+    c2 = judge_cols(f_te, [ids[i] for i in keep])
+    write_judge(runs, "clef-short", "clef", [ids[i] for i in keep], np.where(f_te["y"][keep], 0.8, 0.3), f_te["y"][keep], "clef_relation_conditional",
+                cell=c2["cell"], size=c2["size"])
+    p2 = {**p, "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-short"}]}
+    with pytest.raises(AssertionError, match="one to one"):
+        rs.run({"id": "r2", "seed": 0, "params": p2}, runs)
 
 
 # ----------------------------------------------------------------------------- report and control
@@ -422,15 +521,15 @@ def test_check_pairs_alerts_on_a_pair_with_one_parent(tmp_path):
         rs.check_pairs(only_bad)
 
 
-def _report_ev(n_docs=30, seed=0):
+def _report_ev(n_docs=30, seed=0, paired=False):
     """Two error types x ``n_docs`` documents; per (doc, type) one pair: a clean full row, a corrupted full row, a
-    corrupted strict subset (valid for half the docs), a clean strict subset."""
+    corrupted strict subset (valid for half the docs; ``paired``: always invalid), a clean strict subset."""
     rng = np.random.default_rng(seed)
     cols = {c: [] for c in rs.SUBSET_COLS}
     for et in ("intra_document", "cross_item"):
         for d in range(n_docs):
             pid = f"{et}-d{d}"
-            for parent_valid, size, y in ((True, 3, True), (False, 3, False), (False, 2, bool(d % 2)), (True, 2, True)):
+            for parent_valid, size, y in ((True, 3, True), (False, 3, False), (False, 2, False if paired else bool(d % 2)), (True, 2, True)):
                 for c, v in zip(rs.SUBSET_COLS, (f"{pid}-{parent_valid}-{size}", pid, pid, f"d{d}-{et}", f"{et}:k1", et, parent_valid, size, 3,
                                                  "CH,DESC", 0 if parent_valid else 1, y, "x")):
                     cols[c].append(v)
@@ -447,7 +546,7 @@ def test_report_writes_both_reports_and_the_control_drops_only_clean_strict_subs
     for l, f in probs.items():
         sc, _ = rs.cr.score_sample(ev["y"], f)
         metrics.update({f"{l}_test_{k}": v for k, v in sc.items()})
-    p = {"ci_level": 0.95, "report": {"n_boot": 20, "methods": {"m1": "one", "m2": "two"},
+    p = {"ci_level": 0.95, "selection": None, "report": {"n_boot": 20, "methods": {"m1": "one", "m2": "two"},
                                        "error_type_names": {"intra_document": "Intra-document", "cross_item": "Cross-item"},
                                        "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "alpha_floor": 0.15, "band_alpha": 0.35, "alpha_levels": 12,
                                        "shuffled_auroc_tolerance": 0.2, "figsize": [3.0, 3.0]}}
@@ -464,3 +563,24 @@ def test_report_writes_both_reports_and_the_control_drops_only_clean_strict_subs
             assert (fig_dir / name).stat().st_size > 0, name
         assert (out / f"{stem}_table.tex").exists() and (out / f"{stem}_results.csv").exists()
     assert not list(fig_dir.glob("*.png"))                      # calibration figures only
+
+
+def test_report_skips_the_control_on_a_paired_set(tmp_path):
+    ev = _report_ev(paired=True)
+    rng = np.random.default_rng(1)
+    probs = {l: np.clip(np.where(ev["y"], 0.7, 0.3) + rng.normal(0, 0.2, len(ev["y"])), 0.01, 0.99) for l in ("m1", "m2")}
+    metrics = {}
+    for l, f in probs.items():
+        sc, _ = rs.cr.score_sample(ev["y"], f)
+        metrics.update({f"{l}_test_{k}": v for k, v in sc.items()})
+    p = {"ci_level": 0.95, "selection": SEL, "report": {"n_boot": 20, "methods": {"m1": "one", "m2": "two"},
+                                                          "error_type_names": {"intra_document": "Intra-document", "cross_item": "Cross-item"},
+                                                          "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "alpha_floor": 0.15, "band_alpha": 0.35,
+                                                          "alpha_levels": 12, "shuffled_auroc_tolerance": 0.2, "figsize": [3.0, 3.0]}}
+    fig_dir, out = tmp_path / "fig", tmp_path / "out"
+    (out / "artifacts").mkdir(parents=True)
+    fig_dir.mkdir()
+    m = rs.report(ev, probs, metrics, p, 0, fig_dir, out)
+    assert m["control_report_skipped_paired"] == 1 and not [k for k in m if k.startswith("control_calibration")]
+    assert m["calibration_n_valid_intra_document"] == m["calibration_n_invalid_intra_document"] == 2 * 30
+    assert (fig_dir / "calibration_intra_document.pdf").stat().st_size > 0 and not list(fig_dir.glob("control_*"))
