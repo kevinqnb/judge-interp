@@ -15,7 +15,7 @@ cr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cr)
 
 REP = {"n_boot": 50, "methods": {"m1": "one", "m2": "two"}, "error_type_names": {"a_type": "Type A", "b_type": "Type B"},
-       "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "min_density_frac": 0.02, "shuffled_auroc_tolerance": 0.1,
+       "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "alpha_floor": 0.15, "band_alpha": 0.35, "alpha_levels": 12, "shuffled_auroc_tolerance": 0.1,
        "figsize": [3.0, 3.0]}
 ETS = ["a_type", "b_type"]
 
@@ -105,9 +105,8 @@ def test_analysis_known_answers():
         assert abs(r[cr.SHUFFLED]["auroc"][0] - 0.5) < 0.1              # shuffled-label baseline is chance
         assert r[cr.SHUFFLED]["bss"][0] < m1["bss"][0]
         c = m1["curve"]
-        assert (c["lo"] <= c["hi"]).all() and c["supported"].any()
-        sup = c["supported"]
-        assert (c["mu"][sup] >= -1e-6).all() and (c["mu"][sup] <= 1 + 1e-6).all()
+        assert (c["lo"] <= c["hi"]).all() and c["density"].max() == 1.0 and (c["density"] >= 0).all()
+        assert (c["mu"] >= -1e-6).all() and (c["mu"] <= 1 + 1e-6).all()
         assert r["n"] == int((ev["error_type"] == et).sum())
 
 
@@ -176,3 +175,22 @@ def test_evset_roundtrip(tmp_path):
     assert np.array_equal(got["y"], ev["y"]) and np.array_equal(got["docs"], ev["docs"])
     assert sorted(got["probs"]) == ["m1", "m2"] and np.array_equal(got["probs"]["m1"], ev["probs"]["m1"])
     assert list(extra) == ["control"]
+
+
+def test_draw_faded_opacity_follows_density_and_draws_everywhere():
+    import matplotlib.pyplot as plt
+    mesh = np.linspace(0, 1, 5)
+    # interval densities (mean of ends): 0.75, 0.25, 0, 0 -> opacity floor + (1 - floor) * that, floor 0.2, levels 5: 0.8, 0.4, 0.2, 0.2
+    c = {"mu": mesh, "lo": mesh - 0.1, "hi": mesh + 0.1, "density": np.array([1.0, 0.5, 0.0, 0.0, 0.0])}
+    fig, ax = plt.subplots()
+    cr.draw_faded(ax, mesh, c, (0.2, 0.4, 0.6), 0.2, 0.5, 5)
+    lines = ax.get_lines()
+    assert [l.get_alpha() for l in lines] == pytest.approx([0.8, 0.4, 0.2])      # runs of equal opacity: [0, 1), [1, 2), [2, 4)
+    assert [len(l.get_xdata()) for l in lines] == [2, 2, 3]
+    assert np.concatenate([l.get_xdata() for l in lines]).min() == 0.0 and np.concatenate([l.get_xdata() for l in lines]).max() == 1.0   # nothing dropped
+    assert [b.get_alpha() for b in ax.collections] == pytest.approx([0.5 * 0.8, 0.5 * 0.4, 0.5 * 0.2])
+    plt.close(fig)
+    with pytest.raises(AssertionError):
+        cr.draw_faded(plt.subplots()[1], mesh, {**c, "density": c["density"] * 0.5}, (0, 0, 0), 0.2, 0.5, 5)   # density must be normalised
+    with pytest.raises(AssertionError):
+        cr.draw_faded(plt.subplots()[1], mesh, c, (0, 0, 0), 0.2, 0.5, 1)

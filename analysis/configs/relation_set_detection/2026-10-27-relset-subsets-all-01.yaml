@@ -40,7 +40,9 @@ params:
     font: Nimbus Roman
     white_frac: 0.35   # tab10 colours mixed with this share of white
     mesh_pts: 101
-    min_density_frac: 0.02   # a curve is drawn where the predictions' density is at least this share of its maximum
+    alpha_floor: 0.15   # curve and band opacity where there are (almost) no predictions; opacity rises linearly with density to 1
+    band_alpha: 0.35   # extra opacity factor of the bands
+    alpha_levels: 12   # the density fade is drawn in this many opacity steps (one polyline per run of equal opacity)
     shuffled_auroc_tolerance: 0.05   # the shuffled-label baseline's AUROC must be within this of 0.5
     figsize: [3.0, 3.0]
   run_controls: true

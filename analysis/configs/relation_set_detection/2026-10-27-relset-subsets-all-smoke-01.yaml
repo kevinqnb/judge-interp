@@ -1,0 +1,60 @@
+id: 2026-10-27-relset-subsets-all-smoke-01
+project: judge-interp
+description: >-
+  SMOKE (plumbing only, not a result): first 20 documents of each LM split, 20 document resamples. Same as 2026-10-27-relset-subsets-all-01 otherwise.
+  Relation detection on the line subsets (-07): the Qwen2.5-7B-Instruct (layer 24) and Llama-3.1-8B-Instruct (layer 28) probes, Clef and Jev (conditional), all scored on the same rows of data/vrdu/line/test_subsets.json (the rows every method scored; label = the row's own valid). Probes train on the rows of data/vrdu/line/train_subsets.json only, on the sum of the member activations taken from the parent's prompt. Row-level metrics (the set is unbalanced and not minimal pairs): Brier reference = the evaluation set's valid rate, document-bootstrap AUROC; structure baseline; context diagnostic by row kind; controls.
+  Needs the -07 runs 2026-10-27-{qwen7b,llama8b}-relation-line-{train,test}-01, 2026-10-27-clef-conditional-subsets-test-01 and 2026-10-27-jev-conditional-subsets-test-01, none of which existed when this config was written.
+seed: 0
+params:
+  # every run must have judged these files (probes: the parents of the subsets; judges: the subsets)
+  train_subsets: data/vrdu/line/train_subsets.json
+  test_subsets: data/vrdu/line/test_subsets.json
+  train_parents: data/vrdu/line/train.json
+  test_parents: data/vrdu/line/test.json
+  models:
+    - {label: qwen7b_l24, train_run_id: 2026-10-27-qwen7b-relation-line-train-01, test_run_id: 2026-10-27-qwen7b-relation-line-test-01, layer: 24}
+    - {label: llama8b_l28, train_run_id: 2026-10-27-llama8b-relation-line-train-01, test_run_id: 2026-10-27-llama8b-relation-line-test-01, layer: 28}
+  # judge: clef | jev; kind: conditional | oneshot
+  judges:
+    - {label: clef, judge: clef, kind: conditional, run_id: 2026-10-27-clef-conditional-subsets-test-01}
+    - {label: jev, judge: jev, kind: conditional, run_id: 2026-10-27-jev-conditional-subsets-test-01}
+  # also probed, for comparison: last = the member shown last; context = the sum of the other members.
+  # Each is another fit on the ~172k train subsets, so none by default.
+  ablations: []
+  # hidden rows (identical prompt prefixes to their twin's) may differ by at most this relative norm: bf16 noise
+  # reached 0.13-0.14 on the -06 full runs (Qwen L24, Llama L28); the same fields from another record differ by a median 1.3
+  prefix_match_rtol: 0.25
+  # logistic regression (lbfgs; ConvergenceWarning is an error); lr_C is the INVERSE regularisation strength
+  lr_C: 0.01
+  lr_max_iter: 5000
+  lr_tol: 0.0001
+  decision_threshold: 0.5
+  ci_level: 0.95
+  # calibration figures and tables (analysis/calibration_report.py): intervals over n_boot document resamples;
+  # the control report (control_calibration_*) uses the same settings; n_boot is also the number of resamples
+  # of the ablations' paired AUROC differences
+  report:
+    n_boot: 20
+    # label -> name in the table / legend; the order is the row and legend order and fixes the tab10 colours
+    methods: {qwen7b_l24: qwen, llama8b_l28: llama, clef: clef, jev: jev}
+    error_type_names: {intra_document: Intra-document, cross_item: Cross-item}
+    font: Nimbus Roman
+    white_frac: 0.35   # tab10 colours mixed with this share of white
+    mesh_pts: 101
+    alpha_floor: 0.15   # curve and band opacity where there are (almost) no predictions; opacity rises linearly with density to 1
+    band_alpha: 0.35   # extra opacity factor of the bands
+    alpha_levels: 12   # the density fade is drawn in this many opacity steps (one polyline per run of equal opacity)
+    shuffled_auroc_tolerance: 0.05   # the shuffled-label baseline's AUROC must be within this of 0.5
+    figsize: [3.0, 3.0]
+  run_controls: true
+  # probes only, TRAINING-label shuffle control (leakage check): the test AUROC is averaged over n_train_label_shuffles
+  # probes, each refit on permuted TRAIN labels and scored on the real test labels; it must be within the tolerance of 0.5
+  n_train_label_shuffles: 3
+  train_label_shuffle_auroc_tolerance: 0.2
+  # restrict each LM split to its first N documents (null = all)
+  max_docs: 20
+  # -- experiments/submit.sh --analysis resources (CPU only; PLACEHOLDERS until a tiny run sizes them: ~172k x hidden float32 train features per model, upcast copies in sklearn) --
+  omp: 16
+  # BLAS threads, below omp: jobs at thread_cap == omp were SIGKILLed on a compute node
+  thread_cap: 8
+  walltime: "01:00:00"

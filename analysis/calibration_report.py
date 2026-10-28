@@ -12,19 +12,22 @@ row) and ``probs`` (``{method label: P(valid)}``, float arrays). Per error type,
   resamples are drawn once per type and shared by every method, so methods are compared on the same resamples.
 * BSS reference = the (re)sample's own valid rate, as in the analyses (``evaluation_set_rate``).
 * calibration curve = relplot's reflected-Gaussian kernel smoother at the bandwidth smECE selects on the full rows
-  (held fixed over resamples); the band is the pointwise percentile interval. The solid line and band are drawn
-  only where the predictions' kernel density is at least ``report.min_density_frac`` of its maximum; elsewhere the
-  curve is unsupported by data and is drawn thin and faint (relplot's own plot fades it for the same reason).
+  (held fixed over resamples); the band is the pointwise percentile interval. Both are drawn everywhere, faded by
+  the predictions' kernel density (as relplot's own plot): opacity = ``report.alpha_floor`` + (1 - ``alpha_floor``) *
+  density / max density (rounded to ``report.alpha_levels`` levels), so regions with few predictions are lightly drawn.
 * shuffled-label baseline: the labels permuted once within the type, each method's probabilities scored against
   them on the same resamples; the baseline row is the mean over methods.
 
-Usage (re-draw from saved predictions): ``python analysis/calibration_report.py <config.yaml> <predictions.npz> <out_dir> <stem>``
+Usage (re-draw from saved predictions): ``python analysis/calibration_report.py <config.yaml> <predictions.npz> <out_dir> <stem>
+[--control]`` (``--control``: the npz holds a ``control`` row mask; also draw the control report ``control_<stem>``).
 """
 from __future__ import annotations
 
 import csv
 import sys
 from pathlib import Path
+
+import argparse
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,7 +42,7 @@ from sklearn.metrics import roc_auc_score
 METRICS = ("smece", "bss", "auroc")
 HEADERS = {"smece": r"smECE $\downarrow$", "bss": r"BSS $\uparrow$", "auroc": r"AUROC $\uparrow$"}
 SHUFFLED = "shuffled"
-REPORT_KEYS = ("n_boot", "methods", "error_type_names", "font", "white_frac", "mesh_pts", "min_density_frac",
+REPORT_KEYS = ("n_boot", "methods", "error_type_names", "font", "white_frac", "mesh_pts", "alpha_floor", "band_alpha", "alpha_levels",
                "shuffled_auroc_tolerance", "figsize")
 TAB10 = plt.get_cmap("tab10").colors
 
@@ -123,14 +126,14 @@ def analyse_type(y: np.ndarray, probs: dict[str, np.ndarray], docs: np.ndarray, 
     members, draws = doc_draws(docs, n_boot, [seed, type_index])
     y_perm = np.random.default_rng([seed, type_index, 1]).permutation(y)
     yf = y.astype(np.float64)
-    full, sigma, point_curve, supported = {}, {}, {}, {}
+    full, sigma, point_curve, density = {}, {}, {}, {}
     shuf_full = {}
     for label, f in probs.items():
         full[label], sigma[label] = score_sample(y, f)
         kern = ReflectedGaussianKernel(sigma[label])
         point_curve[label] = kern.smooth(f, yf, mesh)[0]
         dens = kern.kde(f, mesh)
-        supported[label] = dens >= rep["min_density_frac"] * dens.max()
+        density[label] = dens / dens.max()
         shuf_full[label], _ = score_sample(y_perm, f)
     reps = {l: {m: np.empty(n_boot) for m in METRICS} for l in probs}
     shuf_reps = {l: {m: np.empty(n_boot) for m in METRICS} for l in probs}
@@ -147,7 +150,7 @@ def analyse_type(y: np.ndarray, probs: dict[str, np.ndarray], docs: np.ndarray, 
     for label in probs:
         res = {m: (full[label][m], *interval(reps[label][m], ci_level)) for m in METRICS}
         lo, hi = np.quantile(curves[label], [(1 - ci_level) / 2, (1 + ci_level) / 2], axis=0)
-        res["curve"] = {"mu": point_curve[label], "lo": lo, "hi": hi, "supported": supported[label], "sigma": sigma[label]}
+        res["curve"] = {"mu": point_curve[label], "lo": lo, "hi": hi, "density": density[label], "sigma": sigma[label]}
         out["methods"][label] = res
     out[SHUFFLED] = {m: (float(np.mean([shuf_full[l][m] for l in probs])),
                          *interval(np.mean([shuf_reps[l][m] for l in probs], axis=0), ci_level)) for m in METRICS}
@@ -202,6 +205,25 @@ def method_colors(rep: dict) -> dict[str, tuple]:
     return {label: pastel(TAB10[i], rep["white_frac"]) for i, label in enumerate(rep["methods"])}
 
 
+def draw_faded(ax, mesh: np.ndarray, c: dict, color: tuple, alpha_floor: float, band_alpha: float, alpha_levels: int) -> None:
+    """The curve ``c["mu"]`` and its band ``c["lo"]``..``c["hi"]``, faded by density (``c["density"]``, max 1): a mesh
+    interval's opacity is ``alpha_floor + (1 - alpha_floor) * density`` (mean of its ends) rounded to one of
+    ``alpha_levels`` evenly spaced levels; the band is further scaled by ``band_alpha``. Each run of intervals at one level
+    is a single polyline / fill (semi-transparent segments drawn one by one darken where they overlap)."""
+    assert 0.0 <= alpha_floor < 1.0 and 0.0 <= band_alpha <= 1.0 and c["density"].max() == 1.0
+    assert isinstance(alpha_levels, int) and alpha_levels >= 2, alpha_levels
+    w = alpha_floor + (1 - alpha_floor) * c["density"]
+    level = np.rint(((w[:-1] + w[1:]) / 2 - alpha_floor) / (1 - alpha_floor) * (alpha_levels - 1)).astype(int)
+    start = 0
+    for i in range(1, len(level) + 1):
+        if i == len(level) or level[i] != level[start]:
+            sl = slice(start, i + 1)   # the run's mesh points: its intervals' ends, shared with the neighbouring runs
+            a = alpha_floor + (1 - alpha_floor) * level[start] / (alpha_levels - 1)
+            ax.fill_between(mesh[sl], c["lo"][sl], c["hi"][sl], color=color, alpha=band_alpha * a, lw=0, zorder=2)
+            ax.plot(mesh[sl], c["mu"][sl], color=color, alpha=a, lw=1.8, solid_capstyle="butt", zorder=3)
+            start = i
+
+
 def plot_calibration(res: dict, rep: dict, out_dir: Path, stem: str) -> list[Path]:
     """One ``<stem>_<error type>.pdf`` per error type (all methods, shaded document-bootstrap bands) and
     ``<stem>_legend.pdf`` (the legend alone)."""
@@ -211,11 +233,7 @@ def plot_calibration(res: dict, rep: dict, out_dir: Path, stem: str) -> list[Pat
         fig, ax = plt.subplots(figsize=tuple(rep["figsize"]), constrained_layout=True)
         ax.plot([0, 1], [0, 1], ":", color="0.45", lw=1.0, zorder=1)
         for label, mr in r["methods"].items():
-            c = mr["curve"]
-            keep = c["supported"]
-            ax.fill_between(r["mesh"], np.where(keep, c["lo"], np.nan), np.where(keep, c["hi"], np.nan), color=colors[label], alpha=0.35, lw=0, zorder=2)
-            ax.plot(r["mesh"], c["mu"], color=colors[label], lw=0.8, alpha=0.5, zorder=2)   # unsupported stretches: thin and faint
-            ax.plot(r["mesh"], np.where(keep, c["mu"], np.nan), color=colors[label], lw=1.8, zorder=3)
+            draw_faded(ax, r["mesh"], mr["curve"], colors[label], rep["alpha_floor"], rep["band_alpha"], rep["alpha_levels"])
         ax.set(xlim=(-0.02, 1.02), ylim=(-0.02, 1.02), xlabel="Predicted probability (valid)", ylabel="Observed frequency (valid)",
                title=rep["error_type_names"][et])
         ax.set_box_aspect(1)
@@ -302,13 +320,22 @@ def load_evset(path: Path) -> tuple[dict, dict]:
 
 
 def main() -> None:
-    cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
-    ev, _ = load_evset(Path(sys.argv[2]))
+    ap = argparse.ArgumentParser()
+    ap.add_argument("config")
+    ap.add_argument("predictions")
+    ap.add_argument("out_dir")
+    ap.add_argument("stem")
+    ap.add_argument("--control", action="store_true", help="the npz holds a `control` row mask: also write control_<stem>")
+    a = ap.parse_args()
+    cfg = yaml.safe_load(Path(a.config).read_text())
+    ev, extra = load_evset(Path(a.predictions))
     p = cfg["params"]
-    out_dir = Path(sys.argv[3])
+    out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ets = list(p["report"]["error_type_names"])
-    write_report(ev, p["report"], ets, p["ci_level"], cfg["seed"], out_dir, out_dir, sys.argv[4], "")
+    write_report(ev, p["report"], ets, p["ci_level"], cfg["seed"], out_dir, out_dir, a.stem, "")
+    if a.control:
+        write_report(subset_evset(ev, extra["control"]), p["report"], ets, p["ci_level"], cfg["seed"], out_dir, out_dir, f"control_{a.stem}", "")
 
 
 if __name__ == "__main__":

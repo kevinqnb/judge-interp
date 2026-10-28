@@ -449,7 +449,7 @@ def test_report_writes_both_reports_and_the_control_drops_only_clean_strict_subs
         metrics.update({f"{l}_test_{k}": v for k, v in sc.items()})
     p = {"ci_level": 0.95, "report": {"n_boot": 20, "methods": {"m1": "one", "m2": "two"},
                                        "error_type_names": {"intra_document": "Intra-document", "cross_item": "Cross-item"},
-                                       "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "min_density_frac": 0.02,
+                                       "font": "DejaVu Serif", "white_frac": 0.3, "mesh_pts": 21, "alpha_floor": 0.15, "band_alpha": 0.35, "alpha_levels": 12,
                                        "shuffled_auroc_tolerance": 0.2, "figsize": [3.0, 3.0]}}
     fig_dir, out = tmp_path / "fig", tmp_path / "out"
     (out / "artifacts").mkdir(parents=True)

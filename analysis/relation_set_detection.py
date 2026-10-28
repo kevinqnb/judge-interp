@@ -450,6 +450,8 @@ def report(ev: dict, probs_by_method: dict[str, np.ndarray], metrics: dict, p: d
     n_drop = int((~keep).sum())
     assert n_drop == int((ev["parent_valid"] & (ev["size"] < ev["parent_size"])).sum())
     m["control_n_rows"], m["control_n_dropped_strict_clean_subsets"] = int(keep.sum()), n_drop
+    cr.save_evset(out / "artifacts" / "calibration_predictions.npz", evset, subset_id=ev["subset_id"], parent_valid=ev["parent_valid"],
+                  size=ev["size"], parent_size=ev["parent_size"], pair_id=ev["pair_id"], control=keep)   # + the control mask, for `calibration_report.py --control`
     m.update(cr.write_report(cr.subset_evset(evset, keep), rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "control_calibration",
                              "Control: full-length rows (corrupted parent and clean twin) and strict subsets of corrupted parents only; "
                              "strict subsets of clean parents are dropped."))
