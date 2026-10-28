@@ -1,0 +1,39 @@
+id: 2026-10-28-llama8b-entity-main-test-01
+project: judge-interp
+task: entity_detection
+description: >-
+  Row-based entity detection, main dataset (one row per document x error type x k, plus the clean row), test split, Llama-3.1-8B-Instruct: one prompt per row (2224 prompts, every row),
+  representations read at each non-null entity's closing quote at the layers below, labelled per entity from field_errors.
+  Efficiency is measured on every run (artifacts/efficiency.json, efficiency_*.npz, flat eff_* keys in metrics.json): per-prompt wall time (prompt build / trace / readout / cleanup), input tokens, peak GPU memory, and per-layer bytes in memory and in the npz; no output tokens, nothing is decoded.
+  Expected: n_prompts = 2224; one read token id; same row set for both models (context_token_limit is shared). Prefix cache on (instructions + OCR context computed once per document, the first 4 rows also checked against an uncached forward within prefix_cache_rtol); supersedes the 2026-10-25 runs, which ran without it. Expected additionally: eff_prefix_cache_max_rel_diff <= prefix_cache_rtol, eff_reused_token_fraction well above 0.
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  split: test
+  # 32 blocks: 0 = token embedding (identical for every entity -> null control), 32 = post-final-norm.
+  layers: [0, 8, 16, 24, 28, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  prefix_cache: true
+  prefix_cache_check_n: 4
+  prefix_cache_rtol: 0.1
+  error_types: [inter_document, cross_type]
+  # Every row: null = all rows of the stratum ("valid" + error types, or the 15 cells of a paired dataset).
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+
+  # -- experiments/submit.sh resources --
+  # gpu_type is pinned to L40S for every run in this group so runtimes are comparable across
+  # models and Clef; walltime is ~2x the tiny-test estimate (2026-10-25-*-tiny-0*: ~0.5 s/prompt
+  # for the representation models, 0.7-1.2 s/record for Clef). Shards resume if a job is killed.
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "02:00:00"

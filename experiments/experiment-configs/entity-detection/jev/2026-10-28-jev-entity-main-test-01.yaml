@@ -1,0 +1,28 @@
+id: 2026-10-28-jev-entity-main-test-01
+project: judge-interp
+task: jev_entity_row
+description: >-
+  Jev (jev-1.14.0, TypeSafe API) entity detection, main dataset (one row per document x error type x k, plus the clean row), test split: one request per row (OCR text + row), one noul question per non-null field, P(true) stored per question; every row (2224 rows), the same rows as 2026-10-25-clef-entity-main-test-01. Each row is scored once.
+  No length pre-filter (no local tokenizer): Clef excluded 18 rows (up to 21.4k tokens) that Jev scores, so n_predictions exceeds Clef's 18439, and a request over the API's context limit (64k per request, 32k per question) would raise and fail the run. Efficiency per request: wall time and API-reported input / output tokens (artifacts/efficiency_records.npz).
+  The known-answer record is scored first and the first 5 rows are rescored; P(true) must move by at most determinism_atol = 0.15 (the API is nondeterministic for an identical request, see 2026-10-27-jev-conditional-line-tiny-01).
+  No tiny run of this task preceded it; the fixture smoke (2026-10-27-jev-entity-smoke-01) did. Predicted: n_items = n_units = 2224, eff_n_requests = 2224, mean_p_true_valid well above mean_p_true_invalid.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_main.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  split: test
+  error_types: [inter_document, cross_type]
+  rows_per_stratum:
+    valid: null
+    inter_document: null
+    cross_type: null
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  # 2224 requests of up to ~10 questions each; ~0.1-0.2 s/request in the smoke -> well under 15 min; walltime ~4x.
+  omp: 4
+  walltime: "01:00:00"
