@@ -124,3 +124,17 @@ def test_samples_run_refuses_a_broken_pair(tmp_path):
     _write_run(tmp_path, "r", "conditional", _sample_cols(LINE_ROWS[:-1]))
     with pytest.raises(AssertionError, match="not held whole"):
         ac.sample_eval_set(ac.load_run("r", tmp_path, "conditional"))
+
+
+def test_analyse_run_without_figures_gives_point_values_only(tmp_path):
+    """``fig_dir=None``: the caller reports intervals and figures itself, so no interval key, no figure, no old
+    bootstrap keys needed in ``p``, and the same point values as the full path."""
+    _write_run(tmp_path, "r", "entity", _entity_cols())
+    run = ac.load_run("r", tmp_path, "entity")
+    ev = ac.entity_eval_set(run, ted.MAIN_ROWS, 0)
+    full = ac.analyse_run("e", run, ev, {"bss_ref_rate": 0.5}, P, tmp_path / "fig", 0)
+    p_bare = {k: v for k, v in P.items() if k not in ("ece_n_boot", "hist_n_bins", "auroc_n_boot")}
+    bare = ac.analyse_run("e", run, ev, {"bss_ref_rate": 0.5}, p_bare, None, 0)
+    assert bare["test_smece"] == pytest.approx(full["test_smece"], abs=1e-12)
+    assert not [k for k in bare if "_ci_" in k or "ci_halfwidth" in k] and "test_auroc_ci_lo" in full
+    assert bare["test_auroc"] == full["test_auroc"] and bare["test_bss"] == full["test_bss"]

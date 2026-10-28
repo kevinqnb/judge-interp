@@ -137,10 +137,12 @@ def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: P
         "max_n_tokens": int(run["n_tokens"].max()), "mean_p_true": float(probs.mean()),
     }
     m.update(er.probe_metrics("test", y, probs, ref_rate, thr))
-    m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
-    d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
-    m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
-    if fig_dir is not None:   # None: the caller draws its own figures (entity_detection.py)
+    if fig_dir is None:   # the caller reports every interval and figure itself (entity_detection.py): point values only
+        m["test_smece"] = er.smece(probs, y)
+    else:
+        m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
+        d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
+        m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
         (fig_dir / label).mkdir(parents=True, exist_ok=True)
         er.plot_calibration(d, fig_dir / label)
         er.plot_prob_histogram(probs, p["hist_n_bins"], fig_dir / label)
@@ -170,11 +172,12 @@ def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: P
         m["test_baseline_size_auroc"] = float(roc_auc_score(y, -run["size"][ev["idx"]]))   # each member's own size
         assert abs(m["test_baseline_size_auroc"] - 0.5) <= er.EXACT_AUROC_ATOL, f"{label}: size predicts the label"
 
-    mean, std = permutation_null_auroc(y, probs, p["n_shuffles"], seed)
-    m["control_permutation_auroc"], m["control_permutation_auroc_std"] = mean, std
-    assert abs(mean - 0.5) <= p["permutation_auroc_tolerance"], (
-        f"{label}: mean permuted-label AUROC {mean:.4f} (std {std:.4f}, n={p['n_shuffles']}) is not ~0.5"
-    )
+    if fig_dir is not None:   # report-only mode (None): the report's shuffled-label baseline is the label-permutation control
+        mean, std = permutation_null_auroc(y, probs, p["n_shuffles"], seed)
+        m["control_permutation_auroc"], m["control_permutation_auroc_std"] = mean, std
+        assert abs(mean - 0.5) <= p["permutation_auroc_tolerance"], (
+            f"{label}: mean permuted-label AUROC {mean:.4f} (std {std:.4f}, n={p['n_shuffles']}) is not ~0.5"
+        )
     return m
 
 
