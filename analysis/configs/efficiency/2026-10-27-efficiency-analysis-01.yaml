@@ -1,0 +1,78 @@
+id: 2026-10-27-efficiency-analysis-01
+project: judge-interp
+description: >-
+  Compute cost of running the four methods (Qwen2.5-7B, Llama-3.1-8B, Clef, Jev) on the VRDU data, summed over entity detection
+  (main) and relation detection (line): compute time, input tokens (computed: prefix-cache-reused tokens are not counted) and memory,
+  one bar chart each. Language models: activation collection on the TRAIN and TEST runs; judges: the test run only. Probe training
+  is not counted. Independent of the evaluation analyses: the runs are listed here.
+seed: 0
+params:
+  # label -> display name; the order fixes the bar order and the tab10 colours (as in the calibration figures)
+  methods: {qwen: Qwen, llama: Llama, clef: Clef, jev: Jev}
+  # per task: every run's config snapshot must be of dataset_config (+ split train / test for the language models, + judge_params
+  # for the judges); the runs are counted whole. Relation: the language models run on the line PARENT samples (train.json /
+  # test.json: the probe features come from the parents' prompts), the judges on test_subsets.json (via the samples file).
+  tasks:
+    - name: entity
+      dataset_config: experiments/dataset-configs/vrdu_main.py
+      lm_task: entity_detection
+      lm:
+        qwen: {train_run_id: 2026-10-28-qwen7b-entity-main-train-01, test_run_id: 2026-10-28-qwen7b-entity-main-test-01, layer: 24}
+        llama: {train_run_id: 2026-10-28-llama8b-entity-main-train-01, test_run_id: 2026-10-28-llama8b-entity-main-test-01, layer: 28}
+      judge_params: {split: test}
+      judges:
+        clef: {judge: clef, task: clef_entity_row, run_id: 2026-10-28-clef-entity-main-test-01}
+        jev: {judge: jev, task: jev_entity_row, run_id: 2026-10-28-jev-entity-main-test-01}
+    - name: relation
+      dataset_config: experiments/dataset-configs/vrdu_line.py
+      lm_task: relation_detection
+      lm:
+        qwen: {train_run_id: 2026-10-27-qwen7b-relation-line-train-01, test_run_id: 2026-10-27-qwen7b-relation-line-test-01, layer: 24}
+        llama: {train_run_id: 2026-10-27-llama8b-relation-line-train-01, test_run_id: 2026-10-27-llama8b-relation-line-test-01, layer: 28}
+      judge_params: {samples_path: experiments/clef-samples/conditional-test-subsets.json}
+      judges:
+        clef: {judge: clef, task: clef_relation_conditional, run_id: 2026-10-27-clef-conditional-subsets-test-01}
+        jev: {judge: jev, task: jev_relation_conditional, run_id: 2026-10-27-jev-conditional-subsets-test-01}
+  # every GPU run (probes, Clef) must have been measured on this GPU, or the timings are not comparable
+  gpu_name: NVIDIA L40S
+  # --- definitions that move the bars ---
+  # the representation runs' per-row empty_cache + gc (harness overhead; Clef has no such phase)
+  include_cleanup: false
+  # writing the collected activations to disk after the pass (eff_final_write_seconds)
+  include_final_write: false
+  # GPU memory of running a model: peak_alloc (tensors in use) | peak_reserved (what the caching allocator held)
+  gpu_memory: peak_alloc
+  # --- figures: segments are listed bottom to top; a value is divided by `divisor` (time in s, tokens in millions, memory in GB = 1e9 bytes) ---
+  figures:
+    compute_time:
+      ylabel: Compute time (s)
+      divisor: 1
+      segments:
+        - {key: train_activations, label: Train activation collection, hatch: "////"}
+        - {key: test_activations, label: Test activation collection, hatch: "...."}
+    token_usage:
+      ylabel: Input tokens (millions)
+      divisor: 1000000
+      segments:
+        - {key: train_activations, label: Train activation collection, hatch: "////"}
+        - {key: test_activations, label: Test activation collection, hatch: "...."}
+    memory_usage:
+      ylabel: Memory (GB)
+      divisor: 1000000000
+      segments:
+        - {key: model, label: Running the model (GPU), hatch: "////"}
+        - {key: activations, label: Saved activations (train + test), hatch: "...."}
+  font: Nimbus Roman
+  white_frac: 0.35   # tab10 colours mixed with this share of white
+  figsize: [3.0, 2.6]
+  bar_width: 0.7
+  edge_color: "0.25"
+  edge_linewidth: 0.6
+  hatch_linewidth: 0.6
+  legend_ncol: 3
+  legend_fontsize: 8
+  legend_hatch_face: "0.9"
+  # -- experiments/submit.sh --analysis resources (CPU only; reads small json / npz files) --
+  omp: 2
+  thread_cap: 2
+  walltime: "00:10:00"

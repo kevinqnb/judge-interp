@@ -1,31 +1,35 @@
-"""Computational performance of the judges: wall time, tokens, GPU memory and storage per judged row,
-for the representation runs (entity / relation detection) and the Clef runs.
+"""Compute cost of running the four methods on the VRDU data: compute time, input tokens and memory, one bar chart each
+(``compute_time.pdf``, ``token_usage.pdf``, ``memory_usage.pdf``, each with a ``*_legend.pdf``).
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/efficiency.py analysis/configs/efficiency/<id>.yaml``
 (every value lives in the config's ``params``; a missing key is a KeyError).
 
-Reads each run named in ``params.runs`` (``artifacts/efficiency.json`` plus the per-unit
-``efficiency_rows.npz`` / ``efficiency_records.npz`` that ``src/judge_interp/efficiency.py`` wrote) and
-recomputes every statistic from the per-unit arrays. A unit is one judged row or sample: a prompt for
-the representation runs, a record for Clef. Per unit the phases are
+Independent of the evaluation analyses (which score stratified subsets): ``params.tasks`` lists, per task, the runs to cost
+(the language models' train / test runs, the judges' runs); each whole run is counted, whatever rows an analysis later
+scores. Each run's config snapshot is gated against the task's ``dataset_config`` and the split / samples file the
+config expects (``lm_task`` + ``judge_params``), so a bar cannot silently cost another dataset.
 
-- representation: ``prompt`` (tokenise), ``trace`` (forward pass; the compute), ``readout`` (device to
-  host), ``cleanup`` (``empty_cache`` + ``gc`` after every row: harness overhead, reported separately);
-- Clef: ``encode``, ``forward`` (the compute), ``readout``.
+Per method, summed over the tasks (the per-task split is in ``metrics.json``):
 
-A "judged item" is a span (representation) or a question (Clef), so ``seconds_per_item`` is the
-amortised cost of one verdict. Unit sizes differ across tasks, so compare units only within a dataset.
-Not included: the probe's own fit and inference (the representation judge's verdicts need a trained
-probe; Clef's do not), and anything before the first unit (``model_load_seconds`` is in the run).
+- language models (Qwen, Llama): compute time = the model's passes over the TRAIN and the TEST runs (activation
+  collection); input tokens = the tokens the model COMPUTED on the TRAIN and TEST runs (prompt tokens served from the
+  prefix cache are not computed; they are reported in ``metrics.json`` as ``reused_tokens_*``); memory = the GPU peak of running
+  the model (max over the runs; they ran one after another) plus the activations saved for a probe, train + test (the
+  probed layer's float32 ``eff_rep_bytes_layer_<layer>``). Probe training is not counted.
+- Clef: the test run only (compute time, input tokens, GPU peak).
+- Jev: the test run only (sum of request seconds, API-reported input tokens); an API model, so no memory.
 
-Gates: run status and task, unit counts and every ``eff_*_total`` / token / peak equal their recomputed
-value, no resumed shards (timings would span sessions), every run on the GPU named in ``params.gpu_name``.
+Definitions that move the bars (all explicit in the config): ``include_cleanup`` (the per-row ``empty_cache`` + ``gc``
+of the representation runs: harness overhead, ~1/3 of their time), ``include_final_write`` (writing the activations
+to disk once the pass is done), ``gpu_memory`` (peak ``alloc`` or ``reserved``). Not counted: model loading.
 
-Figures go to ``analysis/figures/<id>/`` (``phases.png``, ``scaling.png``, ``memory.png``);
-``metrics.json`` (flat, keys prefixed by the run's ``label``) and ``config.snapshot.yaml`` to ``$RUNS_ROOT/<id>/``.
+A run's phases are read from its per-unit arrays and every total is checked against the run's own json (a unit is a
+prompt for the representation runs, a record for Clef, a request for Jev). Gates: run status and task, no resumed
+shards (timings would span sessions), every GPU run on ``params.gpu_name``, the dataset gate above.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -35,40 +39,18 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
+from matplotlib.patches import Patch
 
-plt.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["Nimbus Roman", "Liberation Serif", "Times New Roman", "DejaVu Serif"],
-})
+_here = Path(__file__).parent
+_cr_spec = importlib.util.spec_from_file_location("analysis_calibration_report", _here / "calibration_report.py")
+cr = importlib.util.module_from_spec(_cr_spec)
+_cr_spec.loader.exec_module(cr)
 
-FIGURES_DIR = Path(__file__).parent / "figures"
-GIB = 2**30
-PERCENTILE = 95
+FIGURES_DIR = _here / "figures"
 RTOL = 1e-9   # recomputed sums against the json's: float summation order only
-
-# Per kind: the task the run must have, the phase columns (name -> role) and the other per-unit columns.
-KINDS = {
-    "rep": {
-        "tasks": ("entity_detection", "relation_detection"), "file": "efficiency_rows.npz",
-        "phases": {"seconds_prompt": "setup", "seconds_trace": "compute", "seconds_readout": "readout", "seconds_cleanup": "cleanup"},
-        "tokens": "prompt_n_tokens", "items": "n_spans", "unit_total": "eff_seconds_per_prompt_total", "n_units": "eff_n_prompts",
-        "tokens_total": "eff_prompt_n_tokens_total",
-    },
-    "clef": {
-        "tasks": ("clef_entity_row", "clef_relation_conditional", "clef_record_oneshot"), "file": "efficiency_records.npz",
-        "phases": {"seconds_encode": "setup", "seconds_forward": "compute", "seconds_readout": "readout"},
-        "tokens": "n_tokens", "items": "n_questions", "unit_total": "eff_seconds_per_record_total", "n_units": "eff_n_records",
-        "tokens_total": "eff_input_tokens_total",
-    },
-}
-ROLES = ("setup", "compute", "readout", "cleanup")
-ROLE_COLORS = {"setup": "#56B4E9", "compute": "#0072B2", "readout": "#009E73", "cleanup": "#E69F00"}
-
-
-def _role_column(kind: str, role: str) -> str | None:
-    cols = [c for c, r in KINDS[kind]["phases"].items() if r == role]
-    assert len(cols) <= 1, (kind, role)
-    return cols[0] if cols else None
+GPU_MEMORY = ("peak_alloc", "peak_reserved")
+FIGURES = ("compute_time", "token_usage", "memory_usage")
+JUDGE_SEGMENT = "decisions"   # a judge's one segment: drawn solid, not in the hatch key
 
 
 def _check_total(run_id: str, name: str, recomputed: float, json_value: float) -> None:
@@ -76,173 +58,234 @@ def _check_total(run_id: str, name: str, recomputed: float, json_value: float) -
         f"{run_id}: {name} {json_value!r} != {recomputed!r} recomputed from the per-unit arrays")
 
 
-def load_run(run_id: str, runs_root: Path, kind: str) -> dict:
-    """One run's per-unit columns and its ``efficiency.json``, after the gates in the module docstring."""
-    assert kind in KINDS, kind
-    spec = KINDS[kind]
+def _load_run_files(run_id: str, runs_root: Path, expected_task: str, array_file: str) -> tuple[dict, dict, dict]:
+    """``(metrics.json, per-unit columns, efficiency.json or {})`` of a successful run of ``expected_task``."""
     run_dir = runs_root / run_id
     manifest = json.loads((run_dir / "run.json").read_text())
     assert manifest["status"] == "success", f"{run_id}: status {manifest['status']!r}"
-    assert manifest["task"] in spec["tasks"], f"{run_id}: task {manifest['task']!r} is not a {kind} task {spec['tasks']}"
-    eff = json.loads((run_dir / "artifacts" / "efficiency.json").read_text())
-    em = eff["metrics"]
-    with np.load(run_dir / "artifacts" / spec["file"], allow_pickle=False) as z:
+    assert manifest["task"] == expected_task, f"{run_id}: task {manifest['task']!r}, expected {expected_task!r}"
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    with np.load(run_dir / "artifacts" / array_file, allow_pickle=False) as z:
         cols = {k: z[k] for k in z.files}
-    for c in (*spec["phases"], spec["tokens"], spec["items"], "peak_alloc_bytes", "peak_reserved_bytes"):
-        assert c in cols, f"{run_id}: no column {c!r} in {spec['file']}"
-    n = len(cols[spec["tokens"]])
-    assert n > 0 and all(len(v) == n for v in cols.values()), f"{run_id}: columns differ in length"
-    assert n == int(em[spec["n_units"]]), f"{run_id}: {n} units != {spec['n_units']} {em[spec['n_units']]}"
-    assert all(np.isfinite(cols[c]).all() and (cols[c] >= 0).all() for c in spec["phases"]), f"{run_id}: a negative or non-finite phase time"
+    n = len(next(iter(cols.values())))
+    assert n > 0 and all(len(v) == n for v in cols.values()), f"{run_id}: empty or ragged columns in {array_file}"
+    assert all(np.isfinite(v).all() and (v >= 0).all() for v in cols.values()), f"{run_id}: a negative or non-finite value in {array_file}"
+    eff_path = run_dir / "artifacts" / "efficiency.json"
+    eff = json.loads(eff_path.read_text()) if eff_path.exists() else {}
+    return metrics, cols, eff
+
+
+def _gpu_peaks(run_id: str, cols: dict, em: dict, gpu_name: str, eff: dict) -> None:
+    assert eff["hardware"]["gpu_name"] == gpu_name, f"{run_id}: GPU {eff['hardware']['gpu_name']!r}, expected {gpu_name!r} (timings are not comparable)"
     assert (cols["peak_alloc_bytes"] > 0).all(), f"{run_id}: GPU peaks missing (a CPU run?)"
-    assert int(em.get("eff_n_shards_resumed", 0)) == 0, f"{run_id}: resumed shards -- timings span sessions"
+    for kind in GPU_MEMORY:
+        _check_total(run_id, f"eff_gpu_{kind}_bytes_max", cols[f"{kind}_bytes"].max(), em[f"eff_gpu_{kind}_bytes_max"])
 
-    for c in spec["phases"]:
+
+def load_lm_run(run_id: str, runs_root: Path, expected_task: str, layer: int, p: dict) -> dict:
+    """A representation run: ``seconds`` (collection; see the module docstring for what ``include_*`` add), ``tokens``,
+    ``gpu_bytes`` (peak over rows), ``activation_bytes`` (the probed layer, float32)."""
+    metrics, cols, eff = _load_run_files(run_id, runs_root, expected_task, "efficiency_rows.npz")
+    em = eff["metrics"]
+    phases = ("seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup")
+    for c in (*phases, "prompt_n_tokens", "reused_n_tokens", "computed_n_tokens", "peak_alloc_bytes", "peak_reserved_bytes"):
+        assert c in cols, f"{run_id}: no column {c!r} in efficiency_rows.npz"
+    assert len(cols["prompt_n_tokens"]) == int(em["eff_n_prompts"]) == int(metrics["n_prompts"]), f"{run_id}: unit counts disagree"
+    assert int(em["eff_n_shards_resumed"]) == 0, f"{run_id}: resumed shards -- timings span sessions"
+    for c in phases:
         _check_total(run_id, f"eff_{c}_total", cols[c].sum(), em[f"eff_{c}_total"])
-    unit = sum(cols[c] for c in spec["phases"])
-    _check_total(run_id, spec["unit_total"], unit.sum(), em[spec["unit_total"]])
-    _check_total(run_id, spec["tokens_total"], cols[spec["tokens"]].sum(), em[spec["tokens_total"]])
-    _check_total(run_id, "eff_gpu_peak_alloc_bytes_max", cols["peak_alloc_bytes"].max(), em["eff_gpu_peak_alloc_bytes_max"])
-    run_metrics = json.loads((run_dir / "metrics.json").read_text())
-    n_items = "n_spans" if kind == "rep" else "eff_n_questions_total"
-    _check_total(run_id, n_items, cols[spec["items"]].sum(), (run_metrics if kind == "rep" else em)[n_items])
-    return {"run_id": run_id, "kind": kind, "cols": cols, "unit": unit, "eff": eff, "gpu_name": eff["hardware"]["gpu_name"]}
+    _check_total(run_id, "eff_prompt_n_tokens_total", cols["prompt_n_tokens"].sum(), em["eff_prompt_n_tokens_total"])
+    assert (cols["reused_n_tokens"] + cols["computed_n_tokens"] == cols["prompt_n_tokens"]).all(), f"{run_id}: reused + computed != prompt tokens in some row"
+    _check_total(run_id, "eff_reused_tokens_total", cols["reused_n_tokens"].sum(), em["eff_reused_tokens_total"])
+    _check_total(run_id, "eff_computed_tokens_total", cols["computed_n_tokens"].sum(), em["eff_computed_tokens_total"])
+    _gpu_peaks(run_id, cols, em, p["gpu_name"], eff)
+    assert layer in eff["layers"], f"{run_id}: layer {layer} not in the run's layers {eff['layers']}"
+    seconds = sum(float(cols[c].sum()) for c in phases if c != "seconds_cleanup" or p["include_cleanup"])
+    if p["include_final_write"]:
+        seconds += float(em["eff_final_write_seconds"])
+    return {"run_id": run_id, "seconds": seconds, "tokens": float(cols["prompt_n_tokens"].sum()),
+            "computed_tokens": float(cols["computed_n_tokens"].sum()), "reused_tokens": float(cols["reused_n_tokens"].sum()),
+            "gpu_bytes": float(em[f"eff_gpu_{p['gpu_memory']}_bytes_max"]), "activation_bytes": float(em[f"eff_rep_bytes_layer_{layer}"])}
 
 
-def assert_gpu(run: dict, gpu_name: str) -> None:
-    assert run["gpu_name"] == gpu_name, f"{run['run_id']}: GPU {run['gpu_name']!r}, expected {gpu_name!r} (timings are not comparable)"
+def load_clef_run(run_id: str, runs_root: Path, expected_task: str, p: dict) -> dict:
+    """A Clef run: ``seconds`` (encode + forward + readout), ``tokens``, ``gpu_bytes``."""
+    metrics, cols, eff = _load_run_files(run_id, runs_root, expected_task, "efficiency_records.npz")
+    em = eff["metrics"]
+    phases = ("seconds_encode", "seconds_forward", "seconds_readout")
+    for c in (*phases, "n_tokens", "peak_alloc_bytes", "peak_reserved_bytes"):
+        assert c in cols, f"{run_id}: no column {c!r} in efficiency_records.npz"
+    assert len(cols["n_tokens"]) == int(em["eff_n_records"]), f"{run_id}: unit counts disagree"
+    for c in phases:
+        _check_total(run_id, f"eff_{c}_total", cols[c].sum(), em[f"eff_{c}_total"])
+    _check_total(run_id, "eff_input_tokens_total", cols["n_tokens"].sum(), em["eff_input_tokens_total"])
+    _gpu_peaks(run_id, cols, em, p["gpu_name"], eff)
+    return {"run_id": run_id, "seconds": float(sum(cols[c].sum() for c in phases)), "tokens": float(cols["n_tokens"].sum()),
+            "gpu_bytes": float(em[f"eff_gpu_{p['gpu_memory']}_bytes_max"])}
 
 
-def linear_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
-    """``(slope, intercept, r2)`` of the least-squares line ``y = intercept + slope * x``."""
-    assert x.shape == y.shape and len(x) >= 2 and x.std() > 0, "tokens need variation to fit a slope"
-    slope, intercept = np.polyfit(x, y, 1)
-    resid = y - (intercept + slope * x)
-    return float(slope), float(intercept), float(1.0 - resid.var() / y.var())
+def load_jev_run(run_id: str, runs_root: Path, expected_task: str) -> dict:
+    """A Jev run (an API model: no ``efficiency.json``, no GPU): ``seconds`` (sum of request seconds), ``tokens`` (API-reported input tokens)."""
+    metrics, cols, _ = _load_run_files(run_id, runs_root, expected_task, "efficiency_records.npz")
+    for c in ("seconds_request", "input_tokens"):
+        assert c in cols, f"{run_id}: no column {c!r} in efficiency_records.npz"
+    assert len(cols["input_tokens"]) == int(metrics["eff_n_requests"]), f"{run_id}: unit counts disagree"
+    _check_total(run_id, "eff_seconds_request_total", cols["seconds_request"].sum(), metrics["eff_seconds_request_total"])
+    _check_total(run_id, "eff_input_tokens_total", cols["input_tokens"].sum(), metrics["eff_input_tokens_total"])
+    return {"run_id": run_id, "seconds": float(cols["seconds_request"].sum()), "tokens": float(cols["input_tokens"].sum())}
 
 
-def analyse_run(run: dict) -> dict:
-    """Flat metrics of one run (see the module docstring for the definitions)."""
-    kind, cols, unit, em = run["kind"], run["cols"], run["unit"], run["eff"]["metrics"]
-    spec = KINDS[kind]
-    cleanup = cols[_role_column(kind, "cleanup")] if _role_column(kind, "cleanup") else np.zeros_like(unit)
-    excl = unit - cleanup
-    compute = cols[_role_column(kind, "compute")]
-    tokens = cols[spec["tokens"]].astype(np.float64)
-    n_items = float(cols[spec["items"]].sum())
-    slope, intercept, r2 = linear_fit(tokens, compute)
-    m = {
-        "n_units": len(unit), "n_items": n_items, "total_hours": float(unit.sum() / 3600),
-        "seconds_unit_mean": float(unit.mean()), "seconds_unit_median": float(np.median(unit)),
-        "seconds_unit_p95": float(np.percentile(unit, PERCENTILE)),
-        "seconds_unit_excl_cleanup_mean": float(excl.mean()), "cleanup_share": float(cleanup.sum() / unit.sum()),
-        "seconds_per_item": float(unit.sum() / n_items), "seconds_per_item_excl_cleanup": float(excl.sum() / n_items),
-        "seconds_compute_mean": float(compute.mean()),
-        "tokens_mean": float(tokens.mean()), "tokens_p95": float(np.percentile(tokens, PERCENTILE)),
-        "compute_tokens_per_second": float(tokens.sum() / compute.sum()),
-        "fit_seconds_per_1k_tokens": slope * 1000, "fit_intercept_seconds": intercept, "fit_r2": r2,
-        "first_over_median": float(unit[0] / np.median(unit)),   # >> 1 means warmup is in the timings
-        "peak_alloc_gib_max": float(cols["peak_alloc_bytes"].max() / GIB), "weights_gib": float(em["eff_gpu_weights_bytes"] / GIB),
-        "peak_activation_gib_max": float(em["eff_gpu_peak_activation_bytes_max"] / GIB),
-    }
-    for c, role in spec["phases"].items():
-        m[f"seconds_{role}_mean"] = float(cols[c].mean())
-    if kind == "rep":
-        m["rep_bytes_per_span_per_layer"] = float(em["eff_rep_bytes_per_span_per_layer"])
-        m["npz_file_gib"] = float(em["eff_npz_file_bytes"] / GIB)
-    return m
+def check_data(run_id: str, runs_root: Path, dataset_config: str, expected: dict) -> None:
+    """The run's config snapshot is of ``dataset_config`` and has every ``expected`` param (split / samples file)."""
+    params = yaml.safe_load((runs_root / run_id / "config.snapshot.yaml").read_text())["params"]
+    assert params["dataset_config"] == dataset_config, f"{run_id}: dataset_config {params['dataset_config']!r}, expected {dataset_config!r}"
+    for k, v in expected.items():
+        assert params[k] == v, f"{run_id}: {k} {params[k]!r}, expected {v!r}"
 
 
-def ratio(per_run: dict[str, dict], spec: dict) -> tuple[str, float]:
-    """``(name, per_run[numerator][metric] / per_run[denominator][metric])`` for one configured comparison."""
-    num, den = per_run[spec["numerator"]][spec["metric"]], per_run[spec["denominator"]][spec["metric"]]
-    assert den > 0, spec
-    return spec["name"], float(num / den)
+def load_task(t: dict, methods: dict, runs_root: Path, p: dict) -> dict:
+    """One task's costs: ``lm``: label -> ``{train, test}`` runs; ``judge``: label -> ``{run}``. Its methods must be exactly
+    ``methods`` (``params.methods``)."""
+    lm_cfg, judge_cfg = t["lm"], t["judges"]
+    assert set(lm_cfg) | set(judge_cfg) == set(methods) and not set(lm_cfg) & set(judge_cfg), (
+        f"{t['name']}: methods {sorted(lm_cfg)} + {sorted(judge_cfg)} != params.methods {sorted(methods)}")
+    lm, judge = {}, {}
+    for label, m in lm_cfg.items():
+        assert m["train_run_id"] != m["test_run_id"], f"{label}: train and test run are the same run"
+        lm[label] = {}
+        for split in ("train", "test"):
+            check_data(m[f"{split}_run_id"], runs_root, t["dataset_config"], {"split": split})
+            lm[label][split] = load_lm_run(m[f"{split}_run_id"], runs_root, t["lm_task"], m["layer"], p)
+    for label, j in judge_cfg.items():
+        check_data(j["run_id"], runs_root, t["dataset_config"], t["judge_params"])
+        if j["judge"] == "clef":
+            run = load_clef_run(j["run_id"], runs_root, j["task"], p)
+        else:
+            assert j["judge"] == "jev", j["judge"]
+            run = load_jev_run(j["run_id"], runs_root, j["task"])
+        judge[label] = {"judge": j["judge"], "run": run}
+    return {"lm": lm, "judge": judge}
+
+
+# ------------------------------------------------------------------------------ aggregation
+def aggregate(tasks: dict[str, dict], methods: dict) -> dict:
+    """``{figure: {task or "total": {method: {segment: value}}}}`` in seconds / tokens / bytes. Every task has exactly the
+    methods ``methods`` (``params.methods``: label -> display name, in colour / legend order). Memory has no entry for a method without GPU memory (Jev)."""
+    out: dict = {f: {} for f in FIGURES}
+    for name, t in tasks.items():
+        time, tokens, memory = {}, {}, {}
+        for label in methods:
+            if label in t["lm"]:
+                r = t["lm"][label]
+                time[label] = {"train_activations": r["train"]["seconds"], "test_activations": r["test"]["seconds"]}
+                tokens[label] = {"train_activations": r["train"]["computed_tokens"], "test_activations": r["test"]["computed_tokens"]}
+                memory[label] = {"model": max(r["train"]["gpu_bytes"], r["test"]["gpu_bytes"]),
+                                 "activations": r["train"]["activation_bytes"] + r["test"]["activation_bytes"]}
+            else:
+                run = t["judge"][label]["run"]
+                time[label], tokens[label] = {JUDGE_SEGMENT: run["seconds"]}, {JUDGE_SEGMENT: run["tokens"]}
+                if "gpu_bytes" in run:
+                    memory[label] = {JUDGE_SEGMENT: run["gpu_bytes"]}
+        out["compute_time"][name], out["token_usage"][name], out["memory_usage"][name] = time, tokens, memory
+    for fig, per_task in out.items():
+        total: dict = {}
+        n_tasks = len(per_task)
+        for name, by_method in per_task.items():
+            for label, segs in by_method.items():
+                for seg, v in segs.items():
+                    total.setdefault(label, {}).setdefault(seg, [])
+                    total[label][seg].append((name, v))
+        # memory's model segment is the max over tasks (runs were sequential), everything else adds
+        out[fig]["total"] = {label: {seg: (max(v for _, v in vs) if (fig == "memory_usage" and seg in ("model", JUDGE_SEGMENT)) else sum(v for _, v in vs))
+                                     for seg, vs in segs.items()} for label, segs in total.items()}
+        for label, segs in total.items():
+            assert all(len(vs) == n_tasks for vs in segs.values()), f"{fig}/{label}: a segment missing from a task"
+    return out
 
 
 # ------------------------------------------------------------------------------ figures
-def plot_phases(per_run: dict[str, dict], out_dir: Path) -> None:
-    """Mean seconds per unit by phase role, one stacked bar per run."""
-    labels = list(per_run)
-    fig, ax = plt.subplots(figsize=(max(4.5, 0.9 * len(labels) + 1.5), 4.2), constrained_layout=True)
-    bottom = np.zeros(len(labels))
-    for role in ROLES:
-        vals = np.array([per_run[lb].get(f"seconds_{role}_mean", 0.0) for lb in labels])
-        ax.bar(labels, vals, bottom=bottom, color=ROLE_COLORS[role], label=role)
-        bottom += vals
-    ax.set(ylabel="mean seconds per judged row", ylim=(0, 1.1 * bottom.max()))
-    ax.tick_params(axis="x", rotation=60)
-    for t in ax.get_xticklabels():
-        t.set_ha("right")
-    ax.legend(fontsize=9, framealpha=0.9)
-    fig.savefig(out_dir / "phases.png", dpi=200)
+def method_colors(methods: dict, white_frac: float) -> dict[str, tuple]:
+    """Tab10 colour (mixed with white) by position in ``params.methods`` (the calibration figures' order, so the same colours)."""
+    assert len(methods) <= len(cr.TAB10), "more methods than tab10 colours"
+    return {label: cr.pastel(cr.TAB10[i], white_frac) for i, label in enumerate(methods)}
+
+
+def plot_bars(by_method: dict, methods: dict, fig_spec: dict, p: dict, out: Path) -> None:
+    """One stacked bar per method (label-free x axis); a probe's segments are hatched (``fig_spec.segments``), a judge's is solid."""
+    colors = method_colors(methods, p["white_frac"])
+    hatch = {s["key"]: s["hatch"] for s in fig_spec["segments"]}
+    cr.set_style(p["font"])
+    plt.rcParams["hatch.linewidth"] = p["hatch_linewidth"]
+    fig, ax = plt.subplots(figsize=tuple(p["figsize"]), constrained_layout=True)
+    present = [m for m in methods if m in by_method]
+    for i, label in enumerate(present):
+        segs = by_method[label]
+        keys = [JUDGE_SEGMENT] if JUDGE_SEGMENT in segs else [s["key"] for s in fig_spec["segments"]]
+        assert set(segs) == set(keys), f"{label}: segments {sorted(segs)} != {keys}"
+        bottom = 0.0
+        for k in keys:
+            h = segs[k] / fig_spec["divisor"]
+            ax.bar(i, h, bottom=bottom, width=p["bar_width"], color=colors[label], edgecolor=p["edge_color"], linewidth=p["edge_linewidth"],
+                   hatch=hatch.get(k, ""))
+            bottom += h
+    ax.set_xticks([])
+    ax.set_xlim(-0.6, len(present) - 0.4)
+    ax.set_ylabel(fig_spec["ylabel"])
+    ax.grid(axis="y", alpha=0.25, linewidth=0.4)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    fig.savefig(out)
     plt.close(fig)
 
 
-def plot_scaling(runs: dict[str, dict], per_run: dict[str, dict], out_dir: Path) -> None:
-    """Compute seconds against input tokens per run, with the least-squares line."""
-    labels = list(runs)
-    ncol = min(3, len(labels))
-    nrow = -(-len(labels) // ncol)
-    fig, axes = plt.subplots(nrow, ncol, figsize=(3.6 * ncol, 3.0 * nrow), constrained_layout=True, squeeze=False)
-    for ax in axes.flat[len(labels):]:
-        ax.set_visible(False)
-    for ax, lb in zip(axes.flat, labels):
-        run, m = runs[lb], per_run[lb]
-        spec = KINDS[run["kind"]]
-        x, y = run["cols"][spec["tokens"]], run["cols"][_role_column(run["kind"], "compute")]
-        ax.scatter(x, y, s=3, alpha=0.3, color=ROLE_COLORS["compute"], linewidths=0)
-        xs = np.array([x.min(), x.max()])
-        ax.plot(xs, m["fit_intercept_seconds"] + m["fit_seconds_per_1k_tokens"] / 1000 * xs, color="k", lw=1)
-        ax.set(title=f"{lb}\n{m['fit_seconds_per_1k_tokens']:.2f} s / 1k tokens, $R^2$ = {m['fit_r2']:.2f}", xlabel="input tokens",
-               ylabel="compute seconds")
-        ax.title.set_fontsize(8)
-        ax.grid(alpha=0.25, linewidth=0.4)
-    fig.savefig(out_dir / "scaling.png", dpi=200)
-    plt.close(fig)
-
-
-def plot_memory(per_run: dict[str, dict], out_dir: Path) -> None:
-    """Weights and peak activation memory (GiB) per run; their sum is the peak allocation."""
-    labels = list(per_run)
-    fig, ax = plt.subplots(figsize=(max(4.5, 0.9 * len(labels) + 1.5), 4.2), constrained_layout=True)
-    w = np.array([per_run[lb]["weights_gib"] for lb in labels])
-    a = np.array([per_run[lb]["peak_activation_gib_max"] for lb in labels])
-    ax.bar(labels, w, color="#999999", label="weights")
-    ax.bar(labels, a, bottom=w, color=ROLE_COLORS["compute"], label="peak activations (max over rows)")
-    ax.set(ylabel="GiB")
-    ax.tick_params(axis="x", rotation=60)
-    for t in ax.get_xticklabels():
-        t.set_ha("right")
-    ax.legend(fontsize=9, framealpha=0.9)
-    fig.savefig(out_dir / "memory.png", dpi=200)
+def plot_legend(present: list[str], methods: dict, fig_spec: dict, p: dict, out: Path) -> None:
+    """The legend alone: the methods' colours, then (if any method is hatched) the hatch key."""
+    colors = method_colors(methods, p["white_frac"])
+    cr.set_style(p["font"])
+    plt.rcParams["hatch.linewidth"] = p["hatch_linewidth"]
+    handles = [Patch(facecolor=colors[m], edgecolor=p["edge_color"], linewidth=p["edge_linewidth"], label=methods[m]) for m in present]
+    handles += [Patch(facecolor=p["legend_hatch_face"], edgecolor=p["edge_color"], linewidth=p["edge_linewidth"], hatch=s["hatch"], label=s["label"])
+                for s in fig_spec["segments"]]
+    fig = plt.figure(figsize=(1, 1))
+    leg = fig.legend(handles=handles, loc="center", ncol=p["legend_ncol"], frameon=False, fontsize=p["legend_fontsize"])
+    fig.canvas.draw()
+    fig.savefig(out, bbox_inches=leg.get_window_extent().transformed(fig.dpi_scale_trans.inverted()).padded(0.02))
     plt.close(fig)
 
 
 # ----------------------------------------------------------------------------- main
 def run(cfg: dict, runs_root: Path) -> dict:
     p = cfg["params"]
+    assert p["gpu_memory"] in GPU_MEMORY, p["gpu_memory"]
+    assert set(p["figures"]) == set(FIGURES), sorted(p["figures"])
     out = runs_root / cfg["id"]
     fig_dir = FIGURES_DIR / cfg["id"]
     out.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
-    labels = [s["label"] for s in p["runs"]]
-    assert len(set(labels)) == len(labels), f"duplicate run labels {labels}"
-    runs, per_run = {}, {}
-    for spec in p["runs"]:
-        r = load_run(spec["run_id"], runs_root, spec["kind"])
-        assert_gpu(r, p["gpu_name"])
-        runs[spec["label"]], per_run[spec["label"]] = r, analyse_run(r)
-        print(f"{spec['label']}: {r['run_id']} units={per_run[spec['label']]['n_units']} "
-              f"s/unit={per_run[spec['label']]['seconds_unit_mean']:.3f} cleanup_share={per_run[spec['label']]['cleanup_share']:.2f}")
+    names = [t["name"] for t in p["tasks"]]
+    assert len(set(names)) == len(names) and names, names
+    methods = p["methods"]
+    tasks = {t["name"]: load_task(t, methods, runs_root, p) for t in p["tasks"]}
+    agg = aggregate(tasks, methods)
 
-    metrics = {f"{lb}_{k}": v for lb, m in per_run.items() for k, v in m.items()}
-    for spec in p["comparisons"]:
-        name, value = ratio(per_run, spec)
-        metrics[f"ratio_{name}"] = value
-    plot_phases(per_run, fig_dir)
-    plot_scaling(runs, per_run, fig_dir)
-    plot_memory(per_run, fig_dir)
+    metrics: dict[str, float] = {}
+    for fig_name, per_task in agg.items():
+        spec = p["figures"][fig_name]
+        for scope, by_method in per_task.items():
+            for label, segs in by_method.items():
+                for seg, v in segs.items():
+                    metrics[f"{scope}_{fig_name}_{label}_{seg}"] = float(v)
+                metrics[f"{scope}_{fig_name}_{label}_sum"] = float(sum(segs.values()))
+        total = per_task["total"]
+        plot_bars(total, methods, spec, p, fig_dir / f"{fig_name}.pdf")
+        plot_legend([m for m in methods if m in total], methods, spec, p, fig_dir / f"{fig_name}_legend.pdf")
+    for label in p["methods"]:
+        if label in tasks[names[0]]["lm"]:
+            for split in ("train", "test"):
+                per_task = {n: tasks[n]["lm"][label][split]["reused_tokens"] for n in names}
+                metrics.update({f"{n}_reused_tokens_{label}_{split}": v for n, v in per_task.items()})
+                metrics[f"total_reused_tokens_{label}_{split}"] = sum(per_task.values())
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures

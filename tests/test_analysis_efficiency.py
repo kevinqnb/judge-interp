@@ -1,13 +1,20 @@
-"""Unit tests for analysis/efficiency.py on hand-built runs.
+"""Unit tests for analysis/efficiency.py on a hand-built fixture of two tasks (entity, relation).
 
-Representation run "rep" (3 prompts, per-prompt seconds):
-    prompt  0.1 0.1 0.1   trace 1 2 3   readout 0.01 x3   cleanup 0.5 x3   tokens 100 200 300   spans 2 3 4
-    -> per-prompt total 1.61 2.61 3.61 (sum 7.83, mean 2.61); excluding cleanup 1.11 2.11 3.11 (sum 6.33)
-    -> cleanup share 1.5 / 7.83; seconds per span 7.83 / 9 (6.33 / 9 without cleanup)
-    -> trace = tokens / 100 exactly: slope 10 s per 1k tokens, intercept 0, R^2 1; compute tokens/s = 600 / 6
-Clef run "clef" (2 records):
-    encode 0.1 0.1   forward 1 3   readout 0.01 x2   tokens 100 300   questions 2 2
-    -> per-record total 1.11 3.11 (mean 2.11); seconds per question 4.22 / 4; forward = tokens / 100 as well
+Methods: language models ``qwen`` (layer 2) and ``llama`` (layer 3), judges ``clef`` and ``jev``. Each task has a scale ``k``
+(entity 1, relation 10). Every number below is worked by hand.
+
+LM run (2 prompts): prompt 0.1 x2, trace ``[1, 2] * k`` (train) / ``[3, 4] * k`` (test), readout 0.01 x2, cleanup 0.5 x2.
+    seconds without cleanup: train 0.2 + 3k + 0.02, test 0.2 + 7k + 0.02; cleanup adds 1.0 per run.
+    prompt tokens train 30k, test 70k, of which computed = tokens // 10 (3k, 7k) and reused the rest (27k, 63k).
+    GPU peak alloc: train 20 GB, test 24 GB (reserved +2); probed layer: 1 GB per run.
+Clef run (2 records): encode 0.1 x2, forward ``[5, 5] * k``, readout 0.01 x2 -> 10k + 0.22 s; tokens 40k; GPU peak alloc 30 GB.
+Jev run (2 requests): seconds_request ``[1, 2] * k`` -> 3k s; input tokens 50k.
+
+Totals over k = 1 and k = 10 (sum of k = 11):
+    qwen time:  train 0.22*2 + 3*11 = 33.44, test 0.22*2 + 7*11 = 77.44
+    tokens:     computed train 33, test 77 (the bars); reused train 297, test 693 (metrics only) (qwen and llama alike)
+    memory:     model max(20, 24) = 24 GB, activations 4 x 1 GB = 4 GB; clef 30 GB; jev none
+    clef time 10*11 + 0.22*2 = 110.44, jev time 33
 """
 from __future__ import annotations
 
@@ -23,138 +30,192 @@ spec = importlib.util.spec_from_file_location("analysis_efficiency", Path(__file
 ef = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ef)
 
+GB = 10**9
 GPU = "NVIDIA L40S"
-GIB = 2**30
+LAYERS = {"qwen": 2, "llama": 3}
+KS = {"entity": 1, "relation": 10}
+DATASET = {"entity": "main.py", "relation": "line.py"}
+LM_TASK = {"entity": "entity_detection", "relation": "relation_detection"}
+JUDGE_PARAMS = {"entity": {"split": "test"}, "relation": {"samples_path": "subsets.json"}}
 
 
-def rep_columns():
-    return {"seconds_prompt": np.full(3, 0.1), "seconds_trace": np.array([1.0, 2.0, 3.0]), "seconds_readout": np.full(3, 0.01),
-            "seconds_cleanup": np.full(3, 0.5), "prompt_n_tokens": np.array([100, 200, 300]), "n_spans": np.array([2, 3, 4]),
-            "peak_alloc_bytes": np.array([10, 20, 30]) * GIB, "peak_reserved_bytes": np.array([11, 21, 31]) * GIB}
+def write_json(path: Path, obj) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj))
 
 
-def clef_columns():
-    return {"seconds_encode": np.full(2, 0.1), "seconds_forward": np.array([1.0, 3.0]), "seconds_readout": np.full(2, 0.01),
-            "n_tokens": np.array([100, 300]), "n_questions": np.array([2, 2]),
-            "peak_alloc_bytes": np.array([12, 24]) * GIB, "peak_reserved_bytes": np.array([13, 25]) * GIB}
+def write_snapshot(root: Path, run_id: str, task: str, **params) -> None:
+    (root / run_id).mkdir(parents=True, exist_ok=True)
+    (root / run_id / "config.snapshot.yaml").write_text(yaml.safe_dump({"params": {"dataset_config": DATASET[task], **params}}))
 
 
-def write_run(root: Path, run_id: str, kind: str, cols: dict, gpu: str = GPU, status: str = "success", bump: dict | None = None):
-    """A run directory with the files efficiency.py reads; ``bump`` perturbs a json total to test the cross-check."""
+def write_lm_run(root: Path, run_id: str, task: str, split: str, trace: list, tokens: list, alloc_gb: int, layer: int, resumed: int = 0,
+                 bump: float = 1.0) -> None:
+    cols = {"seconds_prompt": np.full(2, 0.1), "seconds_trace": np.array(trace, float), "seconds_readout": np.full(2, 0.01),
+            "seconds_cleanup": np.full(2, 0.5), "prompt_n_tokens": np.array(tokens), "computed_n_tokens": np.array(tokens) // 10,
+            "reused_n_tokens": np.array(tokens) - np.array(tokens) // 10, "peak_alloc_bytes": np.full(2, alloc_gb * GB),
+            "peak_reserved_bytes": np.full(2, (alloc_gb + 2) * GB)}
     d = root / run_id
-    (d / "artifacts").mkdir(parents=True)
-    task = {"rep": "relation_detection", "clef": "clef_entity_row"}[kind]
-    (d / "run.json").write_text(json.dumps({"status": status, "task": task}))
-    if kind == "rep":
-        n = len(cols["seconds_trace"])
-        m = {"eff_n_prompts": n, "eff_n_shards_resumed": 0, "eff_seconds_prompt_total": cols["seconds_prompt"].sum(),
-             "eff_seconds_trace_total": cols["seconds_trace"].sum(), "eff_seconds_readout_total": cols["seconds_readout"].sum(),
-             "eff_seconds_cleanup_total": cols["seconds_cleanup"].sum(),
-             "eff_seconds_per_prompt_total": sum(cols[k].sum() for k in ("seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup")),
-             "eff_prompt_n_tokens_total": cols["prompt_n_tokens"].sum(), "eff_gpu_peak_alloc_bytes_max": cols["peak_alloc_bytes"].max(),
-             "eff_gpu_weights_bytes": 8 * GIB, "eff_gpu_peak_activation_bytes_max": cols["peak_alloc_bytes"].max() - 8 * GIB,
-             "eff_rep_bytes_per_span_per_layer": 16, "eff_npz_file_bytes": 4 * GIB}
-        metrics = {"n_prompts": n, "n_spans": int(cols["n_spans"].sum())}
-        np.savez(d / "artifacts" / "efficiency_rows.npz", **cols)
-        extra = {"shard_gpu_name": gpu}
-    else:
-        n = len(cols["seconds_forward"])
-        m = {"eff_n_records": n, "eff_seconds_encode_total": cols["seconds_encode"].sum(), "eff_seconds_forward_total": cols["seconds_forward"].sum(),
-             "eff_seconds_readout_total": cols["seconds_readout"].sum(),
-             "eff_seconds_per_record_total": sum(cols[k].sum() for k in ("seconds_encode", "seconds_forward", "seconds_readout")),
-             "eff_input_tokens_total": cols["n_tokens"].sum(), "eff_n_questions_total": cols["n_questions"].sum(),
-             "eff_gpu_peak_alloc_bytes_max": cols["peak_alloc_bytes"].max(), "eff_gpu_weights_bytes": 8 * GIB,
-             "eff_gpu_peak_activation_bytes_max": cols["peak_alloc_bytes"].max() - 8 * GIB}
-        metrics = {"n_predictions": n}
-        np.savez(d / "artifacts" / "efficiency_records.npz", **cols)
-        extra = {}
-    m = {k: float(v) for k, v in m.items()}
-    m.update({k: float(v) for k, v in (bump or {}).items()})
-    (d / "artifacts" / "efficiency.json").write_text(json.dumps({"hardware": {"gpu_name": gpu}, "metrics": m, **extra}))
-    (d / "metrics.json").write_text(json.dumps(metrics))
+    write_json(d / "run.json", {"status": "success", "task": LM_TASK[task]})
+    write_json(d / "metrics.json", {"n_prompts": 2})
+    write_snapshot(root, run_id, task, split=split)
+    em = {"eff_n_prompts": 2, "eff_n_shards_resumed": resumed, "eff_prompt_n_tokens_total": float(cols["prompt_n_tokens"].sum()) * bump,
+          "eff_reused_tokens_total": float(cols["reused_n_tokens"].sum()), "eff_computed_tokens_total": float(cols["computed_n_tokens"].sum()),
+          "eff_gpu_peak_alloc_bytes_max": alloc_gb * GB, "eff_gpu_peak_reserved_bytes_max": (alloc_gb + 2) * GB,
+          "eff_final_write_seconds": 7.0, f"eff_rep_bytes_layer_{layer}": GB}
+    em.update({f"eff_{c}_total": float(cols[c].sum()) for c in ("seconds_prompt", "seconds_trace", "seconds_readout", "seconds_cleanup")})
+    write_json(d / "artifacts" / "efficiency.json", {"hardware": {"gpu_name": GPU}, "layers": [0, layer], "metrics": em})
+    np.savez(d / "artifacts" / "efficiency_rows.npz", **cols)
+
+
+def write_clef_run(root: Path, run_id: str, task: str, k: int) -> None:
+    cols = {"seconds_encode": np.full(2, 0.1), "seconds_forward": np.array([5.0, 5.0]) * k, "seconds_readout": np.full(2, 0.01),
+            "n_tokens": np.array([15, 25]) * k, "n_questions": np.array([1, 1]), "peak_alloc_bytes": np.full(2, 30 * GB),
+            "peak_reserved_bytes": np.full(2, 32 * GB)}
+    d = root / run_id
+    write_json(d / "run.json", {"status": "success", "task": f"clef_{task}"})
+    write_json(d / "metrics.json", {})
+    write_snapshot(root, run_id, task, **JUDGE_PARAMS[task])
+    em = {"eff_n_records": 2, "eff_input_tokens_total": float(cols["n_tokens"].sum()), "eff_gpu_peak_alloc_bytes_max": 30 * GB,
+          "eff_gpu_peak_reserved_bytes_max": 32 * GB}
+    em.update({f"eff_{c}_total": float(cols[c].sum()) for c in ("seconds_encode", "seconds_forward", "seconds_readout")})
+    write_json(d / "artifacts" / "efficiency.json", {"hardware": {"gpu_name": GPU}, "metrics": em})
+    np.savez(d / "artifacts" / "efficiency_records.npz", **cols)
+
+
+def write_jev_run(root: Path, run_id: str, task: str, k: int) -> None:
+    cols = {"seconds_request": np.array([1.0, 2.0]) * k, "input_tokens": np.array([20, 30]) * k, "output_tokens": np.array([1, 1]),
+            "n_questions": np.array([1, 1])}
+    d = root / run_id
+    write_json(d / "run.json", {"status": "success", "task": f"jev_{task}"})
+    write_json(d / "metrics.json", {"eff_n_requests": 2, "eff_seconds_request_total": float(cols["seconds_request"].sum()),
+                                    "eff_input_tokens_total": float(cols["input_tokens"].sum())})
+    write_snapshot(root, run_id, task, **JUDGE_PARAMS[task])
+    (d / "artifacts").mkdir(parents=True, exist_ok=True)
+    np.savez(d / "artifacts" / "efficiency_records.npz", **cols)
+
+
+def make_task(root: Path, task: str) -> dict:
+    """Every run of one task, and its entry of ``params.tasks``."""
+    k = KS[task]
+    lm = {}
+    for label, layer in LAYERS.items():
+        tr, te = f"{task}-{label}-train", f"{task}-{label}-test"
+        write_lm_run(root, tr, task, "train", [1 * k, 2 * k], [10 * k, 20 * k], 20, layer)
+        write_lm_run(root, te, task, "test", [3 * k, 4 * k], [30 * k, 40 * k], 24, layer)
+        lm[label] = {"train_run_id": tr, "test_run_id": te, "layer": layer}
+    write_clef_run(root, f"{task}-clef", task, k)
+    write_jev_run(root, f"{task}-jev", task, k)
+    return {"name": task, "dataset_config": DATASET[task], "lm_task": LM_TASK[task], "lm": lm, "judge_params": JUDGE_PARAMS[task],
+            "judges": {"clef": {"judge": "clef", "task": f"clef_{task}", "run_id": f"{task}-clef"},
+                       "jev": {"judge": "jev", "task": f"jev_{task}", "run_id": f"{task}-jev"}}}
+
+
+def cfg_params(root: Path, **over) -> dict:
+    segs = lambda *keys: [{"key": k, "label": k, "hatch": h} for k, h in keys]
+    p = {"methods": {"qwen": "Qwen", "llama": "Llama", "clef": "Clef", "jev": "Jev"}, "tasks": [make_task(root, t) for t in KS],
+         "gpu_name": GPU, "include_cleanup": False, "include_final_write": False, "gpu_memory": "peak_alloc",
+         "figures": {"compute_time": {"ylabel": "Compute time (s)", "divisor": 1, "segments": segs(("train_activations", "////"), ("test_activations", "...."))},
+                     "token_usage": {"ylabel": "Input tokens (millions)", "divisor": 10**6, "segments": segs(("train_activations", "////"), ("test_activations", "...."))},
+                     "memory_usage": {"ylabel": "Memory (GB)", "divisor": GB, "segments": segs(("model", "////"), ("activations", "...."))}},
+         "font": "Nimbus Roman", "white_frac": 0.35, "figsize": [3.0, 2.6], "bar_width": 0.7, "edge_color": "0.25", "edge_linewidth": 0.6,
+         "hatch_linewidth": 0.6, "legend_ncol": 3, "legend_fontsize": 8, "legend_hatch_face": "0.9"}
+    p.update(over)
+    return p
 
 
 @pytest.fixture
-def runs(tmp_path):
-    write_run(tmp_path, "rep", "rep", rep_columns())
-    write_run(tmp_path, "clef", "clef", clef_columns())
-    return tmp_path
+def world(tmp_path):
+    return tmp_path / "runs"
 
 
-def test_rep_hand_worked(runs):
-    m = ef.analyse_run(ef.load_run("rep", runs, "rep"))
-    assert m["n_units"] == 3 and m["seconds_unit_mean"] == pytest.approx(2.61) and m["seconds_unit_median"] == pytest.approx(2.61)
-    assert m["seconds_unit_excl_cleanup_mean"] == pytest.approx(2.11)
-    assert m["cleanup_share"] == pytest.approx(1.5 / 7.83)
-    assert m["seconds_per_item"] == pytest.approx(7.83 / 9) and m["seconds_per_item_excl_cleanup"] == pytest.approx(6.33 / 9)
-    assert m["seconds_compute_mean"] == pytest.approx(2.0)
-    assert m["tokens_mean"] == 200 and m["compute_tokens_per_second"] == pytest.approx(100.0)
-    assert m["fit_seconds_per_1k_tokens"] == pytest.approx(10.0) and m["fit_intercept_seconds"] == pytest.approx(0.0, abs=1e-9)
-    assert m["fit_r2"] == pytest.approx(1.0)
-    assert m["first_over_median"] == pytest.approx(1.61 / 2.61)
-    assert m["peak_alloc_gib_max"] == pytest.approx(30.0) and m["weights_gib"] == pytest.approx(8.0)
-    assert m["peak_activation_gib_max"] == pytest.approx(22.0) and m["npz_file_gib"] == pytest.approx(4.0)
-    assert m["total_hours"] == pytest.approx(7.83 / 3600)
+def load_all(root: Path, p: dict) -> dict:
+    return ef.aggregate({t["name"]: ef.load_task(t, p["methods"], root, p) for t in p["tasks"]}, p["methods"])
 
 
-def test_clef_hand_worked_and_has_no_cleanup(runs):
-    m = ef.analyse_run(ef.load_run("clef", runs, "clef"))
-    assert m["n_units"] == 2 and m["seconds_unit_mean"] == pytest.approx(2.11)
-    assert m["seconds_unit_excl_cleanup_mean"] == m["seconds_unit_mean"] and m["cleanup_share"] == 0.0
-    assert m["seconds_per_item"] == pytest.approx(4.22 / 4)
-    assert m["fit_seconds_per_1k_tokens"] == pytest.approx(10.0) and m["fit_r2"] == pytest.approx(1.0)
-    assert "npz_file_gib" not in m
+def test_totals_by_hand(world):
+    agg = load_all(world, cfg_params(world))
+    t = agg["compute_time"]["total"]
+    assert t["qwen"] == pytest.approx({"train_activations": 33.44, "test_activations": 77.44})
+    assert t["llama"] == pytest.approx(t["qwen"])
+    assert t["clef"] == pytest.approx({"decisions": 110.44})
+    assert t["jev"] == pytest.approx({"decisions": 33.0})
+    assert agg["compute_time"]["entity"]["qwen"]["train_activations"] == pytest.approx(3.22)
+    assert agg["compute_time"]["relation"]["qwen"]["test_activations"] == pytest.approx(70.22)
+    tok = agg["token_usage"]["total"]
+    assert tok["qwen"] == {"train_activations": 33.0, "test_activations": 77.0}   # computed = tokens // 10
+    assert tok["clef"] == {"decisions": 440.0} and tok["jev"] == {"decisions": 550.0}
+    mem = agg["memory_usage"]["total"]
+    assert mem["qwen"] == {"model": 24.0 * GB, "activations": 4.0 * GB}
+    assert mem["clef"] == {"decisions": 30.0 * GB}
+    assert "jev" not in mem
 
 
-def test_fit_known_answer_and_degenerate_tokens():
-    slope, intercept, r2 = ef.linear_fit(np.array([1.0, 2.0, 3.0]), np.array([3.0, 5.0, 7.0]))
-    assert (slope, intercept, r2) == (pytest.approx(2.0), pytest.approx(1.0), pytest.approx(1.0))
-    with pytest.raises(AssertionError, match="variation"):
-        ef.linear_fit(np.array([5.0, 5.0]), np.array([1.0, 2.0]))
+def test_definition_switches_move_the_bars(world):
+    p = cfg_params(world)
+    base = load_all(world, p)["compute_time"]["total"]["qwen"]
+    cleanup = load_all(world, {**p, "include_cleanup": True})["compute_time"]["total"]["qwen"]
+    assert cleanup["train_activations"] - base["train_activations"] == pytest.approx(2.0)   # 1.0 s per run, two tasks
+    write = load_all(world, {**p, "include_final_write": True})["compute_time"]["total"]["qwen"]
+    assert write["test_activations"] - base["test_activations"] == pytest.approx(14.0)
+    reserved = load_all(world, {**p, "gpu_memory": "peak_reserved"})["memory_usage"]["total"]
+    assert reserved["qwen"]["model"] == 26.0 * GB and reserved["clef"]["decisions"] == 32.0 * GB
 
 
-def test_a_json_total_that_disagrees_with_the_unit_arrays_is_refused(tmp_path):
-    write_run(tmp_path, "bad", "rep", rep_columns(), bump={"eff_seconds_trace_total": 7.0})
-    with pytest.raises(AssertionError, match="eff_seconds_trace_total"):
-        ef.load_run("bad", tmp_path, "rep")
-
-
-def test_a_failed_run_or_wrong_kind_is_refused(tmp_path):
-    write_run(tmp_path, "failed", "rep", rep_columns(), status="failed")
-    with pytest.raises(AssertionError, match="status"):
-        ef.load_run("failed", tmp_path, "rep")
-    write_run(tmp_path, "rep", "rep", rep_columns())
-    with pytest.raises(AssertionError, match="task"):
-        ef.load_run("rep", tmp_path, "clef")
-
-
-def test_resumed_shards_are_refused(tmp_path):
-    write_run(tmp_path, "r", "rep", rep_columns(), bump={"eff_n_shards_resumed": 2})
-    with pytest.raises(AssertionError, match="resumed"):
-        ef.load_run("r", tmp_path, "rep")
-
-
-def test_mixed_gpus_are_refused(runs, tmp_path):
-    write_run(tmp_path / "x", "a100", "rep", rep_columns(), gpu="NVIDIA A100")
+def test_gates_fail_loud(world):
+    p = cfg_params(world)
     with pytest.raises(AssertionError, match="GPU"):
-        ef.assert_gpu(ef.load_run("a100", tmp_path / "x", "rep"), GPU)
-    ef.assert_gpu(ef.load_run("rep", runs, "rep"), GPU)
+        load_all(world, {**p, "gpu_name": "NVIDIA A100"})
+    write_lm_run(world, "entity-qwen-train", "entity", "train", [1, 2], [10, 20], 20, 2, resumed=1)
+    with pytest.raises(AssertionError, match="resumed"):
+        load_all(world, p)
+    write_lm_run(world, "entity-qwen-train", "entity", "train", [1, 2], [10, 20], 20, 2, bump=1.5)
+    with pytest.raises(AssertionError, match="eff_prompt_n_tokens_total"):
+        load_all(world, p)
+    write_lm_run(world, "entity-qwen-train", "relation", "train", [1, 2], [10, 20], 20, 2)
+    with pytest.raises(AssertionError, match="task|dataset_config"):
+        load_all(world, p)
+    write_lm_run(world, "entity-qwen-train", "entity", "train", [1, 2], [10, 20], 20, 2)
+    cols = dict(np.load(world / "entity-qwen-train" / "artifacts" / "efficiency_rows.npz"))
+    cols["reused_n_tokens"] = cols["reused_n_tokens"] + 1   # reused + computed no longer the prompt length
+    np.savez(world / "entity-qwen-train" / "artifacts" / "efficiency_rows.npz", **cols)
+    with pytest.raises(AssertionError, match="reused \\+ computed"):
+        load_all(world, p)
+    del cols["reused_n_tokens"]
+    np.savez(world / "entity-qwen-train" / "artifacts" / "efficiency_rows.npz", **cols)
+    with pytest.raises(AssertionError, match="reused_n_tokens"):
+        load_all(world, p)
 
 
-def test_ratio_of_a_metric_between_two_labelled_runs():
-    per = {"a": {"seconds_unit_mean": 6.0}, "b": {"seconds_unit_mean": 2.0}}
-    assert ef.ratio(per, {"name": "a_over_b", "numerator": "a", "denominator": "b", "metric": "seconds_unit_mean"}) == ("a_over_b", 3.0)
-    with pytest.raises(KeyError):
-        ef.ratio(per, {"name": "x", "numerator": "a", "denominator": "c", "metric": "seconds_unit_mean"})
+def test_data_gate_refuses_the_wrong_split_or_file(world):
+    p = cfg_params(world)
+    write_snapshot(world, "entity-qwen-test", "entity", split="train")   # a test run that judged the train split
+    with pytest.raises(AssertionError, match="split"):
+        load_all(world, p)
+    write_snapshot(world, "entity-qwen-test", "entity", split="test")
+    write_snapshot(world, "relation-jev", "relation", samples_path="conditional-test-parents.json")
+    with pytest.raises(AssertionError, match="samples_path"):
+        load_all(world, p)
 
 
-def test_run_end_to_end_writes_flat_scalar_metrics(runs, tmp_path, monkeypatch):
+def test_methods_must_match_the_config(world):
+    p = cfg_params(world)
+    del p["tasks"][1]["lm"]["llama"]
+    with pytest.raises(AssertionError, match="params.methods"):
+        load_all(world, p)
+
+
+def test_run_writes_metrics_and_figures(world, tmp_path, monkeypatch):
     monkeypatch.setattr(ef, "FIGURES_DIR", tmp_path / "figures")
-    cfg = {"id": "eff-test", "seed": 0, "params": {
-        "gpu_name": GPU, "runs": [{"label": "r", "kind": "rep", "run_id": "rep"}, {"label": "c", "kind": "clef", "run_id": "clef"}],
-        "comparisons": [{"name": "c_over_r", "numerator": "c", "denominator": "r", "metric": "seconds_unit_mean"}]}}
-    m = ef.run(cfg, runs)
-    assert m["r_seconds_unit_mean"] == pytest.approx(2.61) and m["ratio_c_over_r"] == pytest.approx(2.11 / 2.61)
-    assert all(isinstance(v, (int, float)) for v in m.values())
-    assert json.loads((runs / "eff-test" / "metrics.json").read_text()) == m
-    assert (tmp_path / "figures" / "eff-test" / "phases.png").exists()
+    m = ef.run({"id": "eff", "params": cfg_params(world)}, world)
+    figs = tmp_path / "figures" / "eff"
+    for name in ef.FIGURES:
+        assert (figs / f"{name}.pdf").stat().st_size > 0 and (figs / f"{name}_legend.pdf").stat().st_size > 0
+    assert m["total_compute_time_qwen_sum"] == pytest.approx(33.44 + 77.44)
+    assert not any("probe" in k for k in m)
+    assert m["relation_token_usage_jev_decisions"] == 500.0
+    assert m["total_token_usage_qwen_sum"] == 110.0   # computed only
+    assert m["total_reused_tokens_qwen_train"] == 297.0 and m["total_reused_tokens_qwen_test"] == 693.0   # computed + reused = the full prompts
+    assert m["total_memory_usage_qwen_sum"] == 28.0 * GB
+    assert "total_memory_usage_jev_decisions" not in m
+    assert json.loads((world / "eff" / "metrics.json").read_text()) == m
