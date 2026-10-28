@@ -7,7 +7,7 @@ The unit is a subset row: 2 to m of a full-length sample's fields (m = 2-5), lab
 (the label rule, ``vrdu_common.matches_keys`` against the document's line items). Rows are NOT minimal pairs and
 not balanced: a clean parent and its invalid twin share subsets, a subset of an invalid parent can still be valid,
 and rows repeat by content. So nothing here assumes 50/50: the Brier reference is the evaluation set's own valid
-rate, AUROC is bootstrapped by document, and the structure baseline is reported, not asserted.
+rate, intervals are bootstrapped by document (the report), and the structure baseline is reported, not asserted.
 
 Methods (``params.models``: a probe per entry; ``params.judges``: a Clef / Jev ``subsets`` run per entry,
 nothing trained). Metric keys and figure directories are prefixed with the method's ``label``.
@@ -24,14 +24,15 @@ nothing trained). Metric keys and figure directories are prefixed with the metho
    from the items and must equal ``valid``.
 4. The common set: the test rows every method scored (a judge excludes over-length documents; a probe needs the
    parent in its run). Each method's scored and dropped rows are reported, and every method's labels are the file's.
-5. Metrics (one code path for every method): smECE, Brier skill, AUROC (document-bootstrap interval), accuracy,
-   permutation-null AUROC (asserted ~0.5); per error type, cell, size, corrupted members, parent validity and row
+5. Metrics (one code path for every method): smECE, Brier skill, AUROC, accuracy (point values; intervals are in the report, step 7),
+   per error type, cell, size, corrupted members, parent validity and row
    kind (``invalid``; ``clean_parent``; ``corrupted_member`` = valid despite a corrupted member; ``hidden`` /
    ``visible`` = valid, no corrupted member, every corrupted parent field shown after all members / before one).
    A stratum with one class reports no AUROC. Context diagnostic: each valid row of an invalid parent against the
    same subset of the clean parent (its twin).
-6. Probes only: sum vs ablation (paired document-bootstrap AUROC difference), shuffled-label AUROC ~ 0.5
-   (asserted), seed determinism (asserted), and the ``hidden`` known answer: the members' prompt prefixes equal the
+6. Probes only: sum vs ablation (paired document-bootstrap AUROC difference), the TRAIN-label shuffle control
+   (probes refit on permuted train labels, scored on real test labels, AUROC ~ 0.5 asserted: a leakage check), seed
+   determinism (asserted), and the ``hidden`` known answer: the members' prompt prefixes equal the
    twin's, so their features must too (relative difference <= ``params.prefix_match_rtol``, asserted).
    All methods: the structure baseline (a probe on which fields are shown, trained on the train subsets).
 
@@ -331,9 +332,7 @@ def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int) ->
     m: dict[str, float] = {"n": int(len(y)), "n_valid": int(y.sum()), "valid_rate": ref_rate, "n_docs": len(set(ev["doc"].tolist())),
                            "mean_p_valid": float(probs.mean())}
     m.update(er.probe_metrics("test", y, probs, ref_rate, thr))
-    m["test_auroc_ci_lo"], m["test_auroc_ci_hi"] = er.doc_bootstrap_auroc(y, probs, ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
-    d = er.smooth_ece(probs, y, p["ece_n_boot"], seed)
-    m["test_smece"], m["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
+    m["test_smece"] = er.smece(probs, y)
     for strata in (ev["error_type"], ev["cell"], np.char.add("size", ev["size"].astype(str)),
                    np.char.add("ncorr", ev["n_corrupted"].astype(str)),
                    np.where(ev["parent_valid"], "parent_clean", "parent_invalid"), ev["kind"]):
@@ -348,10 +347,6 @@ def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int) ->
         m[f"test_context_{kind}_valid_acc"] = float((probs[sel] > thr).mean())
         m[f"test_twin_vs_context_{kind}_auroc"] = float(roc_auc_score(
             np.concatenate([np.zeros(len(sel), bool), np.ones(len(sel), bool)]), np.concatenate([probs[sel], probs[twin]])))
-    mean, std = sibling("clef").permutation_null_auroc(y, probs, p["n_permutations"], seed)   # as the judges' analysis
-    m["control_permutation_auroc"], m["control_permutation_auroc_std"] = mean, std
-    assert abs(mean - 0.5) <= p["permutation_auroc_tolerance"], (
-        f"{label}: mean permuted-label AUROC {mean:.4f} (std {std:.4f}, n={p['n_permutations']}) is not ~0.5")
     return m
 
 
@@ -425,12 +420,13 @@ def run_lm(label: str, layer: int, p: dict, seed: int, tr: dict, rows_tr: list[n
         abl_probs[a] = abl.predict_proba(a_te)[:, 1]
         metrics.update({f"ablation_{a}_{k}": v for k, v in er.probe_metrics("test", y_te, abl_probs[a], ref_rate, thr).items()})
         metrics[f"test_auroc_minus_{a}_ci_lo"], metrics[f"test_auroc_minus_{a}_ci_hi"] = doc_bootstrap_auroc_diff(
-            y_te, probs, abl_probs[a], ev["doc"], p["auroc_n_boot"], p["ci_level"], seed)
+            y_te, probs, abl_probs[a], ev["doc"], p["report"]["n_boot"], p["ci_level"], seed)
     if p["run_controls"]:
-        auc_shuf, auc_shuf_std = er.shuffled_label_auroc(f_tr, y_tr, f_te, y_te, p, seed)
-        metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
-        assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
-            f"{label}: mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks")
+        auc_shuf, auc_shuf_std = er.train_label_shuffle_auroc(f_tr, y_tr, f_te, y_te, p, seed, p["n_train_label_shuffles"])
+        metrics["control_train_label_shuffle_auroc"], metrics["control_train_label_shuffle_auroc_std"] = auc_shuf, auc_shuf_std
+        assert abs(auc_shuf - 0.5) <= p["train_label_shuffle_auroc_tolerance"], (
+            f"{label}: mean test AUROC of probes trained on shuffled TRAIN labels {auc_shuf:.4f} (std {auc_shuf_std:.4f}, "
+            f"n={p['n_train_label_shuffles']}) is not ~0.5 -- something leaks")
         assert np.array_equal(probs, er.fit_logreg(f_tr, y_tr, p, seed).predict_proba(f_te)[:, 1]), f"{label}: same-seed refit gave different probabilities"
         metrics["control_seed_determinism"] = 1.0
     np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=y_te,

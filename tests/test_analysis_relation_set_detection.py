@@ -232,7 +232,7 @@ def test_row_stratum_report_known_answer():
     assert "auroc_b" not in r and "detect_b" not in r   # one class: undefined, not a default
 
 
-P = dict(tac.P, n_permutations=50, permutation_auroc_tolerance=0.5, lr_C=1.0, lr_max_iter=1000, lr_tol=1e-4)
+P = dict(tac.P, lr_C=1.0, lr_max_iter=1000, lr_tol=1e-4)
 
 
 def test_score_method_hand_worked(tmp_path):
@@ -251,10 +251,9 @@ def test_score_method_hand_worked(tmp_path):
     assert rs.score_method("w", ev, wrong, P, 0)["test_auroc"] == 0.0
 
 
-def test_score_method_asserts_the_permutation_null(tmp_path):
+def test_score_method_needs_both_classes_and_has_no_permutation_null(tmp_path):
     ev = rs.cut(frame(tmp_path), np.arange(16))
-    with pytest.raises(AssertionError, match="not ~0.5"):
-        rs.score_method("m", ev, np.where(ev["y"], 0.9, 0.1), {**P, "permutation_auroc_tolerance": 0.0}, 0)
+    assert not [k for k in rs.score_method("m", ev, np.where(ev["y"], 0.9, 0.1), P, 0) if k.startswith("control_")]   # the report's shuffle is the control
     with pytest.raises(AssertionError, match="one class missing"):
         rs.score_method("m", rs.cut(ev, np.flatnonzero(ev["y"])), np.full(11, 0.5), P, 0)
 
@@ -366,7 +365,7 @@ def test_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
          "models": [{"label": "m", "train_run_id": "m-train", "test_run_id": "m-test", "layer": 3}],
          "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-run"},
                     {"label": "jev", "judge": "jev", "kind": "conditional", "run_id": "jev-run"}],
-         "max_docs": None, "run_controls": False, "prefix_match_rtol": 1e-6, "n_shuffles": 3, "shuffled_label_auroc_tolerance": 0.5}
+         "max_docs": None, "run_controls": False, "report": {"n_boot": 20}, "prefix_match_rtol": 1e-6, "n_train_label_shuffles": 3, "train_label_shuffle_auroc_tolerance": 0.5}
     monkeypatch.setattr(rs, "FIGURES_DIR", tmp_path / "figures")
     monkeypatch.setattr(rs, "report", lambda *a, **k: {})   # one document, one error type here: the report has its own tests below
     m = rs.run({"id": "r1", "seed": 0, "params": p}, runs)

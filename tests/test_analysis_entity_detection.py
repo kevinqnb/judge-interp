@@ -160,22 +160,23 @@ def test_main_span_pairs_pairs_only_judged_rows_and_refuses_mismatches():
         er.main_span_pairs(s, MAIN_ROWS, 0)
 
 
-P_LR = {"lr_C": 1.0, "lr_max_iter": 1000, "lr_tol": 1e-4, "n_shuffles": 30}
+P_LR = {"lr_C": 1.0, "lr_max_iter": 1000, "lr_tol": 1e-4}
 
 
-def test_shuffled_label_auroc_is_chance_when_x_is_independent_of_y_and_deterministic():
+def test_train_label_shuffle_auroc_is_chance_when_x_is_independent_of_y_and_deterministic():
     rng = np.random.default_rng(0)
     x_tr, x_te = rng.standard_normal((300, 5)), rng.standard_normal((300, 5))
     y_tr, y_te = rng.random(300) < 0.4, rng.random(300) < 0.4  # labels independent of x
-    m, s = er.shuffled_label_auroc(x_tr, y_tr, x_te, y_te, P_LR, 0)
+    m, s = er.train_label_shuffle_auroc(x_tr, y_tr, x_te, y_te, P_LR, 0, 30)
     assert abs(m - 0.5) < 0.05 and s > 0
-    assert (m, s) == er.shuffled_label_auroc(x_tr, y_tr, x_te, y_te, P_LR, 0)
+    assert (m, s) == er.train_label_shuffle_auroc(x_tr, y_tr, x_te, y_te, P_LR, 0, 30)
 
 
-def test_shuffled_label_auroc_requires_n_shuffles():
+def test_train_label_shuffle_auroc_requires_a_positive_integer_count():
     x, y = np.zeros((4, 2)), np.array([True, False, True, False])
-    with pytest.raises(KeyError):
-        er.shuffled_label_auroc(x, y, x, y, {k: v for k, v in P_LR.items() if k != "n_shuffles"}, 0)
+    for bad in (0, -1, 2.0):
+        with pytest.raises(AssertionError):
+            er.train_label_shuffle_auroc(x, y, x, y, P_LR, 0, bad)
 
 
 def test_onehot():

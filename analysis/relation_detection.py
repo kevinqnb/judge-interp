@@ -261,7 +261,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     metrics.update(er.assert_structure_auroc_is_chance("cell_field_pair", y_tr, struct_tr, y_te, struct_te, p, seed))
 
     if p["run_controls"]:
-        auc_shuf, auc_shuf_std = er.shuffled_label_auroc(f_tr, y_tr, f_te, y_te, p, seed)
+        auc_shuf, auc_shuf_std = er.train_label_shuffle_auroc(f_tr, y_tr, f_te, y_te, p, seed, p["n_shuffles"])
         metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
         assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
             f"mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks"

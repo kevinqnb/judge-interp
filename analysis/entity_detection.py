@@ -15,19 +15,21 @@ figure directories are prefixed with the method's ``label``.
    identical across methods (asserted): every corrupted span with its clean twin span (the same field in the
    document's clean row, or, for a null-fill span, in another document's clean row). Each (error type, k,
    field) stratum is exactly 50/50.
-3. Probes: PCA on train, coloured by validity; logistic regression on one entity's activation, train -> test.
-   Judges: ``analysis/clef.py``'s metrics on the same pairs. Both: smECE, Brier (skill), AUROC (with a
-   document-bootstrap interval), accuracy; per error type, per (type, k), and with / without null-fill pairs.
+3. Probes: logistic regression on one entity's activation, train -> test.
+   Judges: ``analysis/clef.py``'s metrics on the same pairs. Both: smECE, Brier (skill), AUROC, accuracy (point
+   values; every interval is in the report, step 6); per error type, per (type, k), and with / without null-fill pairs.
 4. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
    row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the method does not just sense "this row
    has a corruption somewhere".
-5. Controls: probes -- field-identity baseline (exactly 0.5 AUROC on pairs, asserted), shuffled-label AUROC
-   ~ 0.5, seed determinism; judges -- permutation null of the metrics.
+5. Controls (probes only; ``params.run_controls``): field-identity baseline (exactly 0.5 AUROC on pairs, asserted),
+   the TRAIN-label shuffle control (probes refit on permuted train labels, scored on real test labels, AUROC ~ 0.5
+   asserted: a leakage check), seed determinism. The judges have no training, and the report's shuffled-label
+   baseline (step 6) is their only label-permutation control.
 
 6. Report (``analysis/calibration_report.py``, ``params.report``): the only figures. Per error type, a calibration
    diagram of all methods and a smECE / BSS / AUROC table, every interval over ``report.n_boot`` resamples of documents
-   (a null-fill pair is resampled with its invalid member's document, as in the AUROC interval above). The
-   pooled values are asserted equal to the metrics above.
+   (a null-fill pair is resampled with its invalid member's document). The pooled values are asserted equal to
+   the metrics above.
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 """
@@ -48,7 +50,6 @@ import relplot
 import yaml
 from matplotlib.collections import LineCollection
 from matplotlib.colors import to_rgba
-from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -92,6 +93,11 @@ def center_per_document(x: np.ndarray, doc_ids: np.ndarray) -> None:
         rows = np.flatnonzero(doc_ids == doc)
         dev = float(np.abs(x[rows].mean(axis=0)).max())
         assert dev <= ZERO_MEAN_RTOL * scale, f"per-document centering failed for {doc!r}: {dev}"
+
+
+def smece(probs: np.ndarray, y_true: np.ndarray) -> float:
+    """Smooth ECE (relplot, automatic bandwidth); the point value of ``smooth_ece(...)["ce"]``, without its bootstrap."""
+    return float(relplot.smECE(np.asarray(probs, dtype=np.float64), np.asarray(y_true, dtype=np.float64)))
 
 
 def smooth_ece(probs: np.ndarray, y_true: np.ndarray, n_boot: int, seed: int) -> dict:
@@ -154,13 +160,6 @@ def write_probe_train_times(run_id: str, times: dict[str, dict]) -> Path:
     path.write_text(json.dumps(times, indent=2) + "\n")
     return path
 
-
-def scatter_indices(n: int, max_points: int, seed: int) -> np.ndarray:
-    """Random scatter subsample (order also random, so neither class is drawn on top)."""
-    rng = np.random.default_rng(seed)
-    if n <= max_points:
-        return rng.permutation(n)
-    return rng.choice(n, size=max_points, replace=False)
 
 FIGURES_DIR = Path(__file__).parent / "figures"
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -452,12 +451,15 @@ def assert_structure_auroc_is_chance(name: str, y_tr: np.ndarray, cats_tr: np.nd
     return m
 
 
-def shuffled_label_auroc(x_tr: np.ndarray, y_tr: np.ndarray, x_te: np.ndarray, y_te: np.ndarray, p: dict,
-                         seed: int) -> tuple[float, float]:
-    """``(mean, std)`` test AUROC over ``n_shuffles`` fits on permuted train labels (a single one is too noisy)."""
+def train_label_shuffle_auroc(x_tr: np.ndarray, y_tr: np.ndarray, x_te: np.ndarray, y_te: np.ndarray, p: dict,
+                              seed: int, n_shuffles: int) -> tuple[float, float]:
+    """TRAINING-label shuffle control (leakage check): ``(mean, std)`` of the test AUROC over ``n_shuffles`` probes, each
+    REFIT on a random permutation of the TRAIN labels and scored on the REAL test labels. A probe that learned
+    nothing real must sit at 0.5; anything else means train and test leak into each other."""
+    assert isinstance(n_shuffles, int) and n_shuffles > 0, n_shuffles
     rng = np.random.default_rng(seed)
     aucs = [float(roc_auc_score(y_te, fit_logreg(x_tr, rng.permutation(y_tr), p, seed).predict_proba(x_te)[:, 1]))
-            for _ in range(p["n_shuffles"])]
+            for _ in range(n_shuffles)]
     return float(np.mean(aucs)), float(np.std(aucs))
 
 
@@ -481,20 +483,6 @@ def probe_metrics(prefix: str, y_te: np.ndarray, probs: np.ndarray, ref_rate: fl
 
 
 # ---------------------------------------------------------------------------- plots
-def plot_pca_validity(scores, idx, label_valid, evr, out_dir: Path, title: str) -> None:
-    s = scores[idx]
-    fig, ax = plt.subplots(figsize=(5.5, 5.5), constrained_layout=True)
-    colors = np.where(label_valid[idx], VALID_COLOR, INVALID_COLOR)
-    ax.scatter(s[:, 0], s[:, 1], c=colors, s=5, alpha=0.5, linewidths=0)
-    for name, c in (("invalid", INVALID_COLOR), ("valid", VALID_COLOR)):
-        ax.scatter([], [], c=c, s=25, label=name)
-    ax.legend(loc="best", fontsize=9, framealpha=0.9)
-    ax.set(xlabel=f"PC1 ({evr[0]:.1%})", ylabel=f"PC2 ({evr[1]:.1%})", title=f"{title}: validity")
-    ax.set_box_aspect(1)
-    fig.savefig(out_dir / "pca_validity.png", dpi=150)
-    plt.close(fig)
-
-
 def plot_calibration(d: dict, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(4.4, 4.4), constrained_layout=True)
     plot_reliability(ax, d, VALID_COLOR)
@@ -594,10 +582,6 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
         "n_train_null_fill_pairs": int(z_tr["null_fill"].sum()),
     }
 
-    pca = PCA(n_components=p["pca_n_components"], svd_solver=p["pca_svd_solver"], random_state=seed)
-    pca.fit(x_tr)
-    metrics["pca_evr_pc1"], metrics["pca_evr_pc2"] = (float(v) for v in pca.explained_variance_ratio_[:2])
-
     clf, fit_seconds = timed_fit_logreg(x_tr, y_tr, p, seed)
     metrics["probe_train_time"] = {"feature_seconds": feature_seconds, "fit_seconds": fit_seconds,
                                    "n_train": int(x_tr.shape[0]), "n_features": int(x_tr.shape[1])}
@@ -605,18 +589,13 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     assert probs.shape == y_te.shape
     metrics.update(probe_metrics("test", y_te, probs, ref_rate, thr))
     metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(x_tr)[:, 1]))
-    metrics["test_auroc_ci_lo"], metrics["test_auroc_ci_hi"] = doc_bootstrap_auroc(
-        y_te, probs, s_te["doc"], p["auroc_n_boot"], p["ci_level"], seed)
     no_fill = ~s_te["null_fill"]
     metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
-    metrics["test_no_null_fill_auroc_ci_lo"], metrics["test_no_null_fill_auroc_ci_hi"] = doc_bootstrap_auroc(
-        y_te[no_fill], probs[no_fill], s_te["doc"][no_fill], p["auroc_n_boot"], p["ci_level"], seed)
     if s_te["null_fill"].any():
         fill = s_te["null_fill"]
         metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
 
-    d = smooth_ece(probs, y_te, p["ece_n_boot"], seed)
-    metrics["test_smece"], metrics["test_smece_ci_halfwidth"] = float(d["ce"]), float(d["ce_ci_width"])
+    metrics["test_smece"] = smece(probs, y_te)
 
     for col in ("error_type", "stratum"):
         for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
@@ -637,10 +616,11 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     metrics.update(assert_structure_auroc_is_chance("field", y_tr, tr["field"][s_tr["idx"]], y_te, te["field"][s_te["idx"]], p, seed))
 
     if p["run_controls"]:
-        auc_shuf, auc_shuf_std = shuffled_label_auroc(x_tr, y_tr, x_te, y_te, p, seed)
-        metrics["control_shuffled_auroc"], metrics["control_shuffled_auroc_std"] = auc_shuf, auc_shuf_std
-        assert abs(auc_shuf - 0.5) <= p["shuffled_label_auroc_tolerance"], (
-            f"{label}: mean shuffled-label AUROC {auc_shuf:.4f} (std {auc_shuf_std:.4f}, n={p['n_shuffles']}) is not ~0.5 -- something leaks"
+        auc_shuf, auc_shuf_std = train_label_shuffle_auroc(x_tr, y_tr, x_te, y_te, p, seed, p["n_train_label_shuffles"])
+        metrics["control_train_label_shuffle_auroc"], metrics["control_train_label_shuffle_auroc_std"] = auc_shuf, auc_shuf_std
+        assert abs(auc_shuf - 0.5) <= p["train_label_shuffle_auroc_tolerance"], (
+            f"{label}: mean test AUROC of probes trained on shuffled TRAIN labels {auc_shuf:.4f} (std {auc_shuf_std:.4f}, "
+            f"n={p['n_train_label_shuffles']}) is not ~0.5 -- something leaks"
         )
         assert np.array_equal(probs, fit_logreg(x_tr, y_tr, p, seed).predict_proba(x_te)[:, 1]), (
             f"{label}: same-seed refit gave different probabilities"
