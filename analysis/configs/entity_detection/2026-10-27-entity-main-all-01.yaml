@@ -16,6 +16,9 @@ params:
     - {label: clef, kind: clef, run_id: 2026-10-25-clef-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
     - {label: jev, kind: jev, run_id: 2026-10-27-jev-entity-main-test-01, bss_ref_rate: evaluation_set_rate}
   twin_seed: 0   # seeds the other-document twins of null-fill spans
+  # k stratum (analysis/entity_detection.py): null = all k (the behaviour before the key existed)
+  train_k: null
+  test_k: null
   # logistic regression (lbfgs; ConvergenceWarning is an error); lr_C is the INVERSE regularisation strength
   lr_C: 0.01
   lr_max_iter: 5000

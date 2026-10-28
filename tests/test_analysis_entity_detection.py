@@ -310,6 +310,46 @@ def test_restricting_to_the_common_rows_gives_the_same_pairs_for_every_method():
     assert er.pair_signature(s1, er.main_span_pairs(s1, MAIN_ROWS, 0)) != sigs[0]
 
 
+# ---------------------------------------------------------------- k stratum
+# MAIN_ROWS has only k = 1 corrupted rows; add a k = 2 row of document a (both corrupted fields kept non-null in the
+# clean row, so neither is a null-fill pair): advertiser <- "X2", agency <- "Z".
+K2_ROW = _main_row("a", "inter_document", 2, {"advertiser": "X2", "agency": "Z"}, {"advertiser": False, "agency": False})
+
+
+def test_select_k_keeps_every_clean_row_and_the_listed_corrupted_rows():
+    keys = er.row_keys(_with_x(MAIN_ROWS + [K2_ROW]))
+    assert er.select_k(keys, None) == keys
+    assert er.select_k(keys, [1]) == keys - {("a", "inter_document", 2)}
+    assert er.select_k(keys, [2]) == {("a", "", 0), ("b", "", 0), ("a", "inter_document", 2)}
+    assert er.select_k(keys, [1, 2]) == keys
+    assert er.select_k(keys, None) is not keys   # a copy
+
+
+@pytest.mark.parametrize("bad", [[], [0], [-1], [1, 1], [True], [1.0], (1,), 1, [3]])
+def test_select_k_refuses_a_malformed_or_absent_k(bad):
+    keys = er.row_keys(_with_x(MAIN_ROWS + [K2_ROW]))
+    with pytest.raises(AssertionError):
+        er.select_k(keys, bad)
+
+
+def test_the_k_stratum_gives_exactly_that_ks_pairs_of_the_unrestricted_set():
+    s = _with_x(MAIN_ROWS + [K2_ROW])
+    rows = MAIN_ROWS + [K2_ROW]
+
+    def sig(k_values):
+        cut = er.restrict_to_rows(s, er.select_k(er.row_keys(s), k_values))
+        return er.pair_signature(cut, er.main_span_pairs(cut, rows, 0))
+
+    everything, k1, k2 = sig(None), sig([1]), sig([2])
+    assert len(everything) == 5 and len(k1) == 3 and len(k2) == 2
+    assert sorted(k1 + k2) == sorted(everything)
+    assert {inv[2] for inv, _, _ in k1} == {1} and {inv[2] for inv, _, _ in k2} == {2}
+    # the clean twin is the clean row (k = 0) in every pair
+    assert {val[1:3] for _, val, _ in k1 + k2} == {("", 0)}
+    assert k2 == [(("a", "inter_document", 2, "advertiser"), ("a", "", 0, "advertiser"), False),
+                  (("a", "inter_document", 2, "agency"), ("a", "", 0, "agency"), False)]
+
+
 def test_a_common_set_that_drops_a_clean_row_is_refused():
     s = _with_x(MAIN_ROWS)
     cut = er.restrict_to_rows(s, er.row_keys(s) - {("a", "", 0)})

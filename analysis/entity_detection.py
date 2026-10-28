@@ -9,7 +9,10 @@ Probes train on the ``entity_detection`` train runs, which must have judged ``pa
 figure directories are prefixed with the method's ``label``.
 
 1. Load one layer per model and subtract each document's mean activation (nothing else), over the model's whole run.
-2. The common set: the test rows every method scored (a judge excludes over-length documents; the LMs have a
+2. The k stratum (``params.train_k`` / ``params.test_k``: a list of corrupted-field counts, or null for all k): only
+   corrupted rows with k in the list are kept, plus every clean row (k = 0; it holds the twins). Every number below
+   is computed on that stratum. Both keys are required.
+   The common set: the test rows every method scored (a judge excludes over-length documents; the LMs have a
    context limit). Each method's spans are cut to them and each method's dropped rows are reported. Pairs are built
    per method from these rows (``data/vrdu/main_samples.main_entity_pairs``, same twin seed) and must be
    identical across methods (asserted): every corrupted span with its clean twin span (the same field in the
@@ -536,6 +539,22 @@ def row_keys(split: dict) -> set[tuple]:
     return set(zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist()))
 
 
+def select_k(keys: set[tuple], k_values: list[int] | None) -> set[tuple]:
+    """The k stratum of ``keys`` (``(document, row error type, k)`` rows): every clean row (k = 0, which holds the
+    twins) and the corrupted rows whose k is in ``k_values``; ``None`` keeps every row.
+
+    Raises:
+        AssertionError: ``k_values`` is not a non-empty list of distinct ints >= 1, or lists a k no row has.
+    """
+    if k_values is None:
+        return set(keys)
+    assert isinstance(k_values, list) and k_values and len(set(k_values)) == len(k_values) and all(
+        type(k) is int and k >= 1 for k in k_values), f"k_values must be null or a list of distinct ints >= 1, got {k_values!r}"
+    present = {k for _, _, k in keys}
+    assert set(k_values) <= present, f"k {sorted(set(k_values) - present)} has no row (rows have k {sorted(present)})"
+    return {key for key in keys if key[2] == 0 or key[2] in k_values}
+
+
 def restrict_to_rows(split: dict, keys: set[tuple]) -> dict:
     """``split`` cut to the spans of rows ``keys`` (a subset of its rows): every per-span array (leading
     dimension = number of spans) is cut, everything else is kept. Per-document centring must come first --
@@ -678,6 +697,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         center_per_document(te["X"], te["doc_ids"])
         rows_tr = check_rows_file(spec["train_run_id"], train_path)
         rows_te = check_rows_file(spec["test_run_id"], test_path)
+        tr = restrict_to_rows(tr, select_k(row_keys(tr), p["train_k"]))   # after centring: the mean is over the whole run
         lms[spec["label"]] = {"tr": tr, "te": te, "rows_tr": rows_tr}
     judges: dict[str, dict] = {}
     for spec in p["judges"]:
@@ -690,11 +710,12 @@ def run(cfg: dict, runs_root: Path) -> dict:
     # The common set: rows every method scored. Pairs are then built per method from identical rows with the
     # same twin seed, and must come out identical (asserted).
     scored = {**{k: v["te"] for k, v in lms.items()}, **{k: v["run"] for k, v in judges.items()}}
-    common = set.intersection(*(row_keys(s) for s in scored.values()))
+    in_stratum = {label: select_k(row_keys(s), p["test_k"]) for label, s in scored.items()}
+    common = set.intersection(*in_stratum.values())
     assert common, "no test row was scored by every method"
     metrics: dict[str, float] = {"n_common_test_rows": len(common)}
-    for label, s in scored.items():
-        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = len(row_keys(s)), len(row_keys(s)) - len(common)
+    for label, rows in in_stratum.items():   # dropped = the method's own exclusions, not the k stratum
+        metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = len(rows), len(rows) - len(common)
     signature = None
     for label, s in scored.items():
         cut = restrict_to_rows(s, common)
@@ -742,7 +763,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
     cr.save_evset(art_dir / "calibration_predictions.npz", evset)
     cr.assert_matches_existing(evset, metrics)
     metrics.update(cr.write_report(evset, p["report"], list(p["report"]["error_type_names"]), p["ci_level"], seed, fig_dir, out,
-                                   "calibration", "Evaluation: minimal pairs of the main test split."))
+                                   "calibration", f"Evaluation: minimal pairs of the main test split, "
+                                   f"{'all k' if p['test_k'] is None else 'k = ' + ', '.join(map(str, p['test_k']))}."))
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)
     (fig_dir / "metrics.json").write_text(metrics_text)  # copy beside the figures
