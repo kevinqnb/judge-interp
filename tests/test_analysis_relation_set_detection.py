@@ -261,7 +261,7 @@ def test_score_method_needs_both_classes_and_has_no_permutation_null(tmp_path):
 def test_structure_baseline_reports_what_fields_alone_predict(tmp_path):
     tr, te = frame(tmp_path, "train", "dtr"), frame(tmp_path, "test", "d")
     ev = rs.cut(te, np.arange(16))
-    m = rs.structure_baseline(tr, ev, P, 0)
+    m = rs.structure_baseline(tr, ev, P, 0, False)
     # (CH,ED) and (DESC,ED), (CH,DESC,ED) are invalid in 1 of 4 rows of each fields group, (CH,DESC) in 0 of 4: not constant
     assert 0.0 <= m["test_baseline_fields_auroc"] <= 1.0 and m["test_baseline_fields_auroc"] != 0.5
 
@@ -508,20 +508,59 @@ def test_score_method_without_twins_has_no_context_diagnostic(tmp_path):
     assert not [k for k in m if k.startswith(("test_context_", "test_twin_vs_context_"))]
 
 
-def test_structure_baseline_on_corrupted_parents_is_reported_not_asserted(tmp_path):
+def _cells_frame(spec):
+    """A frame stub (``y``, ``error_type``, ``fields``) from ``(error type, fields, valid, count)`` rows."""
+    et, fl, y = [], [], []
+    for e, f, v, n in spec:
+        et += [e] * n
+        fl += [f] * n
+        y += [v] * n
+    return {"y": np.array(y, dtype=bool), "error_type": np.array(et), "fields": np.array(fl)}
+
+
+CELLS = [("intra_document", "a", True, 3), ("intra_document", "a", False, 5), ("intra_document", "b", True, 4),
+         ("cross_item", "a", True, 2), ("cross_item", "a", False, 2), ("cross_item", "c", False, 3)]
+
+
+def test_balance_cells_hand_worked():
+    sub = _cells_frame(CELLS)
+    n = len(sub["y"])
+    pos, counts = rs.balance_cells(sub, np.arange(n), 0)
+    # hand count: (intra, a) has 3 valid + 5 invalid -> 3 + 3; (cross, a) 2 + 2; (intra, b) is all valid and (cross, c) all invalid: dropped
+    assert pos.tolist() == sorted(pos.tolist()) and len(pos) == 10
+    assert counts == {"n_rows_before": 19, "n_cells": 4, "n_cells_one_class": 2, "n_rows_one_class_cells_dropped": 7, "n_balanced_rows": 10}
+    for e, f, want in (("intra_document", "a", 3), ("cross_item", "a", 2)):
+        cell = (sub["error_type"][pos] == e) & (sub["fields"][pos] == f)
+        assert int(sub["y"][pos][cell].sum()) == int((~sub["y"][pos][cell]).sum()) == want
+    assert not (sub["fields"][pos] == "b").any() and not (sub["fields"][pos] == "c").any()
+    # the same seed gives the same rows; the surplus invalid rows of (intra, a) are drawn at random
+    assert rs.balance_cells(sub, np.arange(n), 0)[0].tolist() == pos.tolist()
+    assert len({tuple(rs.balance_cells(sub, np.arange(n), sd)[0].tolist()) for sd in range(8)}) > 1
+    # only the rows given are considered: without the last (cross, a) invalid rows the cell is 2 valid + 0 invalid -> dropped
+    sub_rows = np.array([i for i in range(n) if not (sub["error_type"][i] == "cross_item" and sub["fields"][i] == "a" and not sub["y"][i])])
+    pos2, c2 = rs.balance_cells(sub, sub_rows, 0)
+    assert set(pos2.tolist()) <= set(sub_rows.tolist()) and len(pos2) == 6 and c2["n_cells_one_class"] == 3
+    with pytest.raises(AssertionError, match="no cell"):
+        rs.balance_cells(_cells_frame([("intra_document", "a", True, 3), ("intra_document", "b", False, 2)]), np.arange(5), 0)
+
+
+def test_structure_baseline_is_asserted_at_chance_only_on_a_balanced_set(tmp_path):
     tr, te = frame(tmp_path, "train", "dtr"), frame(tmp_path, "test", "d")
     tr_c = rs.cut(tr, rs.select_rows(tr, CP)[0], link_twins=False)
-    ev = rs.cut(te, rs.select_rows(te, CP)[0], link_twins=False)
-    m = rs.structure_baseline(tr_c, ev, P, 0)
-    # field set -> label rate on the train rows: (CH,DESC) 1/2 valid, (CH,ED) 0/2, (DESC,ED) 1/2, (CH,DESC,ED) 0/2; the test set is the same
-    # => AUROC of this tied-by-set predictor, not 0.5 and not 1.0
-    assert 0.5 < m["test_baseline_fields_auroc"] < 1.0
-    # trained on the corrupted parents only: a fit on all rows gives other probabilities
-    m_all = rs.structure_baseline(tr, ev, P, 0)
-    assert m_all["test_baseline_fields_brier"] != m["test_baseline_fields_brier"]
+    ev_all = rs.cut(te, rs.select_rows(te, CP)[0], link_twins=False)
+    # unbalanced corrupted-parent rows: the field set predicts the label (reported, not asserted)
+    m = rs.structure_baseline(tr_c, ev_all, P, 0, False)
+    assert m["test_baseline_fields_auroc"] != 0.5
+    with pytest.raises(AssertionError, match="balancing is broken"):
+        rs.structure_baseline(tr_c, ev_all, P, 0, True)
+    # balanced by (error type, field set): any function of the field set has AUROC exactly 0.5
+    pos_te, _ = rs.balance_cells(ev_all, np.arange(len(ev_all["y"])), 0)
+    pos_tr, _ = rs.balance_cells(tr_c, np.arange(len(tr_c["y"])), 0)
+    ev_b, tr_b = rs.cut(ev_all, pos_te, link_twins=False), rs.cut(tr_c, pos_tr, link_twins=False)
+    assert rs.structure_baseline(tr_b, ev_b, P, 0, True)["test_baseline_fields_auroc"] == pytest.approx(0.5, abs=1e-9)
 
 
-def test_corrupted_parents_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
+def _corrupted_parents_run_setup(tmp_path, monkeypatch):
     runs, repo = tmp_path / "runs", tmp_path / "repo"
     runs.mkdir()
     (repo / "data" / "vrdu").mkdir(parents=True)
@@ -544,17 +583,46 @@ def test_corrupted_parents_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatc
          "max_docs": None, "run_controls": False, "report": {"n_boot": 20}, "prefix_match_rtol": 1e-6, "n_train_label_shuffles": 3, "train_label_shuffle_auroc_tolerance": 0.5}
     monkeypatch.setattr(rs, "FIGURES_DIR", tmp_path / "figures")
     monkeypatch.setattr(rs, "report", lambda *a, **k: {})
+    return runs, f_te, ids, p
+
+
+def test_corrupted_parents_run_end_to_end_on_synthetic_runs(tmp_path, monkeypatch):
+    runs, f_te, ids, p = _corrupted_parents_run_setup(tmp_path, monkeypatch)
     m = rs.run({"id": "r1", "seed": 0, "params": p}, runs)
-    # predicted by hand: the 8 rows of the 2 corrupted parents per split, 3 of them valid; the 8 clean-parent rows are dropped
-    assert m["n_selected_test_rows"] == m["n_common_test_rows"] == m["m_n"] == m["clef_n"] == 8 and m["n_test_subsets_file"] == 16
-    assert m["n_selected_train_rows"] == m["m_n_train"] == 8 and m["m_n_train_valid"] == 3 and m["m_n_valid"] == 3
-    assert m["test_n_corrupted_parent_rows"] == m["train_n_corrupted_parent_rows"] == 8
-    assert m["test_n_clean_parent_rows_dropped"] == m["train_n_clean_parent_rows_dropped"] == 8
-    assert m["m_valid_rate"] == 3 / 8 and m["clef_test_auroc"] == 1.0
-    assert "test_baseline_fields_auroc" in m and m["m_prefix_match_dev"] == 0.0     # the prefix check still reads every test row
+    # predicted by hand: the 8 rows of the 2 corrupted parents per split, 3 valid. Cells (all intra_document): (CH,DESC) 2 valid + 0 invalid,
+    # (CH,ED) 0 + 2, (CH,DESC,ED) 0 + 2 are one-class and dropped; (DESC,ED) has p1's invalid row and p2's visible row -> 1 + 1 kept.
+    assert m["n_selected_test_rows"] == m["n_common_test_rows"] == 8 and m["n_test_subsets_file"] == 16 and m["n_selected_train_rows"] == 8
+    assert m["test_n_balanced_rows"] == m["train_n_balanced_rows"] == 2 and m["test_n_cells"] == 4 and m["test_n_cells_one_class"] == 3
+    assert m["test_n_rows_one_class_cells_dropped"] == 6 and m["test_n_corrupted_parent_rows"] == 8 and m["test_n_clean_parent_rows_dropped"] == 8
+    assert m["m_n"] == m["clef_n"] == 2 and m["m_valid_rate"] == 0.5 and m["m_n_train"] == 2 and m["m_n_train_valid"] == 1
+    assert all(m[f"{k}_n_dropped_rows"] == 0 for k in ("m", "clef"))
+    assert m["test_baseline_fields_auroc"] == pytest.approx(0.5, abs=1e-9) and m["clef_test_auroc"] == 1.0
+    assert m["m_prefix_match_dev"] == 0.0     # the prefix check still reads every test row
     assert not [k for k in m if "context_" in k and k.startswith(("m_", "clef_"))]
     saved = np.load(runs / "r1" / "artifacts" / "clef_test_predictions.npz")
-    assert len(saved["subset_id"]) == 8 and saved["label_valid"].mean() == 3 / 8 and not any(s.endswith("|valid|") or "|valid|" in s for s in saved["subset_id"])
+    assert sorted(saved["subset_id"].tolist()) == sorted([sid("p1", False, DESC, ED), sid("p2", False, DESC, ED)]) and saved["label_valid"].mean() == 0.5
+
+
+def test_corrupted_parents_balances_after_the_common_set(tmp_path, monkeypatch):
+    runs, f_te, ids, p = _corrupted_parents_run_setup(tmp_path, monkeypatch)
+    # a judge that scored fewer rows shrinks the common set first; the balance is then drawn from the rows everyone scored.
+    # Without p2's rows no (error type, field set) cell holds both classes: a loud refusal, never an unbalanced set.
+    keep = [i for i, s in enumerate(ids) if not s.startswith("d-p2")]
+    c2 = judge_cols(f_te, [ids[i] for i in keep])
+    write_judge(runs, "clef-half", "clef", [ids[i] for i in keep], np.where(f_te["y"][keep], 0.8, 0.3), f_te["y"][keep], "clef_relation_conditional",
+                cell=c2["cell"], size=c2["size"])
+    p2 = {**p, "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-half"}]}
+    with pytest.raises(AssertionError, match="no cell"):
+        rs.run({"id": "r2", "seed": 0, "params": p2}, runs)
+    # a judge missing only a row that is dropped anyway (p1's invalid (CH,ED)) changes nothing in the balanced set, and its drop is reported
+    keep = [i for i, s in enumerate(ids) if s != sid("p1", False, CH, ED)]
+    c3 = judge_cols(f_te, [ids[i] for i in keep])
+    write_judge(runs, "clef-short", "clef", [ids[i] for i in keep], np.where(f_te["y"][keep], 0.8, 0.3), f_te["y"][keep], "clef_relation_conditional",
+                cell=c3["cell"], size=c3["size"])
+    p3 = {**p, "judges": [{"label": "clef", "judge": "clef", "kind": "conditional", "run_id": "clef-short"}]}
+    m = rs.run({"id": "r3", "seed": 0, "params": p3}, runs)
+    assert m["n_common_test_rows"] == 7 and m["m_n_dropped_rows"] == 1 and m["clef_n_dropped_rows"] == 0 and m["m_n"] == m["clef_n"] == 2
+    assert m["test_baseline_fields_auroc"] == pytest.approx(0.5, abs=1e-9)
 
 
 def test_report_on_corrupted_parents_skips_pair_check_and_control(tmp_path):

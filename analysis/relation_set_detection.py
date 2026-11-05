@@ -11,8 +11,12 @@ reference is the evaluation set's own valid rate and intervals are bootstrapped 
 Row selection (``params.selection``, required; applied to the train and the test subsets alike):
   null                every row.
   ``corrupted_parents``  every row of a corrupted parent (kinds ``invalid``, ``corrupted_member``, ``hidden``,
-                      ``visible``) and no row of a clean parent, so every row has a corrupted prompt as context. Without
-                      clean-parent rows there is no twin: the twin diagnostics and the control report are skipped.
+                      ``visible``) and no row of a clean parent, so every row has a corrupted prompt as context; then
+                      randomly subsampled (seeded by the config's ``seed``) to as many valid as invalid rows in every
+                      (error type, field set) cell, which balances subset sizes and field combinations: a cell with one
+                      class is dropped. On the test side this is drawn from the rows every method scored (step 2), so
+                      it stays exactly balanced. Without clean-parent rows there is no twin: the twin diagnostics and
+                      the control report are skipped.
 
 Methods: a probe per ``params.models`` entry, a Clef / Jev ``subsets`` run per ``params.judges`` entry (nothing
 trained). Metric keys and figure directories are prefixed with the method's ``label``.
@@ -21,13 +25,15 @@ trained). Metric keys and figure directories are prefixed with the method's ``la
    prompt, per-document mean-centred), trained on the selected ``params.train_subsets`` rows. Ablations
    (``params.ablations``): ``last`` = the member shown last, ``context`` = the sum of the others. A member has attended
    to every field shown before it in the parent, a judge sees only the subset.
-2. Common set: the selected test rows every method scored. Each method's scored and dropped rows are reported.
+2. Common set: the selected test rows every method scored (then balanced, for ``corrupted_parents``). Each method's
+   scored and dropped rows are reported; balancing is not counted as a drop.
 3. Metrics, one code path for every method: smECE, Brier skill, AUROC, accuracy, overall and per error type, cell,
    size, corrupted members, parent validity and row kind (``invalid``; ``clean_parent``; ``corrupted_member`` = valid
    despite a corrupted member; ``hidden`` / ``visible`` = valid, no corrupted member, every corrupted parent field
    shown after all members / before one). A stratum with one class has no AUROC. With ``selection: null``, a
    context diagnostic compares each valid row of a corrupted parent with the same subset of the clean parent.
-4. Controls. Structure baseline, all methods: a probe on the field set, trained on the same train rows, reported. The
+4. Controls. Structure baseline, all methods: a probe on the field set, trained on the same train rows. Reported for
+   ``null``; for ``corrupted_parents`` the set is balanced per field set, so its AUROC is exactly 0.5 (asserted). The
    corrupted count is not a feature (it is derived from the label and no method sees it); it is a stratum.
    Probes only: the TRAIN-label shuffle (AUROC ~ 0.5 asserted), seed determinism (asserted), the ``hidden`` prefix
    known answer (a hidden row's features equal its twin's up to ``params.prefix_match_rtol``, asserted, run on all of
@@ -198,7 +204,8 @@ def select_rows(sub: dict, selection: str | None) -> tuple[np.ndarray, dict]:
 
     Args:
         sub: a frame (``load_subsets``).
-        selection: ``params.selection``; None keeps every row, ``corrupted_parents`` keeps the rows of corrupted parents.
+        selection: ``params.selection``; None keeps every row, ``corrupted_parents`` keeps the rows of corrupted parents
+            (``balance_cells`` then subsamples them).
 
     Returns:
         ``(positions, counts)``: the selected rows' ascending positions in ``sub``; and, for ``corrupted_parents``,
@@ -213,6 +220,46 @@ def select_rows(sub: dict, selection: str | None) -> tuple[np.ndarray, dict]:
     pos = np.flatnonzero(~sub["parent_valid"])
     assert len(pos), "no row of a corrupted parent"
     return pos, {"n_corrupted_parent_rows": int(len(pos)), "n_clean_parent_rows_dropped": int(sub["parent_valid"].sum())}
+
+
+def balance_cells(sub: dict, rows: np.ndarray, seed: int) -> tuple[np.ndarray, dict]:
+    """Randomly subsample rows to as many valid as invalid in every (error type, field set) cell.
+
+    Each cell keeps ``min(n_valid, n_invalid)`` rows of each class, drawn without replacement; a cell with only one
+    class keeps none. The result is exactly 50/50 within every cell, hence within every field set and every size.
+
+    Args:
+        sub: a frame (``load_subsets`` or ``cut``) with ``y``, ``error_type`` and ``fields``.
+        rows: positions in ``sub`` of the rows to draw from.
+        seed: seeds the draw.
+
+    Returns:
+        ``(positions, counts)``: the kept rows' ascending positions in ``sub``; and ``n_rows_before`` (``len(rows)``),
+        ``n_cells``, ``n_cells_one_class``, ``n_rows_one_class_cells_dropped`` and ``n_balanced_rows``.
+
+    Raises:
+        AssertionError: no cell holds both classes.
+    """
+    rows = np.asarray(rows, dtype=np.int64)
+    y, et, fields = sub["y"][rows], sub["error_type"][rows], sub["fields"][rows]
+    rng = np.random.default_rng(seed)
+    cells: dict[tuple[str, str], list[np.ndarray]] = {}
+    for key in sorted(set(zip(et.tolist(), fields.tolist()))):
+        in_cell = (et == key[0]) & (fields == key[1])
+        cells[key] = [rows[in_cell & y], rows[in_cell & ~y]]
+    kept = []
+    n_one_class = n_dropped = 0
+    for valid, invalid in cells.values():
+        n = min(len(valid), len(invalid))
+        if n == 0:
+            n_one_class += 1
+            n_dropped += len(valid) + len(invalid)
+            continue
+        kept += rng.choice(valid, size=n, replace=False).tolist() + rng.choice(invalid, size=n, replace=False).tolist()
+    assert kept, "no cell holds both classes"
+    out = np.array(sorted(kept), dtype=np.int64)
+    return out, {"n_rows_before": int(len(rows)), "n_cells": len(cells), "n_cells_one_class": n_one_class,
+                 "n_rows_one_class_cells_dropped": n_dropped, "n_balanced_rows": int(len(out))}
 
 
 def lm_member_spans(sub: dict, split: dict, data: dict, require_all: bool) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -466,23 +513,30 @@ def score_method(label: str, ev: dict, probs: np.ndarray, p: dict, seed: int) ->
     return m
 
 
-def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int) -> dict:
+def structure_baseline(sub_tr: dict, ev: dict, p: dict, seed: int, assert_chance: bool) -> dict:
     """What structure alone predicts: a logistic regression on the one-hot field set, trained on the train rows.
-    Reported, not asserted (the field set predicts the label on these unbalanced sets).
 
     Args:
         sub_tr: the (selected) train frame.
         ev: the common test rows as a frame.
         p: the config's ``params`` (``lr_*``, ``decision_threshold``).
         seed: seeds the fit.
+        assert_chance: True for a set balanced per field set, where the AUROC of anything that depends on the field set
+            alone is exactly 0.5 (a known answer); False for an unbalanced set, where the baseline is only reported.
 
     Returns:
         ``test_baseline_fields_`` AUROC, Brier, Brier reference, BSS and accuracy on ``ev``.
+
+    Raises:
+        AssertionError: (``assert_chance``) an AUROC other than 0.5.
     """
     cats = sorted(set(sub_tr["fields"].tolist()) | set(ev["fields"].tolist()))
     clf = er.fit_logreg(er.onehot(sub_tr["fields"], cats), sub_tr["y"], p, seed)
     probs = clf.predict_proba(er.onehot(ev["fields"], cats))[:, 1]
-    return er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
+    m = er.probe_metrics("test_baseline_fields", ev["y"], probs, float(ev["y"].mean()), p["decision_threshold"])
+    assert not assert_chance or abs(m["test_baseline_fields_auroc"] - 0.5) <= er.EXACT_AUROC_ATOL, (
+        f"structure baseline AUROC {m['test_baseline_fields_auroc']} != 0.5 on a set balanced per field set -- the balancing is broken")
+    return m
 
 
 def check_pairs(ev: dict) -> None:
@@ -617,7 +671,7 @@ def report(ev: dict, probs_by_method: dict[str, np.ndarray], metrics: dict, p: d
     cr.save_evset(out / "artifacts" / "calibration_predictions.npz", evset, subset_id=ev["subset_id"], parent_valid=ev["parent_valid"],
                   size=ev["size"], parent_size=ev["parent_size"], pair_id=ev["pair_id"])
     caption = {None: "Evaluation: all common test subset rows.",
-               CORRUPTED_PARENTS: "Evaluation: all common test subset rows of corrupted parents (clean-parent rows excluded)."}[selection]
+               CORRUPTED_PARENTS: "Evaluation: common test subset rows of corrupted parents, balanced valid / invalid per error type and field set."}[selection]
     m = cr.write_report(evset, rep_cfg, ets, p["ci_level"], seed, fig_dir, out, "calibration", caption)
     if selection is not None:
         m[f"control_report_skipped_{selection}"] = 1
@@ -663,7 +717,10 @@ def run(cfg: dict, runs_root: Path) -> dict:
     selection = p["selection"]
     pos_tr, counts_tr = select_rows(sub_tr, selection)
     pos_te, counts_te = select_rows(sub_te, selection)   # sub_te stays whole: the judges' ids are positions in it, and the prefix check reads all its rows
+    n_selected_train, n_selected_test = len(pos_tr), len(pos_te)
     if selection is not None:
+        pos_tr, balance_tr = balance_cells(sub_tr, pos_tr, seed)
+        counts_tr.update(balance_tr)
         sub_tr = cut(sub_tr, pos_tr, link_twins=False)
 
     lms: dict[str, dict] = {}
@@ -694,21 +751,26 @@ def run(cfg: dict, runs_root: Path) -> dict:
               for k, i in {**{k: v["idx_te"] for k, v in lms.items()}, **{k: v["idx"] for k, v in judges.items()}}.items()}
     common = sorted(set.intersection(*(set(i) for i in scored.values())))
     assert common, "no test row was scored by every method"
-    ev = cut(sub_te, np.array(common), link_twins=selection is None)
+    evaluated = common
+    if selection is not None:   # balanced after the common set, so that every method is scored on exactly the same balanced rows
+        evaluated, balance_te = balance_cells(sub_te, np.array(common), seed)
+        evaluated = evaluated.tolist()
+        counts_te.update(balance_te)
+    ev = cut(sub_te, np.array(evaluated), link_twins=selection is None)
     metrics: dict[str, float] = {"n_test_subsets_file": len(sub_te["subset_id"]), "n_common_test_rows": len(common),
-                                 "n_selected_train_rows": int(len(pos_tr)), "n_selected_test_rows": int(len(pos_te))}
+                                 "n_selected_train_rows": n_selected_train, "n_selected_test_rows": n_selected_test}
     metrics.update({f"train_{k}": v for k, v in counts_tr.items()})
     metrics.update({f"test_{k}": v for k, v in counts_te.items()})
     for label, i in scored.items():
         metrics[f"{label}_n_test_rows"], metrics[f"{label}_n_dropped_rows"] = len(i), len(i) - len(common)
-    metrics.update(structure_baseline(sub_tr, ev, p, seed))
+    metrics.update(structure_baseline(sub_tr, ev, p, seed, selection is not None))
 
     art_dir = out / "artifacts"
     probs_by_method: dict[str, np.ndarray] = {}
     probe_times: dict[str, dict] = {}
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
-        rows_ev = [m["rows_te"][i] for i in common]
+        rows_ev = [m["rows_te"][i] for i in evaluated]
         m_metrics, lm_probs = run_lm(label, spec["layer"], p, seed, m["tr"], m["rows_tr"], sub_tr["y"][m["idx_tr"]], m["te"], rows_ev, ev, m["prefix"], art_dir)
         probs_by_method[label] = lm_probs.astype(np.float64)
         probe_times[label] = m_metrics.pop("probe_train_time")
@@ -718,7 +780,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     for spec in p["judges"]:
         label, j = spec["label"], judges[spec["label"]]
         pos = {int(i): n for n, i in enumerate(j["idx"].tolist())}
-        probs = j["probs"][[pos[i] for i in common]]
+        probs = j["probs"][[pos[i] for i in evaluated]]
         np.savez_compressed(art_dir / f"{label}_test_predictions.npz", subset_id=ev["subset_id"], prob_valid=probs, label_valid=ev["y"])
         probs_by_method[label] = probs.astype(np.float64)
         for k_, v in {**score_method(label, ev, probs, p, seed), "n_excluded_overlong": j["n_excluded"], **j["extra"]}.items():
