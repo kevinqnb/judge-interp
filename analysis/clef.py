@@ -9,10 +9,10 @@ Reads ``clef_entity_row`` / ``clef_relation_conditional`` / ``clef_record_onesho
 and evaluates each on minimal pairs, with the metric code of ``analysis/entity_detection.py``
 *unchanged* (loaded, not copied):
 
-- entity: each corrupted span with its clean twin span (``main_span_pairs`` on the main row file the
-  run judged; null-fill spans are twinned with another document's span). Reported overall, per
-  error type, per (type, k), without null-fill pairs, and the row-context diagnostic (uncorrupted
-  spans of corrupted rows vs the clean row), plus per-field accuracy.
+- entity: each corrupted span with the same span in its patched row (``main_span_pairs`` on the main eval
+  row file the run judged; the corrupted row with only that span restored, so only the target differs;
+  null-fill spans have no counterpart). Reported overall, per error type, per (type, k), and the
+  row-context diagnostic (uncorrupted spans of corrupted rows vs the clean row), plus per-field accuracy.
 - conditional / oneshot: each invalid sample with its twin (same ``pair_id``); a run must hold
   every pair whole. Reported overall, per error type and per cell. Subset size is identical within
   a pair, so the parameter-free size baseline (AUROC of ``-size``) is exactly 0.5 (asserted).
@@ -49,7 +49,7 @@ FIGURES_DIR = Path(__file__).parent / "figures"
 KINDS = {"entity": "clef_entity_row", "conditional": "clef_relation_conditional", "oneshot": "clef_record_oneshot"}
 REF_SET_RATE = "evaluation_set_rate"
 COMMON = ("doc_ids", "label_valid", "p_true", "logit_true", "logit_false", "n_tokens", "context_doc")
-ENTITY_COLS = COMMON + ("field", "field_error_type", "row_error_type", "row_ordinal", "row_k", "value")
+ENTITY_COLS = COMMON + ("field", "field_error_type", "row_error_type", "row_ordinal", "row_k", "value", "patch_target", "parent_k")
 SAMPLE_COLS = COMMON + ("sample_id", "error_type", "pair_id", "cell", "size", "fields", "n_invalid_fields")
 
 
@@ -85,12 +85,11 @@ def load_run(run_id: str, runs_root: Path, kind: str) -> dict:
 
 
 # ------------------------------------------------------------------------ evaluation sets
-def entity_eval_set(run: dict, rows: list[dict], seed: int) -> dict:
-    """Minimal entity pairs of an entity run (``er.main_span_pairs``), both members stacked, with
+def entity_eval_set(run: dict, rows: list[dict]) -> dict:
+    """Patched entity pairs of an entity run (``er.main_span_pairs``), both members stacked, with
     ``probs`` and the row-context diagnostic's ``p_kept`` / ``p_clean``."""
-    z = er.main_span_pairs(run, rows, seed)
-    s = er.stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"],
-                       null_fill=z["null_fill"], doc=z["doc"])
+    z = er.main_span_pairs(run, rows, run["params"]["read_fields"])
+    s = er.stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"], doc=z["doc"])
     s["type_k"] = np.char.add(np.char.add(s["error_type"], "_k"), s["k"].astype(str))
     s["probs"] = run["p_true"][s["idx"]]
     s["p_kept"], s["p_clean"] = run["p_true"][z["kept"]], run["p_true"][z["clean"]]
@@ -151,11 +150,6 @@ def analyse_run(label: str, run: dict, ev: dict, spec: dict, p: dict, fig_dir: P
         for col in ("error_type", "type_k"):
             for k, v in er.stratum_report(y, probs, thr, ev[col]).items():
                 m[f"test_{k}"] = v
-        no_fill = ~ev["null_fill"]
-        m["n_null_fill_pairs"] = int(ev["null_fill"][~y].sum())
-        m.update(er.probe_metrics("test_no_null_fill", y[no_fill], probs[no_fill], ref_rate, thr))
-        for k, v in er.stratum_report(y[no_fill], probs[no_fill], thr, ev["error_type"][no_fill]).items():
-            m[f"test_no_null_fill_{k}"] = v
         n_kept = len(ev["p_kept"])
         m["test_kept_mean_p_valid"], m["test_kept_twin_mean_p_valid"] = float(ev["p_kept"].mean()), float(ev["p_clean"].mean())
         m["test_kept_valid_acc"] = float((ev["p_kept"] > thr).mean())
@@ -201,7 +195,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         r = load_run(spec["run_id"], runs_root, spec["kind"])
         print(f"{spec['label']}: {r['run_id']} n={len(r['p_true'])} context_control={r['params']['context_control']}")
         if spec["kind"] == "entity":
-            ev = entity_eval_set(r, er.load_run_rows(spec["run_id"], runs_root, er.REPO_ROOT, "main"), p["twin_seed"])
+            ev = entity_eval_set(r, er.load_run_rows(spec["run_id"], runs_root, er.REPO_ROOT, "main"))
         else:
             ev = sample_eval_set(r)
         metrics[f"{spec['label']}_context_is_other_document"] = int(r["params"]["context_control"] == "other_document")

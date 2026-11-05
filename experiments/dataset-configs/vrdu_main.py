@@ -38,7 +38,7 @@ DATASET = DatasetSpec(
         "another field of the record"
     ),
     row_index_key=None,
-    split_path="vrdu/main/{split}.json",
+    split_path="vrdu/main/{split}_eval.json",
     context_path="vrdu/ocr/{document_id}.txt",
     supports_relation=False,
     ordered_fields=False,

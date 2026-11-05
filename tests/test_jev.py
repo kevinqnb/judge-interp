@@ -51,7 +51,7 @@ def _scorer(client):
 def test_entity_units_one_question_per_nonnull_field_and_a_json_state():
     strata = {"valid": None, "inter_document": None, "cross_type": None}
     p = dict(data_root="tests/fixtures/entity_detection_mini", split="train", error_types=["inter_document", "cross_type"],
-             rows_per_stratum=strata, context_token_limit=None)
+             rows_per_stratum=strata, context_token_limit=None, read_fields="all")
     items = edr.build_items(SPECS["main"], p, 0, REPO_ROOT, None)
     contexts = {it["document_id"]: it["context"] for it in items}
     units = jev.entity_units(items, SPECS["main"], contexts)

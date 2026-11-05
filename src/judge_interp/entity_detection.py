@@ -92,7 +92,7 @@ class EntityDetectionLM(RowDetectionLM):
     """``RowDetectionLM`` for the entity-detection instructions."""
 
 
-TASK_PARAMS = {"entity_detection": ROW_PARAMS}
+TASK_PARAMS = {"entity_detection": (*ROW_PARAMS, "read_fields")}   # read_fields: row_detection.READ_FIELDS
 
 
 def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg: None) -> dict:

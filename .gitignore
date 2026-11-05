@@ -228,6 +228,8 @@ CLAUDE.local.md
 /data/vrdu/ocr/
 /data/vrdu/main/train.json
 /data/vrdu/main/test.json
+/data/vrdu/main/train_eval.json
+/data/vrdu/main/test_eval.json
 /data/vrdu/line/train.json
 /data/vrdu/line/test.json
 /data/vrdu/line/train_subsets.json

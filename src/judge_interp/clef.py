@@ -55,7 +55,7 @@ _COMMON_PARAMS = (
     "data_root", "model_config", "dataset_config", "device", "overlong_docs", "context_control",
     "determinism_check_n", "known_answer_check",
 )
-_ROW_PARAMS = (*_COMMON_PARAMS, "split", "error_types", "rows_per_stratum")
+_ROW_PARAMS = (*_COMMON_PARAMS, "split", "error_types", "rows_per_stratum", "read_fields")   # read_fields: "all" (every question is asked and stored)
 _SAMPLE_PARAMS = (*_COMMON_PARAMS, "samples_path")
 TASK_PARAMS: dict[str, tuple[str, ...]] = {
     "clef_entity_row": _ROW_PARAMS, "clef_relation_conditional": _SAMPLE_PARAMS, "clef_record_oneshot": _SAMPLE_PARAMS,
@@ -780,7 +780,8 @@ def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Pat
     """
     assert task in TASKS, task
     if task == "clef_entity_row":
-        item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
+        assert p["read_fields"] == "all", f"Clef asks every question of a row: read_fields must be 'all', got {p['read_fields']!r}"
+        item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum", "read_fields")}
         item_params["context_token_limit"] = None  # over-length handling is Clef's own (overlong_docs)
         items = edr.build_items(spec, item_params, seed, repo_root, None)
         contexts = {it["document_id"]: it["context"] for it in items}

@@ -58,7 +58,7 @@ _COMMON_PARAMS = (
     "known_answer_check",
 )
 TASK_PARAMS: dict[str, tuple[str, ...]] = {
-    "jev_entity_row": (*_COMMON_PARAMS, "split", "error_types", "rows_per_stratum"),
+    "jev_entity_row": (*_COMMON_PARAMS, "split", "error_types", "rows_per_stratum", "read_fields"),
     "jev_relation_conditional": (*_COMMON_PARAMS, "samples_path"),
     "jev_record_oneshot": (*_COMMON_PARAMS, "samples_path"),
 }
@@ -465,7 +465,8 @@ def build_units(task: str, p: dict, seed: int, spec: DatasetSpec, repo_root: Pat
     """
     assert task in TASKS, task
     if task == "jev_entity_row":
-        item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum")}
+        assert p["read_fields"] == "all", f"Jev asks every question of a row: read_fields must be 'all', got {p['read_fields']!r}"
+        item_params = {k: p[k] for k in ("data_root", "split", "error_types", "rows_per_stratum", "read_fields")}
         item_params["context_token_limit"] = None  # no local tokenizer: the API rejects an over-length request
         items = edr.build_items(spec, item_params, seed, repo_root, None)
         contexts = {it["document_id"]: it["context"] for it in items}

@@ -125,30 +125,44 @@ def corrupt(base, et, fields):
 X, Y, Z = clean("X", agency=None), clean("Y"), clean("Z")
 
 
-def test_pairs_twin_by_document_and_null_fill_by_other_document():
-    rows = [X, Y, Z, corrupt(X, "inter_document", ["agency"]), corrupt(Y, "inter_document", ["advertiser"]),
-            corrupt(Z, "inter_document", ["advertiser"])]
-    pairs = ms.main_entity_pairs(rows, seed=0)
+def test_k1_pair_valid_member_is_the_clean_row_and_null_fill_is_dropped():
+    rows = [X, Y, corrupt(X, "inter_document", ["agency"]), corrupt(Y, "inter_document", ["advertiser"])]
+    patched = ms.patched_rows(rows)
+    assert patched == []   # k = 1: the patch is the clean row
+    (pair,) = ms.patched_entity_pairs(rows, patched)   # X's agency is a null fill: no pair
+    assert pair["invalid"] == ms.span("Y", "inter_document", 1, "advertiser")
+    assert pair["valid"] == ms.span("Y", None, 0, "advertiser")
+
+
+def test_patched_row_restores_only_the_target():
+    rows = [Y, corrupt(Y, "cross_type", ["advertiser", "property", "gross_amount"])]
+    patched = ms.patched_rows(rows)
+    assert [q["patch_target"] for q in patched] == ["advertiser", "property", "gross_amount"]
+    parent = rows[1]
+    for q in patched:
+        f = q["patch_target"]
+        assert q[f] == Y[f] and q["field_errors"][f] is None
+        assert all(q[g] == parent[g] for g in ms.MAIN_FIELDS if g != f)
+        assert q["k"] == q["num_invalid_fields"] == 2 == len(q["invalid_fields"]) and f not in q["invalid_fields"]
+        assert q["parent_k"] == 3 and not q["valid"] and q["error_type"] == "cross_type"
+        assert q["field_errors"]["property" if f == "advertiser" else "advertiser"] is not None
+    pairs = ms.patched_entity_pairs(rows, patched)
     assert len(pairs) == 3
-    same = [p for p in pairs if not p["null_fill"]]
-    assert {(p["invalid"]["document_id"], p["valid"]["document_id"]) for p in same} == {("Y", "Y"), ("Z", "Z")}
-    assert all(p["twin"] == "same_document" and p["valid"]["error_type"] is None and p["valid"]["k"] == 0 for p in same)
-    (fill,) = [p for p in pairs if p["null_fill"]]
-    assert fill["twin"] == "other_document" and fill["field"] == "agency" and fill["valid"]["document_id"] in {"Y", "Z"}
+    assert pairs[0]["invalid"] == ms.span("Y", "cross_type", 3, "advertiser")
+    assert pairs[0]["valid"] == ms.span("Y", "cross_type", 2, "advertiser", patch_target="advertiser")
 
 
-def test_null_fill_twin_is_another_document_with_the_field():
-    w = clean("W", agency=None)
-    rows = [X, Y, w, corrupt(X, "cross_type", ["agency"])]
-    for seed in range(5):
-        (fill,) = ms.main_entity_pairs(rows, seed)
-        assert fill["valid"]["document_id"] == "Y"   # W has no agency, X is the document itself
+def test_null_fill_target_has_no_patched_row_or_pair():
+    rows = [X, corrupt(X, "inter_document", ["agency", "advertiser"])]
+    patched = ms.patched_rows(rows)
+    assert [q["patch_target"] for q in patched] == ["advertiser"]
+    assert [p["field"] for p in ms.patched_entity_pairs(rows, patched)] == ["advertiser"]
 
 
-def test_null_fill_without_any_other_document_raises():
-    rows = [X, clean("W", agency=None), corrupt(X, "cross_type", ["agency"])]
-    with pytest.raises(AssertionError, match="no other document has this field"):
-        ms.main_entity_pairs(rows, seed=0)
+def test_missing_patched_row_raises():
+    rows = [Y, corrupt(Y, "inter_document", ["advertiser", "agency"])]
+    with pytest.raises(KeyError):
+        ms.patched_entity_pairs(rows, [])
 
 
 def test_kept_pairs_are_the_uncorrupted_shown_fields():
@@ -158,15 +172,17 @@ def test_kept_pairs_are_the_uncorrupted_shown_fields():
     assert all(p["kept"]["document_id"] == p["clean"]["document_id"] == "X" for p in kept)
 
 
-def test_pairs_on_the_built_corpus_are_balanced_per_stratum(built):
+def test_patched_pairs_on_the_built_corpus_are_balanced_per_stratum(built):
     for split in b.SPLITS:
         rows = built[split]
-        pairs = ms.main_entity_pairs(rows, seed=0)
-        assert len(pairs) == sum(r["k"] for r in rows if not r["valid"])   # one twin per corrupted span
-        clean_rows = {r["document_id"]: r for r in rows if r["valid"]}
+        patched = ms.patched_rows(rows)
+        pairs = ms.patched_entity_pairs(rows, patched)
+        n_spans = sum(1 for r in rows if not r["valid"] for f in r["invalid_fields"] if not r["field_errors"][f]["source"]["null_fill"])
+        assert len(pairs) == n_spans
+        assert len(patched) == sum(1 for p in pairs if p["k"] >= 2)
+        assert len({(p["invalid"]["document_id"], p["invalid"]["error_type"], p["k"], p["field"]) for p in pairs}) == len(pairs)
         for p in pairs:
-            assert clean_rows[p["valid"]["document_id"]][p["field"]] is not None
-            assert (p["twin"] == "same_document") == (p["valid"]["document_id"] == p["invalid"]["document_id"]) == (not p["null_fill"])
+            assert p["valid"]["document_id"] == p["invalid"]["document_id"] and p["valid"]["field"] == p["field"]
 
 
 # ---------------------------------------------------------------- generation units (moved from the -05 tests)

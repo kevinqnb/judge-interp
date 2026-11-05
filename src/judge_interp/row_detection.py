@@ -53,8 +53,10 @@ READ_TOKEN = _PAD + '"\n'  # the one token every entity is read at: pad, closing
 SPAN_META_KEYS = (
     "dataset", "row_ordinal", "line_index", "row_error_type", "row_k", "field", "field_position",
     "value", "label_valid", "field_error_type", "source_scope", "source_dataset", "source_field",
-    "source_line_index", "exchanged_with", "pair_id", "cell",
+    "source_line_index", "exchanged_with", "pair_id", "cell", "patch_target", "parent_k",
 )
+# ``read_fields`` (a patched dataset's rows only): which spans of a patched row are read.
+READ_FIELDS = ("all", "target_only")
 # Error types whose same-document sources record the swap partner (``exchanged_with``).
 _EXCHANGE_TYPES = ("cross_type", "cross_item")
 # Per-span columns the model side adds.
@@ -211,14 +213,15 @@ def _stratum(row: dict, spec: DatasetSpec) -> str:
 def _sort_key(row: dict, spec: DatasetSpec) -> tuple:
     """Total order of rows: document, index within it, stratum, k (then sample id for a paired dataset)."""
     idx = row_index(row, spec)
-    key = (row["document_id"], -1 if idx is None else idx, _stratum(row, spec), row["k"])
+    key = (row["document_id"], -1 if idx is None else idx, _stratum(row, spec), row["k"], row.get("patch_target") or "")
     return key if spec.pair_key is None else (*key, row["sample_id"])
 
 
 def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratum: dict, seed: int) -> list[dict]:
     """Draw a stratified subset of rows.
 
-    Strata are ``"valid"`` plus each error type present in ``rows``; for a paired dataset
+    Strata are ``"valid"`` plus each error type present in ``rows`` (a patched row -- one with a ``patch_target`` --
+    is not drawn on its own: it comes with its parent row); for a paired dataset
     (``spec.pair_key``) they are the ``cell`` values present, and the draw is by pair: a
     count is a number of pairs, and both rows of a drawn pair are kept.
 
@@ -237,10 +240,16 @@ def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratu
         ValueError: key mismatch, a count that is not ``None`` or an int >= 1, or a
             stratum smaller than its requested count.
     """
-    units: dict[str, list[list[dict]]] = {}   # stratum -> draw units (a row, or the two rows of a pair)
+    units: dict[str, list[list[dict]]] = {}   # stratum -> draw units (a row + its patched rows, or the two rows of a pair)
     if spec.pair_key is None:
+        patched: dict[tuple, list[dict]] = {}   # parent (document, error type, k) -> its patched rows: drawn with it
         for r in rows:
-            units.setdefault(_stratum(r, spec), []).append([r])
+            if r.get("patch_target") is not None:
+                patched.setdefault((r["document_id"], r["error_type"], r["parent_k"]), []).append(r)
+        for r in rows:
+            if r.get("patch_target") is None:
+                units.setdefault(_stratum(r, spec), []).append([r, *patched.pop((r["document_id"], r["error_type"], r["k"]), [])])
+        assert not patched, f"patched rows without a parent row: {sorted(patched)[:3]}"
     else:
         pairs: dict[str, list[dict]] = {}
         for r in rows:
@@ -254,7 +263,7 @@ def select_rows(rows: list[dict], spec: DatasetSpec, split: str, rows_per_stratu
         raise ValueError(f"rows_per_stratum keys {sorted(rows_per_stratum)} != strata present {strata}")
     chosen: list[dict] = []
     for s in strata:
-        pool = sorted(units[s], key=lambda u: _sort_key(u[0], spec))
+        pool = sorted(units[s], key=lambda u: _sort_key(u[0], spec))   # a unit's first row is the original row
         n = rows_per_stratum[s]
         if n is None:
             chosen.extend(r for u in pool for r in u)
@@ -284,7 +293,8 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
         Items ordered by ``select_rows``: ``document_id``, ``row_ordinal`` (0-based
         within the document), ``instructions``, ``context``, ``query`` and ``spans``
         (one dict per non-null field with ``char_start``, ``char_end`` and every key
-        of ``SPAN_META_KEYS``).
+        of ``SPAN_META_KEYS``; only the target's for a patched row if ``params["read_fields"]`` is
+        ``"target_only"``). ``params["read_fields"]`` is required iff the row file has patched rows.
 
     Raises:
         ValueError: tokenizer/limit mismatch, or a context
@@ -299,6 +309,12 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
     rows = load_split(data_root, spec, split, params["error_types"])
     for r in rows:
         check_row(r, spec)
+    patched_file = {"patch_target" in r for r in rows}
+    assert len(patched_file) == 1, "some rows carry patch_target and some do not"
+    patched_file = patched_file.pop()
+    assert patched_file == ("read_fields" in params), "params.read_fields is required iff the row file has patched rows"
+    read_fields = params["read_fields"] if patched_file else None
+    assert read_fields in (None, *READ_FIELDS), f"read_fields must be one of {READ_FIELDS}, got {read_fields!r}"
     selected = select_rows(rows, spec, split, params["rows_per_stratum"], seed)
 
     contexts: dict[str, str] = {}
@@ -319,7 +335,10 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
         ordinal[doc_id] = j + 1
         rendered = render_row(r, spec)
         spans = []
+        target = r["patch_target"] if patched_file else None
         for pos, (f, c0, c1) in enumerate(rendered["spans"], start=1):
+            if target is not None and read_fields == "target_only" and f != target:
+                continue
             entry = r["field_errors"][f]
             spans.append({
                 "char_start": c0,
@@ -335,10 +354,13 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
                 "label_valid": entry is None,
                 "field_error_type": "" if entry is None else entry["error_type"],
                 **_source_columns(entry),
+                "patch_target": target or "",
+                "parent_k": r["parent_k"] if patched_file else r["k"],
                 "pair_id": "" if spec.pair_key is None else r[spec.pair_key],
                 "cell": "" if spec.pair_key is None else r["cell"],
             })
         assert spans, f"{doc_id!r}: row with no non-null field"
+        assert target is None or any(sp["field"] == target for sp in spans), f"{doc_id!r}: no span for patch target {target!r}"
         items.append({
             "document_id": doc_id,
             "row_ordinal": j,
@@ -792,7 +814,9 @@ def check_row_invariants(result: dict) -> None:
     are constant, the number of invalid spans equals ``row_k``, a valid row has no
     invalid span and vice versa, each invalid span's ``field_error_type`` equals the
     row's, valid spans have an empty one, and ``field_position`` increases strictly
-    from 1.
+    from 1. A patched row (``patch_target`` set; ``row_k`` counts its remaining corruptions, ``parent_k`` = ``row_k`` + 1)
+    has its target as one valid span; read at the target alone it has just that span, so the count and position checks
+    are skipped for it.
 
     Args:
         result: aggregated arrays from ``_aggregate_rows``.
@@ -811,10 +835,21 @@ def check_row_invariants(result: dict) -> None:
     np.minimum.at(lo, inv, row_k)
     np.maximum.at(hi, inv, row_k)
     assert (lo == hi).all(), "row_k is not constant within a prompt"
-    assert (lo == n_invalid.astype(np.int64)).all(), "a prompt's invalid-span count != its row_k"
+    first = np.unique(inv, return_index=True)[1]
+    n_spans_per = np.bincount(inv, minlength=n_groups)
+    target = result["patch_target"]
+    patched = target[first] != ""
+    assert (target == target[first][inv]).all(), "patch_target is not constant within a prompt"
+    only_target = patched & (n_spans_per == 1)   # a patched row read at its target alone: the other spans are not stored
+    assert (n_spans_per[only_target] == 1).all()
+    assert (lo[~only_target] == n_invalid.astype(np.int64)[~only_target]).all(), "a prompt's invalid-span count != its row_k"
+    if patched.any():
+        t_valid = result["label_valid"].astype(bool) & (result["field"] == target) & (target != "")
+        assert (np.bincount(inv, weights=t_valid, minlength=n_groups)[patched] == 1).all(), "a patched row's target span is not one valid span"
+        assert (result["parent_k"][first][patched] == lo[patched] + 1).all(), "patched row: parent_k != row_k + 1"
+    assert (result["parent_k"][first][~patched] == lo[~patched]).all(), "an ordinary row's parent_k != row_k"
 
     ret, rot = result["row_error_type"], result["field_error_type"]
-    first = np.unique(inv, return_index=True)[1]
     assert ((ret[first] == "") == (lo == 0)).all(), "row_error_type empty iff row_k == 0"
     assert (ret == ret[first][inv]).all(), "row_error_type is not constant within a prompt"
     assert (rot[~label_valid] == ret[~label_valid]).all(), "invalid span's error type != its row's"
@@ -825,7 +860,7 @@ def check_row_invariants(result: dict) -> None:
     sp, si = pos[order], inv[order]
     same = si[1:] == si[:-1]
     assert (sp[1:][same] > sp[:-1][same]).all(), "field_position not increasing within a prompt"
-    assert (sp[np.r_[True, ~same]] == 1).all(), "field_position does not start at 1"
+    assert (sp[np.r_[True, ~same]][~only_target] == 1).all(), "field_position does not start at 1"
 
 
 def compute_metrics(result: dict, spec: DatasetSpec) -> dict:

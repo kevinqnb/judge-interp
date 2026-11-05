@@ -43,7 +43,7 @@ er = ac.er
 FIGURES_DIR = ac.FIGURES_DIR
 KINDS = {"entity": "jev_entity_row", "conditional": "jev_relation_conditional", "oneshot": "jev_record_oneshot"}
 COMMON = ("doc_ids", "label_valid", "p_true", "n_tokens", "context_doc")
-ENTITY_COLS = COMMON + ("field", "field_error_type", "row_error_type", "row_ordinal", "row_k", "value")
+ENTITY_COLS = COMMON + ("field", "field_error_type", "row_error_type", "row_ordinal", "row_k", "value", "patch_target", "parent_k")
 SAMPLE_COLS = COMMON + ("sample_id", "error_type", "pair_id", "cell", "size", "fields", "n_invalid_fields")
 P_GRID = 0.01       # resolution of the API's P(true)
 P_GRID_ATOL = 1e-6
@@ -109,7 +109,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         r = load_run(spec["run_id"], runs_root, spec["kind"])
         print(f"{spec['label']}: {r['run_id']} n={len(r['p_true'])} context_control={r['params']['context_control']}")
         if spec["kind"] == "entity":
-            ev = ac.entity_eval_set(r, er.load_run_rows(spec["run_id"], runs_root, er.REPO_ROOT, "main"), p["twin_seed"])
+            ev = ac.entity_eval_set(r, er.load_run_rows(spec["run_id"], runs_root, er.REPO_ROOT, "main"))
         else:
             ev = ac.sample_eval_set(r)
         metrics[f"{spec['label']}_context_is_other_document"] = int(r["params"]["context_control"] == "other_document")

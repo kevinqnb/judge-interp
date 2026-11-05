@@ -1,7 +1,8 @@
 """Unit tests for analysis/clef.py on hand-built Clef run directories (no model involved).
 
-Entity run: the main rows of test_analysis_entity_detection.py (3 minimal pairs: a cross_type null-fill
-product, an inter_document advertiser, an inter_document null-fill agency; 5 kept spans). Every invalid
+Entity run: the main eval rows of test_analysis_entity_detection.py (3 patched pairs: an inter_document k=1
+advertiser vs the clean row, and the k=2 row's advertiser and agency vs their patched rows; 5 kept spans;
+the two null-fill spans have no pair). Every invalid
 span gets P(true) 0.1, every valid one 0.9 -> on the 6 paired items AUROC 1.0, accuracy 1.0, Brier 0.01,
 and with bss_ref_rate = set rate 0.5, brier_ref 0.25 -> BSS = 1 - 0.01 / 0.25.
 
@@ -39,7 +40,7 @@ def _write_run(root: Path, run_id: str, kind: str, cols: dict, **over) -> None:
     (d / "metrics.json").write_text(json.dumps({
         "n_predictions": len(lab), "n_valid": int(lab.sum()), "n_excluded_overlong": 0, **over}))
     (d / "run.json").write_text(json.dumps({"status": "success", "task": ac.KINDS[kind]}))
-    (d / "config.snapshot.yaml").write_text(yaml.safe_dump({"params": {"context_control": "none"}}))
+    (d / "config.snapshot.yaml").write_text(yaml.safe_dump({"params": {"context_control": "none", "read_fields": "all"}}))
 
 
 def _entity_cols(p_invalid=0.1, p_valid=0.9, override=None):
@@ -55,31 +56,31 @@ def _entity_cols(p_invalid=0.1, p_valid=0.9, override=None):
 def _entity(tmp_path, cols, ref):
     _write_run(tmp_path, "r", "entity", cols)
     run = ac.load_run("r", tmp_path, "entity")
-    ev = ac.entity_eval_set(run, ted.MAIN_ROWS, 0)
+    ev = ac.entity_eval_set(run, ted.MAIN_ROWS)
     return ac.analyse_run("e", run, ev, {"bss_ref_rate": ref}, P, tmp_path / "fig", 0)
 
 
 def test_entity_run_hand_worked_metrics(tmp_path):
     m = _entity(tmp_path, _entity_cols(), ac.REF_SET_RATE)
-    assert m["n"] == 6 and m["n_pairs"] == 3 and m["n_null_fill_pairs"] == 2
+    assert m["n"] == 6 and m["n_pairs"] == 3
     assert m["test_auroc"] == 1.0 and m["test_accuracy"] == 1.0 and m["test_auroc_ci_lo"] == 1.0
     assert m["test_brier"] == pytest.approx(0.01)
     assert m["bss_ref_rate"] == 0.5 and m["test_bss"] == pytest.approx(1 - 0.01 / 0.25)
-    assert m["test_detect_inter_document"] == 1.0 and m["test_detect_cross_type"] == 1.0
-    assert m["test_n_inter_document"] == 4 and m["test_n_cross_type_k1"] == 2
-    assert m["test_no_null_fill_auroc"] == 1.0 and m["test_no_null_fill_n_inter_document"] == 2
+    assert m["test_detect_inter_document"] == 1.0 and "test_detect_cross_type" not in m   # null-fill spans have no pair
+    assert m["test_n_inter_document"] == 6 and m["test_n_inter_document_k1"] == 2 and m["test_n_inter_document_k2"] == 4
+    assert "test_no_null_fill_auroc" not in m
     # kept spans and their clean twins all at 0.9: no row-context signal
     assert m["test_clean_vs_kept_auroc"] == 0.5 and m["test_kept_valid_acc"] == 1.0
     assert (tmp_path / "fig" / "e" / "calibration.png").is_file()
 
 
-def test_entity_run_with_a_missed_error_type(tmp_path):
-    cols = _entity_cols(override={("a", "cross_type", 1, "product"): 0.8})   # the cross_type span is called valid
+def test_entity_run_with_a_missed_invalid_span(tmp_path):
+    cols = _entity_cols(override={("a", "inter_document", 1, "advertiser"): 0.8})   # the k = 1 span is called valid
     m = _entity(tmp_path, cols, 0.5)
-    assert m["test_detect_inter_document"] == 1.0 and m["test_detect_cross_type"] == 0.0
-    assert m["test_accuracy"] == pytest.approx(5 / 6)
+    assert m["test_detect_inter_document_k1"] == 0.0 and m["test_detect_inter_document_k2"] == 1.0
+    assert m["test_detect_inter_document"] == pytest.approx(2 / 3) and m["test_accuracy"] == pytest.approx(5 / 6)
     # ranking is still perfect (0.8 < every valid 0.9) although the 0.5 threshold misses that item
-    assert m["test_auroc_cross_type"] == 1.0 and m["test_auroc"] == 1.0
+    assert m["test_auroc_inter_document_k1"] == 1.0 and m["test_auroc"] == 1.0
 
 
 def test_loader_gates(tmp_path):
@@ -131,7 +132,7 @@ def test_analyse_run_without_figures_gives_point_values_only(tmp_path):
     bootstrap keys needed in ``p``, and the same point values as the full path."""
     _write_run(tmp_path, "r", "entity", _entity_cols())
     run = ac.load_run("r", tmp_path, "entity")
-    ev = ac.entity_eval_set(run, ted.MAIN_ROWS, 0)
+    ev = ac.entity_eval_set(run, ted.MAIN_ROWS)
     full = ac.analyse_run("e", run, ev, {"bss_ref_rate": 0.5}, P, tmp_path / "fig", 0)
     p_bare = {k: v for k, v in P.items() if k not in ("ece_n_boot", "hist_n_bins", "auroc_n_boot")}
     bare = ac.analyse_run("e", run, ev, {"bss_ref_rate": 0.5}, p_bare, None, 0)

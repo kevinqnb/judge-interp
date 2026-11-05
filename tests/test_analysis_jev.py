@@ -3,7 +3,7 @@
 The metric code is analysis/clef.py's (tested in test_analysis_clef.py); these tests cover what is Jev's own:
 the loader and its gates, the resolution metrics, and that the reused path gives the hand-worked numbers
 through a Jev run. Fixtures as in test_analysis_clef.py: the main rows of test_analysis_entity_detection.py
-(3 minimal pairs; invalid spans P(true) 0.1, valid 0.9 -> AUROC 1.0, Brier 0.01) and the 8 rows (4 minimal
+(3 patched pairs; invalid spans P(true) 0.1, valid 0.9 -> AUROC 1.0, Brier 0.01) and the 8 rows (4 minimal
 pairs) of the relation_detection_mini line fixture.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _write_run(root: Path, run_id: str, kind: str, cols: dict, metrics_over=None
     metrics.pop(drop_metric, None)
     (d / "metrics.json").write_text(json.dumps(metrics))
     (d / "run.json").write_text(json.dumps({"status": "success", "task": aj.KINDS[kind]}))
-    (d / "config.snapshot.yaml").write_text(yaml.safe_dump({"params": {"context_control": "none"}}))
+    (d / "config.snapshot.yaml").write_text(yaml.safe_dump({"params": {"context_control": "none", "read_fields": "all"}}))
 
 
 def test_entity_run_through_the_reused_metrics(tmp_path):
@@ -42,7 +42,7 @@ def test_entity_run_through_the_reused_metrics(tmp_path):
     _write_run(tmp_path, "r", "entity", cols)
     run = aj.load_run("r", tmp_path, "entity")
     assert run["n_excluded"] == 0 and run["determinism_max_abs_diff"] == 0.03 and run["kind"] == "entity"
-    ev = aj.ac.entity_eval_set(run, ted.MAIN_ROWS, 0)
+    ev = aj.ac.entity_eval_set(run, ted.MAIN_ROWS)
     m = aj.ac.analyse_run("e", run, ev, {"bss_ref_rate": aj.ac.REF_SET_RATE}, tac.P, tmp_path / "fig", 0)
     assert m["n"] == 6 and m["test_auroc"] == 1.0 and m["test_brier"] == pytest.approx(0.01)
     assert m["test_bss"] == pytest.approx(1 - 0.01 / 0.25) and m["n_excluded_overlong"] == 0

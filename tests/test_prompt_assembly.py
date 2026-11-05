@@ -24,7 +24,8 @@ END_OF_TURN = {"Qwen/Qwen2.5-0.5B-Instruct": "<|im_end|>", "meta-llama/Llama-3.1
 
 def _items(spec, strata):
     p = dict(data_root=FIXTURE, split="train", error_types=list(spec.error_types),
-             rows_per_stratum=strata, context_token_limit=None)
+             rows_per_stratum=strata, context_token_limit=None,
+             **({"read_fields": "all"} if spec.name == "main" else {}))
     return er.build_items(spec, p, 0, REPO_ROOT)
 
 
@@ -39,7 +40,7 @@ def lm(request):
 def test_every_entity_is_read_at_the_same_token_including_the_last_of_a_row(lm):
     items = (_items(MAIN, {"valid": None, "inter_document": None, "cross_type": None})
              + _items(LINE, dict.fromkeys(LINE_CELLS)))
-    assert len(items) == 4 + 8
+    assert len(items) == 4 + 2 + 8   # 2 patched rows
     for it in items:
         ids, offsets, shift = lm._build_prompt_with_offsets(it["instructions"], it["context"], it["query"])
         reads = []

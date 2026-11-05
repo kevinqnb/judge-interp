@@ -4,7 +4,9 @@ Reads ``main/{train,test}_base.json`` (and ``line/*_base.json``, a source of cro
 ``main/{train,test}.json`` and ``main_build.json`` (provenance). An invalid row differs from its document's
 valid row in exactly ``k`` fields; its identity is ``(document_id, error_type, k)``. One row per achievable
 ``k`` in each type's range (never a requested ``k`` the row cannot reach). The valid row is the clean twin
-of every invalid row of its document (``main_samples.main_entity_pairs``).
+of every k = 1 invalid row of its document. ``main/{split}_eval.json`` is the file the judges run: every row (with ``patch_target`` None) plus, for every corrupted span
+of a row with k >= 2 whose original value is not null, a patched row: the row with only that span restored
+(``main_samples.patched_rows``: the valid member of an entity pair, ``patched_entity_pairs``).
 
 Error types:
 
@@ -36,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import build_vrdu_dataset as base_builder
+import main_samples as ms
 import yaml
 from vrdu_common import (LINE_FIELDS, MAIN_FIELDS, field_kinds, fragment_rate, make_eq, pair_ok, parse_date,
                          pick_fragment_neutral, read_base)
@@ -857,7 +860,12 @@ def main(argv=None):
         rel = f"main/{split}.json"
         (data_root / rel).write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         out["sha256"][rel] = sha256_of(data_root / rel)
-        out["splits"][split] = {
+        eval_file = ms.eval_rows(rows)
+        rel_e = f"main/{split}_eval.json"
+        (data_root / rel_e).write_text(json.dumps(eval_file, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        out["sha256"][rel_e] = sha256_of(data_root / rel_e)
+        out["splits"].setdefault(split, {})["n_patched_rows"] = len(eval_file) - len(rows)
+        out["splits"][split] |= {
             "n_valid": sum(r["valid"] for r in rows), "strata": stratum_stats(rows),
             "skipped_rows": {INTER_DOCUMENT: skipped, CROSS_TYPE: cross_skipped},
             "capped_rows": {INTER_DOCUMENT: capped, CROSS_TYPE: cross_capped},

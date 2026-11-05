@@ -1,33 +1,31 @@
-"""Entity-level evaluation pairs of the VRDU main dataset: each corrupted span with its clean twin span.
+"""Entity-level evaluation pairs of the VRDU main dataset: each corrupted span with its patched counterpart.
 
 A span is one shown field of one main row, keyed ``(document_id, error_type, k, field)`` (``error_type``
-None and ``k`` 0 for the valid row). For each stratum ``(error_type, k)``:
+None and ``k`` 0 for the valid row), plus ``patch_target`` for a patched row. Per corrupted row:
 
-  invalid pairs  every corrupted span, paired with the same field in a clean row. The twin is the
-                 document's own clean row, except for a null-fill span (the field is null there): its twin
-                 is the same field in another document's clean row with that field non-null, drawn with
-                 ``seed`` (``twin = "other_document"``). Such a twin may also be a twin elsewhere in the
-                 stratum: at high k nearly every clean span already is.
+  patched pairs  every corrupted span whose original value is not null, paired with the same field in the
+                 PATCHED row: the corrupted row with only that field restored (``patched_rows``). Nothing else
+                 in the context differs, at any k. For k = 1 the patched row is the document's clean row.
+                 A null-fill span has no patched counterpart (the original shows nothing) and is dropped.
   kept pairs     every uncorrupted shown span of a corrupted row, paired with the same field in the
                  document's clean row. Both are valid: a diagnostic for a probe that only senses "this row
                  has a corruption somewhere".
 
-So every stratum has as many valid twin spans as corrupted spans, matched on field (and, except for
-null-fill, on document). Drop ``null_fill`` pairs for the analysis without filled nulls.
+Each (error type, k, field) stratum is exactly 50/50 and every pair shares its document.
 """
 
 from __future__ import annotations
 
-import random
+import copy
 
 from vrdu_common import MAIN_FIELDS
 
 ERROR_TYPES = ("inter_document", "cross_type")
 
 
-def span(document_id, error_type, k, field):
-    """A span key."""
-    return {"document_id": document_id, "error_type": error_type, "k": k, "field": field}
+def span(document_id, error_type, k, field, patch_target=None):
+    """A span key. ``patch_target``: the restored field of a patched row (None for an ordinary row)."""
+    return {"document_id": document_id, "error_type": error_type, "k": k, "field": field, "patch_target": patch_target}
 
 
 def _clean_rows(rows):
@@ -56,42 +54,108 @@ def _strata(rows):
     return dict(sorted(out.items()))
 
 
-def main_entity_pairs(rows, seed):
-    """Invalid spans paired with clean twin spans, by stratum.
+def patched_rows(rows):
+    """One patched row per non-null-fill corrupted span of every row with k >= 2.
+
+    A patched row is its corrupted parent with ONLY the target field restored to the clean value; the other
+    k - 1 corruptions stay. Keys: the parent's, with ``k`` / ``num_invalid_fields`` / ``invalid_fields`` /
+    ``field_errors`` updated, plus ``patch_target`` (the restored field) and ``parent_k`` (the parent's k). Its row
+    identity is ``(document_id, error_type, k, patch_target)``. A k = 1 parent needs no patched row (its patch
+    is the document's clean row), and a null-fill span has none (the clean value is null: nothing to show).
 
     Args:
         rows: one split's ``main/{split}.json`` rows.
-        seed: seeds the other-document twins of null-fill spans.
 
     Returns:
-        One dict per corrupted span: ``{error_type, k, field, null_fill, twin, invalid: span, valid: span}``,
-        ``twin`` being ``"same_document"`` or ``"other_document"``.
+        The patched rows, sorted by (document, error type, parent k, target field order).
 
     Raises:
-        AssertionError: a malformed row set, or a null-fill span whose field no other document has.
+        AssertionError: a malformed row set, or a patched row that differs from its parent elsewhere.
     """
     clean = _clean_rows(rows)
     out = []
     for (et, k), rs in _strata(rows).items():
         assert {r["document_id"] for r in rs} <= set(clean), (et, k, "invalid row without a clean row")
-        pairs = []
+        if k == 1:
+            continue
         for r in rs:
             doc = r["document_id"]
             for f in r["invalid_fields"]:
                 null_fill = r["field_errors"][f]["source"]["null_fill"]
                 assert null_fill == (clean[doc][f] is None), (doc, et, k, f, "null_fill disagrees with the clean row")
                 if null_fill:
-                    cands = [d for d in sorted(clean) if d != doc and clean[d][f] is not None]
-                    assert cands, (doc, et, k, f, "no other document has this field for a null-fill twin")
-                    twin_doc = random.Random(f"{seed}:{doc}:{et}:{k}:{f}").choice(cands)
+                    continue
+                q = copy.deepcopy(r)
+                q[f] = clean[doc][f]
+                q["field_errors"][f] = None
+                q["invalid_fields"] = [g for g in r["invalid_fields"] if g != f]
+                q["k"] = q["num_invalid_fields"] = k - 1
+                q["patch_target"], q["parent_k"] = f, k
+                assert q["invalid_fields"] and not q["valid"]
+                assert all(q[g] == r[g] for g in MAIN_FIELDS if g != f), (doc, et, k, f, "patch changed another field")
+                assert q[f] != r[f], (doc, et, k, f, "patch left the value unchanged")
+                out.append(q)
+    return out
+
+
+def eval_rows(rows):
+    """The evaluation row file of a split: every row with ``patch_target`` None and ``parent_k`` its own ``k``,
+    then the ``patched_rows``. Every row carries both keys."""
+    base = [{**r, "patch_target": None, "parent_k": r["k"]} for r in rows]
+    return base + patched_rows(rows)
+
+
+def split_eval_rows(rows):
+    """``(original rows, patched rows)`` of an ``eval_rows`` file, the originals without the two extra keys.
+
+    Raises:
+        AssertionError: a row without ``patch_target`` / ``parent_k``, or an original whose ``parent_k`` != ``k``.
+    """
+    assert all("patch_target" in r and "parent_k" in r for r in rows), "not an eval row file (patch_target / parent_k)"
+    orig = [r for r in rows if r["patch_target"] is None]
+    assert all(r["parent_k"] == r["k"] for r in orig)
+    return [{k: v for k, v in r.items() if k not in ("patch_target", "parent_k")} for r in orig], [r for r in rows if r["patch_target"] is not None]
+
+
+def patched_entity_pairs(rows, patched):
+    """Each non-null-fill corrupted span paired with the SAME span in its patched row.
+
+    The members differ only in the target's value (and, for a causal model, nothing before the target changes).
+    For k = 1 the patched row is the document's clean row.
+
+    Args:
+        rows: one split's ``main/{split}.json`` rows (the whole file or any subset closed under documents).
+        patched: ``patched_rows`` of those rows (or of a superset: rows of absent parents are ignored).
+
+    Returns:
+        One dict per pair: ``{error_type, k, field, invalid: span, valid: span}`` (``k`` the corrupted row's).
+        Spans are keyed ``(document_id, error_type, k, field)`` plus ``patch_target`` (None unless a patched row).
+
+    Raises:
+        AssertionError: a malformed row set or a missing patched row.
+    """
+    clean = _clean_rows(rows)
+    by_patch = {(q["document_id"], q["error_type"], q["parent_k"], q["patch_target"]): q for q in patched}
+    assert len(by_patch) == len(patched), "patched rows are not unique"
+    out, used = [], set()
+    for (et, k), rs in _strata(rows).items():
+        assert {r["document_id"] for r in rs} <= set(clean), (et, k, "invalid row without a clean row")
+        for r in rs:
+            doc = r["document_id"]
+            for f in r["invalid_fields"]:
+                if r["field_errors"][f]["source"]["null_fill"]:
+                    continue
+                if k == 1:
+                    assert clean[doc][f] is not None and clean[doc][f] != r[f], (doc, et, f)
+                    valid = span(doc, None, 0, f)
                 else:
-                    twin_doc = doc
-                pairs.append({"error_type": et, "k": k, "field": f, "null_fill": null_fill,
-                              "twin": "other_document" if null_fill else "same_document",
-                              "invalid": span(doc, et, k, f), "valid": span(twin_doc, None, 0, f)})
-        same = [(p["valid"]["document_id"], p["field"]) for p in pairs if not p["null_fill"]]
-        assert len(same) == len(set(same)), (et, k, "a same-document twin occurs twice in one stratum")
-        out += pairs
+                    q = by_patch[(doc, et, k, f)]
+                    assert q[f] == clean[doc][f], (doc, et, k, f, "patched target is not the clean value")
+                    used.add((doc, et, k, f))
+                    valid = span(doc, et, k - 1, f, patch_target=f)
+                out.append({"error_type": et, "k": k, "field": f, "invalid": span(doc, et, k, f), "valid": valid})
+    parents = {(r["document_id"], r["error_type"], r["k"]) for r in rows if not r["valid"]}
+    assert used == {key for key in by_patch if key[:3] in parents}, "a patched row of these rows was not used"
     return out
 
 

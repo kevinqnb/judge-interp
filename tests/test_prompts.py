@@ -14,7 +14,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "judge_interp_mini"
 
 
 def _main_row():
-    return json.loads((FIXTURE / "vrdu" / "main" / "train.json").read_text())[0]
+    return json.loads((FIXTURE / "vrdu" / "main" / "train_eval.json").read_text())[0]
 
 
 def _line_row():

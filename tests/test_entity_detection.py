@@ -41,6 +41,8 @@ def _params(dataset, **kw):
         rows_per_stratum={"valid": None, "inter_document": None, "cross_type": None},
         context_token_limit=None,
     )
+    if dataset == "main":
+        p["read_fields"] = "all"
     if dataset == "line":
         p["error_types"], p["rows_per_stratum"] = ALL_LINE, dict.fromkeys(LINE_CELLS)
     p.update(kw)
@@ -98,11 +100,12 @@ def test_line_prompt_has_no_main_fields():
 def test_labels_from_field_errors():
     items = er.build_items(MAIN, _params("main"), 0, REPO_ROOT)
     assert [(it["document_id"], it["row_ordinal"]) for it in items] == [
-        ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-b", 0),
+        ("doc-a", 0), ("doc-a", 1), ("doc-a", 2), ("doc-a", 3), ("doc-a", 4), ("doc-b", 0),
     ]
-    # doc-a rows sorted by (stratum, k): cross_type, inter_document, valid
-    by = {(it["document_id"], it["spans"][0]["row_error_type"]): it for it in items}
-    cross = by[("doc-a", "cross_type")]
+    # doc-a rows sorted by (stratum, k, patch target): cross_type k=1 patched (advertiser, product), cross_type k=2,
+    # inter_document, valid
+    by = {(it["document_id"], it["spans"][0]["row_error_type"], it["spans"][0]["patch_target"]): it for it in items}
+    cross = by[("doc-a", "cross_type", "")]
     got = {s["field"]: (s["label_valid"], s["field_error_type"], s["source_field"], s["exchanged_with"])
            for s in cross["spans"]}
     assert got["advertiser"] == (False, "cross_type", "product", "product")
@@ -111,14 +114,45 @@ def test_labels_from_field_errors():
     assert [s["row_k"] for s in cross["spans"]] == [2] * 8
     assert sum(not s["label_valid"] for s in cross["spans"]) == 2
 
-    inter = by[("doc-a", "inter_document")]
+    inter = by[("doc-a", "inter_document", "")]
     bad = [s for s in inter["spans"] if not s["label_valid"]]
     assert [(s["field"], s["value"], s["source_scope"], s["source_line_index"]) for s in bad] == [
         ("property", "WZZZ", "other_document", -1)
     ]
-    valid = by[("doc-a", "")]
+    valid = by[("doc-a", "", "")]
     assert all(s["label_valid"] and s["row_error_type"] == "" for s in valid["spans"])
     assert len(valid["spans"]) == 8  # agency is null
+    assert all(s["patch_target"] == "" and s["parent_k"] == s["row_k"] for it in items for s in it["spans"] if it is not by[("doc-a", "cross_type", "advertiser")] and it is not by[("doc-a", "cross_type", "product")])
+
+    # patched row: the cross_type k=2 row with only advertiser restored; every field read
+    pa = by[("doc-a", "cross_type", "advertiser")]
+    assert [s["row_k"] for s in pa["spans"]] == [1] * 8 and [s["parent_k"] for s in pa["spans"]] == [2] * 8
+    got = {s["field"]: s["label_valid"] for s in pa["spans"]}
+    assert got["advertiser"] and not got["product"] and sum(not v for v in got.values()) == 1
+    assert next(s for s in pa["spans"] if s["field"] == "advertiser")["value"] != next(s for s in cross["spans"] if s["field"] == "advertiser")["value"]
+    assert "advertiser" in pa["query"] and pa["query"] != cross["query"]
+
+
+def test_target_only_reads_just_the_target_of_a_patched_row():
+    items = er.build_items(MAIN, _params("main", read_fields="target_only"), 0, REPO_ROOT)
+    patched = [it for it in items if it["spans"][0]["patch_target"]]
+    assert len(patched) == 2
+    for it in patched:
+        (sp,) = it["spans"]
+        assert sp["field"] == sp["patch_target"] and sp["label_valid"] and sp["row_k"] == 1 and sp["parent_k"] == 2
+        assert sp["field_position"] > 1 or sp["field"] == "advertiser"   # the position in the full row is kept
+    assert all(len(it["spans"]) in (8, 9) for it in items if not it["spans"][0]["patch_target"])
+
+
+def test_read_fields_is_required_iff_the_file_has_patched_rows():
+    p = _params("main")
+    del p["read_fields"]
+    with pytest.raises(AssertionError, match="read_fields"):
+        er.build_items(MAIN, p, 0, REPO_ROOT)
+    with pytest.raises(AssertionError, match="read_fields"):
+        er.build_items(LINE, _params("line", read_fields="all"), 0, REPO_ROOT)
+    with pytest.raises(AssertionError, match="read_fields"):
+        er.build_items(MAIN, _params("main", read_fields="some"), 0, REPO_ROOT)
 
 
 def test_line_items_and_null_field():
@@ -155,7 +189,12 @@ def test_stratified_subset_determinism_and_errors():
     p = {"valid": 2, "inter_document": 1, "cross_type": 1}
     a = er.select_rows(rows, MAIN, "train", p, 0)
     assert a == er.select_rows(rows, MAIN, "train", p, 0)
-    assert len(a) == 4 and sum(not r["valid"] for r in a) == 2
+    assert len(a) == 6 and sum(not r["valid"] for r in a) == 4   # the cross_type k=2 row brings its 2 patched rows
+    assert sum(r["patch_target"] is not None for r in a) == 2 and {r["parent_k"] for r in a if r["patch_target"]} == {2}
+    only_inter = er.select_rows(rows, MAIN, "train", {"valid": 2, "inter_document": 1, "cross_type": 1}, 0)
+    assert only_inter == a
+    one = er.select_rows(rows, MAIN, "train", {"valid": 1, "inter_document": 1, "cross_type": 1}, 0)
+    assert sum(r["patch_target"] is not None for r in one) == 2
     with pytest.raises(ValueError, match="requested but only"):
         er.select_rows(rows, MAIN, "train", {**p, "valid": 3}, 0)
     with pytest.raises(ValueError, match="strata present"):
@@ -185,6 +224,9 @@ def _fake_result():
         "doc_ids": np.array(["d"] * 6),
         "row_ordinal": np.array([0, 0, 0, 1, 1, 1]),
         "row_k": np.array([0, 0, 0, 2, 2, 2]),
+        "parent_k": np.array([0, 0, 0, 2, 2, 2]),
+        "patch_target": np.array([""] * 6),
+        "field": np.array(["advertiser", "property", "product"] * 2),
         "row_error_type": np.array(["", "", "", "cross_type"] * 1 + ["cross_type"] * 2),
         "field_error_type": np.array(["", "", "", "cross_type", "cross_type", ""]),
         "label_valid": np.array([True, True, True, False, False, True]),
@@ -212,3 +254,37 @@ def test_invariants_accept_good_and_reject_bad():
         bad = {**r, key: val}
         with pytest.raises(AssertionError):
             er.check_row_invariants(bad)
+
+
+def _patched_result(target_only):
+    """A valid row (3 spans), a cross_type k=3 row (3 spans, 3 wrong... shown as 2 wrong + 1 right), and the patched row of its
+    first wrong field `advertiser` (row_k 1, parent_k 2)."""
+    r = _fake_result()   # prompt 1: cross_type k=2, advertiser + property wrong, product right
+    if target_only:      # prompt 2: patched row read at its target (advertiser, position 1) alone
+        add = dict(row_k=[1], parent_k=[2], patch_target=["advertiser"], row_error_type=["cross_type"], field_error_type=[""],
+                   label_valid=[True], field_position=[1], field=["advertiser"], token_id=[1], prompt_n_tokens=[12], row_ordinal=[2])
+    else:                # prompt 2: patched row, all spans: property still wrong
+        add = dict(row_k=[1] * 3, parent_k=[2] * 3, patch_target=["advertiser"] * 3, row_error_type=["cross_type"] * 3,
+                   field_error_type=["", "cross_type", ""], label_valid=[True, False, True], field_position=[1, 2, 3],
+                   field=["advertiser", "property", "product"], token_id=[1] * 3, prompt_n_tokens=[12] * 3, row_ordinal=[2] * 3)
+    n = len(add["row_k"])
+    add["doc_ids"] = ["d"] * n
+    return {k: np.concatenate([v, np.array(add[k])]) for k, v in r.items()}
+
+
+def test_invariants_for_patched_rows():
+    for target_only in (False, True):
+        r = _patched_result(target_only)
+        er.check_row_invariants(r)
+        bad_cases = {
+            "parent_k": np.where(r["patch_target"] != "", 5, r["parent_k"]),   # parent_k != row_k + 1
+            "label_valid": np.where((r["patch_target"] != "") & (r["field"] == "advertiser"), False, r["label_valid"]),   # target not valid
+        }
+        for key, val in bad_cases.items():
+            with pytest.raises(AssertionError):
+                er.check_row_invariants({**r, key: val})
+    # all-spans patched row: its invalid count must equal row_k
+    r = _patched_result(False)
+    with pytest.raises(AssertionError, match="invalid-span count"):
+        er.check_row_invariants({**r, "label_valid": np.where(r["patch_target"] != "", True, r["label_valid"]),
+                                 "field_error_type": np.where(r["patch_target"] != "", "", r["field_error_type"])})

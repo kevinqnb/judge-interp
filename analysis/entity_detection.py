@@ -1,26 +1,27 @@
 """Entity detection on the main dataset: per-model probes and the direct judges (Clef, Jev), all scored on the
-same minimal pairs of ``params.test_rows`` (``data/vrdu/main/test.json``).
+same patched pairs of ``params.test_rows`` (``data/vrdu/main/test_eval.json``).
 
 Usage: ``uv run --python 3.12 --extra analysis python analysis/entity_detection.py analysis/configs/<type>/<id>.yaml``
 
 Methods (``params.models``: a probe per entry; ``params.judges``: a Clef / Jev run per entry, nothing trained).
 Probes train on the ``entity_detection`` train runs, which must have judged ``params.train_rows``
-(``data/vrdu/main/train.json``); every method's test run must have judged ``params.test_rows``. Metric keys and
+(``data/vrdu/main/train_eval.json``); every method's test run must have judged ``params.test_rows``. Metric keys and
 figure directories are prefixed with the method's ``label``.
 
-1. Load one layer per model and subtract each document's mean activation (nothing else), over the model's whole run.
+1. Load one layer per model (no centering: the pair members share the document and differ only in the target).
 2. The k stratum (``params.train_k`` / ``params.test_k``: a list of corrupted-field counts, or null for all k): only
-   corrupted rows with k in the list are kept, plus every clean row (k = 0; it holds the twins). Every number below
-   is computed on that stratum. Both keys are required.
+   corrupted rows with k in the list are kept (with their patched rows), plus every clean row (k = 0). Both keys are
+   required. A patched row belongs to its parent's k.
    The common set: the test rows every method scored (a judge excludes over-length documents; the LMs have a
    context limit). Each method's spans are cut to them and each method's dropped rows are reported. Pairs are built
-   per method from these rows (``data/vrdu/main_samples.main_entity_pairs``, same twin seed) and must be
-   identical across methods (asserted): every corrupted span with its clean twin span (the same field in the
-   document's clean row, or, for a null-fill span, in another document's clean row). Each (error type, k,
-   field) stratum is exactly 50/50.
+   per method from these rows (``data/vrdu/main_samples.patched_entity_pairs``) and must be identical across
+   methods (asserted). A pair is a corrupted span (invalid) and the same field in the PATCHED row (valid): the
+   corrupted row with only that span restored (k = 1: the clean row). Nothing else differs. A span whose original
+   value is null has no patched counterpart and is not evaluated. Each (error type, k, field) stratum is exactly 50/50.
+   The row files are the ``main/{split}_eval.json`` files (original rows plus patched rows).
 3. Probes: logistic regression on one entity's activation, train -> test.
    Judges: ``analysis/clef.py``'s metrics on the same pairs. Both: smECE, Brier (skill), AUROC, accuracy (point
-   values; every interval is in the report, step 6); per error type, per (type, k), and with / without null-fill pairs.
+   values; every interval is in the report, step 6); per error type and per (type, k).
 4. Row-context diagnostic: the uncorrupted spans of corrupted rows against the same spans in the clean
    row (``kept_span_pairs``; both valid). AUROC ~ 0.5 means the method does not just sense "this row
    has a corruption somewhere".
@@ -31,7 +32,7 @@ figure directories are prefixed with the method's ``label``.
 
 6. Report (``analysis/calibration_report.py``, ``params.report``): the only figures. Per error type, a calibration
    diagram of all methods and a smECE / BSS / AUROC table, every interval over ``report.n_boot`` resamples of documents
-   (a null-fill pair is resampled with its invalid member's document). The pooled values are asserted equal to
+   (a pair is resampled with its document). The pooled values are asserted equal to
    the metrics above.
 
 Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
@@ -65,7 +66,7 @@ _cr_spec.loader.exec_module(cr)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "data" / "vrdu"))
-from main_samples import kept_span_pairs, main_entity_pairs  # noqa: E402
+from main_samples import kept_span_pairs, patched_entity_pairs, split_eval_rows  # noqa: E402
 from vrdu_common import MAIN_FIELDS, check_build  # noqa: E402
 
 plt.rcParams.update({
@@ -303,62 +304,79 @@ def load_run_rows(run_id: str, runs_root: Path, repo_root: Path, dataset: str) -
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def main_span_pairs(split: dict, rows: list[dict], seed: int) -> dict:
-    """Minimal entity pairs of a main run, as span indices.
+def main_span_pairs(split: dict, rows: list[dict], read_fields: str) -> dict:
+    """Patched entity pairs of a main run, as span indices.
 
     Only the rows the run judged are paired (a run may draw a subset of rows); every shown field of a
-    judged row must be a span with the row file's value.
+    judged row must be a span with the row file's value (a patched row read with ``target_only`` has its target
+    span alone). A pair is a corrupted span and the same field in its patched row (``patched_entity_pairs``).
 
     Args:
-        split: per-span ``doc_ids``, ``row_error_type``, ``row_k``, ``field``, ``value``, ``label_valid``.
-        rows: the main row file the run judged (``load_run_rows``).
-        seed: seeds the other-document twins of null-fill spans (``main_entity_pairs``).
+        split: per-span ``doc_ids``, ``row_error_type``, ``row_k``, ``parent_k``, ``patch_target``, ``field``,
+            ``value``, ``label_valid``.
+        rows: the ``main/{split}_eval.json`` rows the run judged (``load_run_rows``).
+        read_fields: the run's ``params.read_fields``: ``"all"`` or ``"target_only"`` (patched rows).
 
     Returns:
-        Arrays ``inv`` and ``val`` (the invalid span and its clean twin), ``error_type``, ``k``,
-        ``field``, ``null_fill`` and ``doc`` (the invalid span's document), one entry per pair; and
-        ``kept``, ``clean``, ``kept_error_type``, ``kept_doc`` for the row-context diagnostic.
+        Arrays ``inv`` and ``val`` (the corrupted span and its patched span), ``error_type``, ``k`` (the corrupted
+        row's), ``field`` and ``doc``, one entry per pair; and ``kept``, ``clean``, ``kept_error_type``,
+        ``kept_doc`` for the row-context diagnostic.
 
     Raises:
-        AssertionError: a span of no row, a row value the span disagrees with, a judged corrupted row
-            whose clean row was not judged, or a label that disagrees with the pairing.
+        AssertionError: a span of no row, a row value the span disagrees with, a judged corrupted row whose clean
+            or patched row was not judged, or a label that disagrees with the pairing.
     """
-    keys = zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist(), split["field"].tolist())
+    assert read_fields in ("all", "target_only"), read_fields
+    keys = zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["parent_k"].tolist(),
+               split["patch_target"].tolist(), split["field"].tolist())
     index: dict[tuple, int] = {}
     for i, key in enumerate(keys):
         assert key not in index, f"span {key} occurs twice"
         index[key] = i
-    by_row = {(r["document_id"], r["error_type"] or "", r["k"]): r for r in rows}
+    assert (split["row_k"] == split["parent_k"] - (split["patch_target"] != "")).all(), "a patched row's row_k != parent_k - 1"
+    by_row = {(r["document_id"], r["error_type"] or "", r["parent_k"], r["patch_target"] or ""): r for r in rows}
     assert len(by_row) == len(rows), "row keys are not unique"
-    judged = sorted({key[:3] for key in index})
+    judged = sorted({key[:4] for key in index})
     assert set(judged) <= set(by_row), f"spans of rows not in the row file, e.g. {sorted(set(judged) - set(by_row))[:3]}"
     n_shown = 0
     for rk in judged:
         r = by_row[rk]
-        for f in (f for f in MAIN_FIELDS if r[f] is not None):
+        shown = [f for f in MAIN_FIELDS if r[f] is not None]
+        if r["patch_target"] is not None and read_fields == "target_only":
+            shown = [r["patch_target"]]
+        for f in shown:
             assert (*rk, f) in index, f"row {rk}: shown field {f!r} has no span"
             assert split["value"][index[(*rk, f)]] == r[f], f"row {rk}, {f!r}: span value differs from the row file"
             n_shown += 1
     assert n_shown == len(index), "a span of a field the row does not show"
 
-    sub = [by_row[rk] for rk in judged]
-    pairs = main_entity_pairs(sub, seed)
+    sub_orig, sub_patched = split_eval_rows([by_row[rk] for rk in judged])
+    have = {(q["document_id"], q["error_type"], q["parent_k"], q["patch_target"]) for q in sub_patched}
+    need = {(r["document_id"], r["error_type"], r["k"], f) for r in sub_orig if r["k"] >= 2 for f in r["invalid_fields"]
+            if not r["field_errors"][f]["source"]["null_fill"]}   # a judged corrupted row needs the patched row of every non-null-fill target
+    assert need <= have, f"judged corrupted rows whose patched rows were not judged, e.g. {sorted(need - have)[:3]}"
+    pairs = patched_entity_pairs(sub_orig, sub_patched)
+
+    def key_of(sp: dict, k_row: int) -> tuple:
+        return (sp["document_id"], sp["error_type"] or "", k_row, sp["patch_target"] or "", sp["field"])
+
     out = {
-        "inv": np.array([index[(p["invalid"]["document_id"], p["error_type"], p["k"], p["field"])] for p in pairs]),
-        "val": np.array([index[(p["valid"]["document_id"], "", 0, p["field"])] for p in pairs]),
+        "inv": np.array([index[key_of(p["invalid"], p["k"])] for p in pairs], dtype=np.int64),
+        "val": np.array([index[key_of(p["valid"], p["k"] if p["valid"]["patch_target"] else 0)] for p in pairs], dtype=np.int64),
         "error_type": np.array([p["error_type"] for p in pairs]), "k": np.array([p["k"] for p in pairs]),
-        "field": np.array([p["field"] for p in pairs]), "null_fill": np.array([p["null_fill"] for p in pairs]),
-        "doc": np.array([p["invalid"]["document_id"] for p in pairs]),
+        "field": np.array([p["field"] for p in pairs]), "doc": np.array([p["invalid"]["document_id"] for p in pairs]),
     }
-    kept = kept_span_pairs(sub)
-    out["kept"] = np.array([index[(p["kept"]["document_id"], p["error_type"], p["k"], p["field"])] for p in kept], dtype=np.int64)
-    out["clean"] = np.array([index[(p["clean"]["document_id"], "", 0, p["field"])] for p in kept], dtype=np.int64)
+    kept = kept_span_pairs(sub_orig)
+    out["kept"] = np.array([index[(p["kept"]["document_id"], p["error_type"], p["k"], "", p["field"])] for p in kept], dtype=np.int64)
+    out["clean"] = np.array([index[(p["clean"]["document_id"], "", 0, "", p["field"])] for p in kept], dtype=np.int64)
     out["kept_error_type"] = np.array([p["error_type"] for p in kept])
     out["kept_doc"] = np.array([p["kept"]["document_id"] for p in kept])
     valid = split["label_valid"]
     assert not valid[out["inv"]].any() and valid[out["val"]].all(), "a pair's labels disagree with the span labels"
     assert valid[out["kept"]].all() and valid[out["clean"]].all(), "a kept / clean span is not valid"
-    assert len(out["inv"]) == int((~valid).sum()), "not every invalid span is paired"
+    n_null_fill = sum(r["field_errors"][f]["source"]["null_fill"] for r in sub_orig if not r["valid"] for f in r["invalid_fields"])
+    n_orig_invalid = int((~valid[split["patch_target"] == ""]).sum())
+    assert len(out["inv"]) == n_orig_invalid - n_null_fill, "not every non-null-fill invalid span is paired"
     return out
 
 
@@ -375,8 +393,8 @@ def line_span_pairs(split: dict, rows: list[dict]) -> dict:
         rows: the line row file the run judged (``load_run_rows``).
 
     Returns:
-        The arrays of ``main_span_pairs`` (``inv``, ``val``, ``error_type``, ``k``, ``field``, ``null_fill``
-        -- always False on line --, ``doc``, ``kept``, ``clean``, ``kept_error_type``, ``kept_doc``) and
+        The arrays of ``main_span_pairs`` (``inv``, ``val``, ``error_type``, ``k``, ``field``
+        ``doc``, ``kept``, ``clean``, ``kept_error_type``, ``kept_doc``) and
         ``cell``, ``kept_cell``.
 
     Raises:
@@ -426,7 +444,7 @@ def line_span_pairs(split: dict, rows: list[dict]) -> dict:
     assert len(inv) == int((~valid).sum()), "not every invalid span is paired"
     return {
         "inv": inv, "val": val, "error_type": split["field_error_type"][inv], "k": split["row_k"][inv],
-        "field": split["field"][inv], "null_fill": np.zeros(len(inv), dtype=bool), "doc": split["doc_ids"][inv],
+        "field": split["field"][inv], "doc": split["doc_ids"][inv],
         "cell": split["cell"][inv], "kept": kept, "clean": clean, "kept_error_type": split["row_error_type"][kept],
         "kept_doc": split["doc_ids"][kept], "kept_cell": split["cell"][kept],
     }
@@ -509,13 +527,12 @@ def plot_prob_histogram(probs: np.ndarray, n_bins: int, out_dir: Path) -> None:
 DATASETS = ("main", "line")
 
 
-def pair_set(split: dict, rows: list[dict], seed: int | None, dataset: str) -> tuple[dict, dict]:
+def pair_set(split: dict, rows: list[dict], read_fields: str | None, dataset: str) -> tuple[dict, dict]:
     """``(z, s)``: the dataset's span pairs (``main_span_pairs`` / ``line_span_pairs``) and both members
     stacked (``stack_pairs``). ``s["stratum"]`` is the finer stratification: (type, k) on main, the cell on line."""
     assert dataset in DATASETS, dataset
-    z = main_span_pairs(split, rows, seed) if dataset == "main" else line_span_pairs(split, rows)
-    s = stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"],
-                    null_fill=z["null_fill"], doc=z["doc"])
+    z = main_span_pairs(split, rows, read_fields) if dataset == "main" else line_span_pairs(split, rows)
+    s = stack_pairs(z["inv"], z["val"], error_type=z["error_type"], k=z["k"], field=z["field"], doc=z["doc"])
     if dataset == "main":
         s["stratum"] = np.char.add(np.char.add(s["error_type"], "_k"), s["k"].astype(str))
     else:
@@ -534,13 +551,19 @@ def load_sibling(name: str):
     return mod
 
 
+def run_read_fields(run_id: str, runs_root: Path) -> str:
+    """The run's ``params.read_fields`` (``config.snapshot.yaml``)."""
+    return yaml.safe_load((runs_root / run_id / "config.snapshot.yaml").read_text())["params"]["read_fields"]
+
+
 def row_keys(split: dict) -> set[tuple]:
-    """The ``(document, row error type, k)`` rows a run has spans of."""
-    return set(zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist()))
+    """The ``(document, row error type, parent k, patch target)`` rows a run has spans of (a clean row: k 0, no target;
+    a patched row: its parent's k, so a k stratum keeps a corrupted row with its patched rows)."""
+    return set(zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["parent_k"].tolist(), split["patch_target"].tolist()))
 
 
 def select_k(keys: set[tuple], k_values: list[int] | None) -> set[tuple]:
-    """The k stratum of ``keys`` (``(document, row error type, k)`` rows): every clean row (k = 0, which holds the
+    """The k stratum of ``keys`` (``(document, row error type, parent k, patch target)`` rows): every clean row (k = 0, which holds the
     twins) and the corrupted rows whose k is in ``k_values``; ``None`` keeps every row.
 
     Raises:
@@ -550,38 +573,39 @@ def select_k(keys: set[tuple], k_values: list[int] | None) -> set[tuple]:
         return set(keys)
     assert isinstance(k_values, list) and k_values and len(set(k_values)) == len(k_values) and all(
         type(k) is int and k >= 1 for k in k_values), f"k_values must be null or a list of distinct ints >= 1, got {k_values!r}"
-    present = {k for _, _, k in keys}
+    present = {key[2] for key in keys}
     assert set(k_values) <= present, f"k {sorted(set(k_values) - present)} has no row (rows have k {sorted(present)})"
     return {key for key in keys if key[2] == 0 or key[2] in k_values}
 
 
 def restrict_to_rows(split: dict, keys: set[tuple]) -> dict:
     """``split`` cut to the spans of rows ``keys`` (a subset of its rows): every per-span array (leading
-    dimension = number of spans) is cut, everything else is kept. Per-document centring must come first --
-    it is a mean over the document's spans in the run, not over the common rows.
+    dimension = number of spans) is cut, everything else is kept.
 
     Raises:
         AssertionError: a key the run has no span of.
     """
     n = len(split["doc_ids"])
-    keep = np.array([k in keys for k in zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["row_k"].tolist())], dtype=bool)
+    keep = np.array([k in keys for k in zip(split["doc_ids"].tolist(), split["row_error_type"].tolist(), split["parent_k"].tolist(),
+                                            split["patch_target"].tolist())], dtype=bool)
     out = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[:1] == (n,) else v) for k, v in split.items()}
     assert row_keys(out) == keys, f"{split.get('run_id')}: rows {sorted(keys - row_keys(out))[:3]} not in the run"
     return out
 
 
 def pair_signature(split: dict, z: dict) -> list[tuple]:
-    """Each pair as ``(invalid span, clean twin span, null_fill)``, a span being ``(document, row error type, k,
+    """Each pair as ``(invalid span, patched span)``, a span being ``(document, row error type, parent k, patch target,
     field)``: identical across methods iff they are scored on the same pairs."""
     def span(i: int) -> tuple:
-        return (str(split["doc_ids"][i]), str(split["row_error_type"][i]), int(split["row_k"][i]), str(split["field"][i]))
-    return [(span(i), span(j), bool(nf)) for i, j, nf in zip(z["inv"], z["val"], z["null_fill"])]
+        return (str(split["doc_ids"][i]), str(split["row_error_type"][i]), int(split["parent_k"][i]),
+                str(split["patch_target"][i]), str(split["field"][i]))
+    return [(span(i), span(j)) for i, j in zip(z["inv"], z["val"])]
 
 
 def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr: dict, s_tr: dict, z_te: dict, s_te: dict,
            art_dir: Path) -> tuple[dict, np.ndarray]:
     """One model's probe: PCA of train, logistic probe train -> test, the test metrics, row-context diagnostic
-    and controls. ``tr`` is the model's full train split, ``te`` its test split cut to the common rows; both centred.
+    and controls. ``tr`` is the model's full train split, ``te`` its test split cut to the common rows.
     Returns ``(metrics (unprefixed), P(valid) of the test pairs' members)`` and writes the predictions to ``art_dir``."""
     layer, thr = spec["layer"], p["decision_threshold"]
     t0 = time.perf_counter()
@@ -598,7 +622,6 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
         # one clean span is the twin in every (type, k) stratum, so far fewer valid spans than pairs
         "n_train_unique_valid_spans": len(set(z_tr["val"].tolist())), "n_test_unique_valid_spans": len(set(z_te["val"].tolist())),
         "n_train_docs": len(set(tr["doc_ids"].tolist())), "n_test_docs": len(set(te["doc_ids"].tolist())),
-        "n_train_null_fill_pairs": int(z_tr["null_fill"].sum()),
     }
 
     clf, fit_seconds = timed_fit_logreg(x_tr, y_tr, p, seed)
@@ -608,19 +631,12 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     assert probs.shape == y_te.shape
     metrics.update(probe_metrics("test", y_te, probs, ref_rate, thr))
     metrics["train_auroc"] = float(roc_auc_score(y_tr, clf.predict_proba(x_tr)[:, 1]))
-    no_fill = ~s_te["null_fill"]
-    metrics.update(probe_metrics("test_no_null_fill", y_te[no_fill], probs[no_fill], ref_rate, thr))
-    if s_te["null_fill"].any():
-        fill = s_te["null_fill"]
-        metrics["test_null_fill_only_auroc"] = float(roc_auc_score(y_te[fill], probs[fill]))
 
     metrics["test_smece"] = smece(probs, y_te)
 
     for col in ("error_type", "stratum"):
         for k_, v in stratum_report(y_te, probs, thr, s_te[col]).items():
             metrics[f"test_{k_}"] = v
-    for k_, v in stratum_report(y_te[no_fill], probs[no_fill], thr, s_te["error_type"][no_fill]).items():
-        metrics[f"test_no_null_fill_{k_}"] = v
 
     # Row-context diagnostic: uncorrupted spans of corrupted rows vs the same spans in the clean row.
     p_kept, p_clean = clf.predict_proba(te["X"][z_te["kept"]])[:, 1], clf.predict_proba(te["X"][z_te["clean"]])[:, 1]
@@ -649,7 +665,7 @@ def run_lm(label: str, p: dict, seed: int, spec: dict, tr: dict, te: dict, z_tr:
     np.savez_compressed(
         art_dir / f"{label}_test_predictions.npz",
         prob_valid=probs, label_valid=y_te, span=s_te["idx"], pair_doc=s_te["doc"], doc_ids=te["doc_ids"][s_te["idx"]],
-        field=s_te["field"], error_type=s_te["error_type"], k=s_te["k"], null_fill=s_te["null_fill"],
+        field=s_te["field"], error_type=s_te["error_type"], k=s_te["k"],
     )
     return metrics, probs
 
@@ -658,7 +674,7 @@ def run_judge(label: str, spec: dict, p: dict, seed: int, mod, judge: dict, rows
     """One direct judge (Clef / Jev) on the common pairs: the metric code of ``analysis/clef.py``, with Jev's
     resolution metrics added. ``judge`` is its run cut to the common rows. Returns ``(metrics, eval set)``."""
     ac = getattr(mod, "ac", mod)   # jev.py reuses clef.py's metric code
-    ev = ac.entity_eval_set(judge, rows_te, p["twin_seed"])
+    ev = ac.entity_eval_set(judge, rows_te)
     m = ac.analyse_run(label, judge, ev, spec, p, None, seed)
     if spec["kind"] == "jev":
         m.update(mod.resolution_metrics(judge))
@@ -689,26 +705,27 @@ def run(cfg: dict, runs_root: Path) -> dict:
     for spec in p["models"]:
         layer = spec["layer"]
         assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
-        tr = load_split(spec["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
-        te = load_split(spec["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", ("value",))
+        meta = ("value", "patch_target", "parent_k")
+        tr = load_split(spec["train_run_id"], runs_root, layer, p["max_docs"], "entity_detection", meta)
+        te = load_split(spec["test_run_id"], runs_root, layer, p["max_docs"], "entity_detection", meta)
         assert not (set(tr["doc_ids"].tolist()) & set(te["doc_ids"].tolist())), f"{spec['label']}: train/test documents overlap"
-        # The only preprocessing: per-document mean subtraction (asserted ~0 per document), on the model's whole run.
-        center_per_document(tr["X"], tr["doc_ids"])
-        center_per_document(te["X"], te["doc_ids"])
+        # No preprocessing: the members of a pair share the document and differ only in the target.
+        tr["read_fields"], te["read_fields"] = (run_read_fields(spec[k], runs_root) for k in ("train_run_id", "test_run_id"))
         rows_tr = check_rows_file(spec["train_run_id"], train_path)
         rows_te = check_rows_file(spec["test_run_id"], test_path)
-        tr = restrict_to_rows(tr, select_k(row_keys(tr), p["train_k"]))   # after centring: the mean is over the whole run
+        tr = restrict_to_rows(tr, select_k(row_keys(tr), p["train_k"]))
         lms[spec["label"]] = {"tr": tr, "te": te, "rows_tr": rows_tr}
     judges: dict[str, dict] = {}
     for spec in p["judges"]:
         assert spec["kind"] in JUDGE_KINDS, spec
         mod = load_sibling(spec["kind"])
         judge = mod.load_run(spec["run_id"], runs_root, "entity")
+        judge["read_fields"] = judge["params"]["read_fields"]
         rows_te = check_rows_file(spec["run_id"], test_path)
         judges[spec["label"]] = {"mod": mod, "run": judge}
 
-    # The common set: rows every method scored. Pairs are then built per method from identical rows with the
-    # same twin seed, and must come out identical (asserted).
+    # The common set: rows every method scored. Pairs are then built per method from identical rows
+    # and must come out identical (asserted).
     scored = {**{k: v["te"] for k, v in lms.items()}, **{k: v["run"] for k, v in judges.items()}}
     in_stratum = {label: select_k(row_keys(s), p["test_k"]) for label, s in scored.items()}
     common = set.intersection(*in_stratum.values())
@@ -719,11 +736,11 @@ def run(cfg: dict, runs_root: Path) -> dict:
     signature = None
     for label, s in scored.items():
         cut = restrict_to_rows(s, common)
-        z = main_span_pairs(cut, rows_te, p["twin_seed"])
+        z = main_span_pairs(cut, rows_te, cut["read_fields"])
         sig = pair_signature(cut, z)
         if signature is None:
             signature = sig
-            metrics["n_test_pairs"], metrics["n_test_null_fill_pairs"] = len(sig), int(z["null_fill"].sum())
+            metrics["n_test_pairs"] = len(sig)
         assert sig == signature, f"{label}: scored on other pairs than {next(iter(scored))}"
         if label in lms:
             lms[label]["te"] = cut
@@ -737,8 +754,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
     probe_times: dict[str, dict] = {}
     for spec in p["models"]:
         label, m = spec["label"], lms[spec["label"]]
-        z_tr, s_tr = pair_set(m["tr"], m["rows_tr"], p["twin_seed"], "main")
-        z_te, s_te = pair_set(m["te"], rows_te, p["twin_seed"], "main")
+        z_tr, s_tr = pair_set(m["tr"], m["rows_tr"], m["tr"]["read_fields"], "main")
+        z_te, s_te = pair_set(m["te"], rows_te, m["te"]["read_fields"], "main")
         assert y_ref is None or np.array_equal(y_ref, s_te["y"]), f"{label}: labels differ from the other methods'"
         y_ref = s_te["y"]
         m_metrics, lm_probs = run_lm(label, p, seed, spec, m["tr"], m["te"], z_tr, s_tr, z_te, s_te, art_dir)
@@ -763,7 +780,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
     cr.save_evset(art_dir / "calibration_predictions.npz", evset)
     cr.assert_matches_existing(evset, metrics)
     metrics.update(cr.write_report(evset, p["report"], list(p["report"]["error_type_names"]), p["ci_level"], seed, fig_dir, out,
-                                   "calibration", f"Evaluation: minimal pairs of the main test split, "
+                                   "calibration", f"Evaluation: patched pairs of the main test split, "
                                    f"{'all k' if p['test_k'] is None else 'k = ' + ', '.join(map(str, p['test_k']))}."))
     metrics_text = json.dumps(metrics, indent=2) + "\n"
     (out / "metrics.json").write_text(metrics_text)

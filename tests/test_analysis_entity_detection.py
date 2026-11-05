@@ -90,74 +90,99 @@ def test_stack_pairs_and_structure_baseline():
         er.assert_structure_auroc_is_chance("field", y, np.array(["f"] * 3 + ["g"] * 5), y, np.array(["f"] * 3 + ["g"] * 5), p, 0)
 
 
-# ---------------------------------------------------------------- minimal entity pairs on a main row file
+# ---------------------------------------------------------------- patched entity pairs on a main eval row file
+import main_samples as ms  # noqa: E402  (er put data/vrdu on sys.path)
+
 # doc a clean: advertiser A, agency G;   doc b clean: advertiser B, product P   (other fields null)
-#   a inter_document k=1: advertiser <- "X"
-#   a cross_type k=1:     product (null in a) <- "G"            (null-fill: twin = b's product, the only one)
-#   b inter_document k=1: agency (null in b) <- "Y"             (null-fill: twin = a's agency, the only one)
+#   a inter_document k=1: advertiser <- "X"                       pair: (a, adv) vs the clean row's
+#   a cross_type k=1:     product (null in a) <- "G"             null-fill: no pair
+#   b inter_document k=1: agency (null in b) <- "Y"              null-fill: no pair
+#   a inter_document k=2: advertiser <- "X2", agency <- "Z"      2 pairs, vs the patched rows (adv restored: adv A, agency Z;
+#                                                                 agency restored: adv X2, agency G)
 def _main_row(doc, et, k, values, errors=None):
     errors = errors or {}
     return {"document_id": doc, "valid": et is None, "error_type": et, "k": k, "invalid_fields": list(errors),
-            **{f: values.get(f) for f in er.MAIN_FIELDS},
+            "num_invalid_fields": k, **{f: values.get(f) for f in er.MAIN_FIELDS},
             "field_errors": {f: ({"error_type": et, "source": {"null_fill": errors[f]}} if f in errors else None)
                              for f in er.MAIN_FIELDS}}
 
 
-MAIN_ROWS = [
+K2_ROW = _main_row("a", "inter_document", 2, {"advertiser": "X2", "agency": "Z"}, {"advertiser": False, "agency": False})
+BASE_ROWS = [
     _main_row("a", None, 0, {"advertiser": "A", "agency": "G"}),
     _main_row("b", None, 0, {"advertiser": "B", "product": "P"}),
     _main_row("a", "inter_document", 1, {"advertiser": "X", "agency": "G"}, {"advertiser": False}),
     _main_row("a", "cross_type", 1, {"advertiser": "A", "agency": "G", "product": "G"}, {"product": True}),
     _main_row("b", "inter_document", 1, {"advertiser": "B", "agency": "Y", "product": "P"}, {"agency": True}),
 ]
+MAIN_ROWS = ms.eval_rows(BASE_ROWS + [K2_ROW])   # the eval row file: originals, then the 2 patched rows of K2_ROW
 
 
-def _main_split(rows):
-    spans = [(r, f) for r in rows for f in er.MAIN_FIELDS if r[f] is not None]
+def _main_split(rows, read_fields="all"):
+    spans = [(r, f) for r in rows for f in er.MAIN_FIELDS if r[f] is not None
+             and not (r["patch_target"] is not None and read_fields == "target_only" and f != r["patch_target"])]
     return {"doc_ids": np.array([r["document_id"] for r, _ in spans]),
             "row_error_type": np.array([r["error_type"] or "" for r, _ in spans]),
-            "row_k": np.array([r["k"] for r, _ in spans]), "field": np.array([f for _, f in spans]),
+            "row_k": np.array([r["k"] for r, _ in spans]), "parent_k": np.array([r["parent_k"] for r, _ in spans]),
+            "patch_target": np.array([r["patch_target"] or "" for r, _ in spans]), "field": np.array([f for _, f in spans]),
             "value": np.array([r[f] for r, f in spans]),
             "label_valid": np.array([f not in r["invalid_fields"] for r, f in spans])}
 
 
-def _span(split, doc, et, k, field):
-    hit = np.flatnonzero((split["doc_ids"] == doc) & (split["row_error_type"] == et) & (split["row_k"] == k)
-                         & (split["field"] == field))
+def _span(split, doc, et, parent_k, field, patch=""):
+    hit = np.flatnonzero((split["doc_ids"] == doc) & (split["row_error_type"] == et) & (split["parent_k"] == parent_k)
+                         & (split["patch_target"] == patch) & (split["field"] == field))
     assert len(hit) == 1
     return int(hit[0])
 
 
+def test_the_eval_rows_of_the_fixture():
+    patched = [r for r in MAIN_ROWS if r["patch_target"]]
+    assert [(r["patch_target"], r["k"], r["parent_k"], r["advertiser"], r["agency"]) for r in patched] == [
+        ("advertiser", 1, 2, "A", "Z"), ("agency", 1, 2, "X2", "G")]
+
+
 def test_main_span_pairs_hand_worked():
-    s = _main_split(MAIN_ROWS)
-    z = er.main_span_pairs(s, MAIN_ROWS, 0)
-    # strata in order (cross_type, 1), (inter_document, 1); documents in order within a stratum
-    assert z["error_type"].tolist() == ["cross_type", "inter_document", "inter_document"]
-    assert z["field"].tolist() == ["product", "advertiser", "agency"] and z["null_fill"].tolist() == [True, False, True]
-    assert z["inv"].tolist() == [_span(s, "a", "cross_type", 1, "product"), _span(s, "a", "inter_document", 1, "advertiser"),
-                                 _span(s, "b", "inter_document", 1, "agency")]
-    assert z["val"].tolist() == [_span(s, "b", "", 0, "product"), _span(s, "a", "", 0, "advertiser"), _span(s, "a", "", 0, "agency")]
-    assert z["doc"].tolist() == ["a", "a", "b"]
-    # kept spans: a inter agency; a cross advertiser, agency; b inter advertiser, product -> each vs its clean span
-    assert len(z["kept"]) == 5 and sorted(z["kept_error_type"].tolist()) == ["cross_type"] * 2 + ["inter_document"] * 3
-    assert all(s["field"][i] == s["field"][j] and s["row_error_type"][j] == "" for i, j in zip(z["kept"], z["clean"]))
+    for read_fields in ("all", "target_only"):
+        s = _main_split(MAIN_ROWS, read_fields)
+        z = er.main_span_pairs(s, MAIN_ROWS, read_fields)
+        # strata in order (cross_type, 1) [null-fill only: no pair], (inter_document, 1), (inter_document, 2)
+        assert z["error_type"].tolist() == ["inter_document"] * 3 and z["k"].tolist() == [1, 2, 2]
+        assert z["field"].tolist() == ["advertiser", "advertiser", "agency"] and z["doc"].tolist() == ["a", "a", "a"]
+        assert z["inv"].tolist() == [_span(s, "a", "inter_document", 1, "advertiser"), _span(s, "a", "inter_document", 2, "advertiser"),
+                                     _span(s, "a", "inter_document", 2, "agency")]
+        assert z["val"].tolist() == [_span(s, "a", "", 0, "advertiser"),
+                                     _span(s, "a", "inter_document", 2, "advertiser", "advertiser"),
+                                     _span(s, "a", "inter_document", 2, "agency", "agency")]
+        # kept spans: a inter agency; a cross advertiser, agency; b inter advertiser, product -> each vs its clean span
+        assert len(z["kept"]) == 5 and sorted(z["kept_error_type"].tolist()) == ["cross_type"] * 2 + ["inter_document"] * 3
+        assert all(s["field"][i] == s["field"][j] and s["row_error_type"][j] == "" for i, j in zip(z["kept"], z["clean"]))
+        # the members of a pair: the corrupted value vs the restored one, in the same field
+        assert [s["value"][i] for i in z["inv"]] == ["X", "X2", "Z"] and [s["value"][i] for i in z["val"]] == ["A", "A", "G"]
 
 
 def test_main_span_pairs_pairs_only_judged_rows_and_refuses_mismatches():
-    sub = [r for r in MAIN_ROWS if not (r["document_id"] == "b" and r["error_type"])]
-    s = _main_split(sub)
-    assert er.main_span_pairs(s, MAIN_ROWS, 0)["field"].tolist() == ["product", "advertiser"]   # b's row was not judged
+    # the k = 2 row and its patched rows were not judged
+    sub = [r for r in MAIN_ROWS if r["parent_k"] != 2]
+    assert er.main_span_pairs(_main_split(sub), MAIN_ROWS, "all")["field"].tolist() == ["advertiser"]
     s = _main_split(MAIN_ROWS)
     s["value"][_span(s, "a", "inter_document", 1, "advertiser")] = "Z"
     with pytest.raises(AssertionError, match="span value differs"):
-        er.main_span_pairs(s, MAIN_ROWS, 0)
+        er.main_span_pairs(s, MAIN_ROWS, "all")
     no_clean_a = [r for r in MAIN_ROWS if not (r["document_id"] == "a" and r["valid"])]
     with pytest.raises(AssertionError, match="without a clean row"):
-        er.main_span_pairs(_main_split(no_clean_a), MAIN_ROWS, 0)
+        er.main_span_pairs(_main_split(no_clean_a), MAIN_ROWS, "all")
     s = _main_split(MAIN_ROWS)
     s = {k: np.delete(v, _span(s, "a", "", 0, "agency")) for k, v in s.items()}
     with pytest.raises(AssertionError, match="has no span"):
-        er.main_span_pairs(s, MAIN_ROWS, 0)
+        er.main_span_pairs(s, MAIN_ROWS, "all")
+    no_patched = [r for r in MAIN_ROWS if r["patch_target"] != "agency"]   # the k = 2 row is judged, one patched row is not
+    with pytest.raises(AssertionError, match="patched rows were not judged"):
+        er.main_span_pairs(_main_split(no_patched), MAIN_ROWS, "all")
+    with pytest.raises(AssertionError, match="a span of a field the row does not show"):   # target_only run read as 'all'
+        er.main_span_pairs(_main_split(MAIN_ROWS, "all"), MAIN_ROWS, "target_only")
+    with pytest.raises(AssertionError, match="has no span"):                               # 'all' read of a target_only run
+        er.main_span_pairs(_main_split(MAIN_ROWS, "target_only"), MAIN_ROWS, "all")
 
 
 P_LR = {"lr_C": 1.0, "lr_max_iter": 1000, "lr_tol": 1e-4}
@@ -279,8 +304,8 @@ def test_fit_logreg_separable_and_shuffle_control():
 
 
 # ---------------------------------------------------------------- common rows across methods
-def _with_x(rows):
-    s = _main_split(rows)
+def _with_x(rows, read_fields="all"):
+    s = _main_split(rows, read_fields)
     s["X"] = np.arange(len(s["field"]) * 2, dtype=np.float32).reshape(-1, 2)
     s["run_id"] = "r"
     return s
@@ -288,73 +313,75 @@ def _with_x(rows):
 
 def test_row_keys_and_restrict_to_rows_cut_every_span_array():
     s = _with_x(MAIN_ROWS)
-    assert er.row_keys(s) == {("a", "", 0), ("b", "", 0), ("a", "inter_document", 1), ("a", "cross_type", 1), ("b", "inter_document", 1)}
-    keys = {("a", "", 0), ("b", "", 0)}
+    assert er.row_keys(s) == {("a", "", 0, ""), ("b", "", 0, ""), ("a", "inter_document", 1, ""), ("a", "cross_type", 1, ""),
+                              ("b", "inter_document", 1, ""), ("a", "inter_document", 2, ""),
+                              ("a", "inter_document", 2, "advertiser"), ("a", "inter_document", 2, "agency")}
+    keys = {("a", "", 0, ""), ("b", "", 0, "")}
     cut = er.restrict_to_rows(s, keys)   # the 4 spans of the two clean rows, in order
     assert cut["field"].tolist() == ["advertiser", "agency", "advertiser", "product"] and cut["run_id"] == "r"
     np.testing.assert_array_equal(cut["X"], s["X"][:4])
     assert er.row_keys(cut) == keys
     with pytest.raises(AssertionError, match="not in the run"):
-        er.restrict_to_rows(s, keys | {("z", "", 0)})
+        er.restrict_to_rows(s, keys | {("z", "", 0, "")})
 
 
 def test_restricting_to_the_common_rows_gives_the_same_pairs_for_every_method():
-    # method 2 judged one row fewer (b's inter_document row); the common set drops it from method 1 too
-    s1, s2 = _with_x(MAIN_ROWS), _with_x([r for r in MAIN_ROWS if not (r["document_id"] == "b" and r["error_type"])])
+    # method 2 judged fewer rows (no k = 2 row and patched rows); the common set drops them from method 1 too
+    s1, s2 = _with_x(MAIN_ROWS), _with_x([r for r in MAIN_ROWS if r["parent_k"] != 2])
     common = er.row_keys(s1) & er.row_keys(s2)
-    sigs = [er.pair_signature(c, er.main_span_pairs(c, MAIN_ROWS, 0)) for c in (er.restrict_to_rows(s, common) for s in (s1, s2))]
-    assert sigs[0] == sigs[1] and len(sigs[0]) == 2
-    assert sigs[0][0] == (("a", "cross_type", 1, "product"), ("b", "", 0, "product"), True)
-    assert sigs[0][1] == (("a", "inter_document", 1, "advertiser"), ("a", "", 0, "advertiser"), False)
+    sigs = [er.pair_signature(c, er.main_span_pairs(c, MAIN_ROWS, "all")) for c in (er.restrict_to_rows(s, common) for s in (s1, s2))]
+    assert sigs[0] == sigs[1] and len(sigs[0]) == 1
+    assert sigs[0][0] == (("a", "inter_document", 1, "", "advertiser"), ("a", "", 0, "", "advertiser"))
     # unrestricted, the two methods are scored on different pairs
-    assert er.pair_signature(s1, er.main_span_pairs(s1, MAIN_ROWS, 0)) != sigs[0]
+    assert er.pair_signature(s1, er.main_span_pairs(s1, MAIN_ROWS, "all")) != sigs[0]
 
 
 # ---------------------------------------------------------------- k stratum
-# MAIN_ROWS has only k = 1 corrupted rows; add a k = 2 row of document a (both corrupted fields kept non-null in the
-# clean row, so neither is a null-fill pair): advertiser <- "X2", agency <- "Z".
-K2_ROW = _main_row("a", "inter_document", 2, {"advertiser": "X2", "agency": "Z"}, {"advertiser": False, "agency": False})
-
-
-def test_select_k_keeps_every_clean_row_and_the_listed_corrupted_rows():
-    keys = er.row_keys(_with_x(MAIN_ROWS + [K2_ROW]))
+def test_select_k_keeps_every_clean_row_and_the_listed_corrupted_rows_with_their_patched_rows():
+    keys = er.row_keys(_with_x(MAIN_ROWS))
+    k2 = {("a", "inter_document", 2, ""), ("a", "inter_document", 2, "advertiser"), ("a", "inter_document", 2, "agency")}
     assert er.select_k(keys, None) == keys
-    assert er.select_k(keys, [1]) == keys - {("a", "inter_document", 2)}
-    assert er.select_k(keys, [2]) == {("a", "", 0), ("b", "", 0), ("a", "inter_document", 2)}
+    assert er.select_k(keys, [1]) == keys - k2
+    assert er.select_k(keys, [2]) == {("a", "", 0, ""), ("b", "", 0, "")} | k2
     assert er.select_k(keys, [1, 2]) == keys
     assert er.select_k(keys, None) is not keys   # a copy
 
 
 @pytest.mark.parametrize("bad", [[], [0], [-1], [1, 1], [True], [1.0], (1,), 1, [3]])
 def test_select_k_refuses_a_malformed_or_absent_k(bad):
-    keys = er.row_keys(_with_x(MAIN_ROWS + [K2_ROW]))
+    keys = er.row_keys(_with_x(MAIN_ROWS))
     with pytest.raises(AssertionError):
         er.select_k(keys, bad)
 
 
 def test_the_k_stratum_gives_exactly_that_ks_pairs_of_the_unrestricted_set():
-    s = _with_x(MAIN_ROWS + [K2_ROW])
-    rows = MAIN_ROWS + [K2_ROW]
+    s = _with_x(MAIN_ROWS)
 
     def sig(k_values):
         cut = er.restrict_to_rows(s, er.select_k(er.row_keys(s), k_values))
-        return er.pair_signature(cut, er.main_span_pairs(cut, rows, 0))
+        return er.pair_signature(cut, er.main_span_pairs(cut, MAIN_ROWS, "all"))
 
     everything, k1, k2 = sig(None), sig([1]), sig([2])
-    assert len(everything) == 5 and len(k1) == 3 and len(k2) == 2
+    assert len(everything) == 3 and len(k1) == 1 and len(k2) == 2
     assert sorted(k1 + k2) == sorted(everything)
-    assert {inv[2] for inv, _, _ in k1} == {1} and {inv[2] for inv, _, _ in k2} == {2}
-    # the clean twin is the clean row (k = 0) in every pair
-    assert {val[1:3] for _, val, _ in k1 + k2} == {("", 0)}
-    assert k2 == [(("a", "inter_document", 2, "advertiser"), ("a", "", 0, "advertiser"), False),
-                  (("a", "inter_document", 2, "agency"), ("a", "", 0, "agency"), False)]
+    assert {inv[2] for inv, _ in k1} == {1} and {inv[2] for inv, _ in k2} == {2}
+    assert k1 == [(("a", "inter_document", 1, "", "advertiser"), ("a", "", 0, "", "advertiser"))]   # k = 1: the clean row
+    assert k2 == [(("a", "inter_document", 2, "", "advertiser"), ("a", "inter_document", 2, "advertiser", "advertiser")),
+                  (("a", "inter_document", 2, "", "agency"), ("a", "inter_document", 2, "agency", "agency"))]
 
 
 def test_a_common_set_that_drops_a_clean_row_is_refused():
     s = _with_x(MAIN_ROWS)
-    cut = er.restrict_to_rows(s, er.row_keys(s) - {("a", "", 0)})
+    cut = er.restrict_to_rows(s, er.row_keys(s) - {("a", "", 0, "")})
     with pytest.raises(AssertionError, match="without a clean row"):
-        er.main_span_pairs(cut, MAIN_ROWS, 0)
+        er.main_span_pairs(cut, MAIN_ROWS, "all")
+
+
+def test_a_common_set_that_drops_a_patched_row_is_refused():
+    s = _with_x(MAIN_ROWS)
+    cut = er.restrict_to_rows(s, er.row_keys(s) - {("a", "inter_document", 2, "agency")})
+    with pytest.raises(AssertionError, match="patched rows were not judged"):
+        er.main_span_pairs(cut, MAIN_ROWS, "all")
 
 
 def test_run_rows_path_refuses_another_dataset(tmp_path):

@@ -28,7 +28,8 @@ def _entity_items(dataset):
     if dataset == "line":
         strata = {"valid": None, "cross_type": None}
     p = dict(data_root="tests/fixtures/entity_detection_mini", split="train",
-             error_types=["inter_document", "cross_type"], rows_per_stratum=strata, context_token_limit=None)
+             error_types=["inter_document", "cross_type"], rows_per_stratum=strata, context_token_limit=None,
+             **({"read_fields": "all"} if dataset == "main" else {}))
     return edr.build_items(SPECS[dataset], p, 0, REPO_ROOT, None)
 
 

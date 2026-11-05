@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-25T12:54:14.845956+00:00",
+ "generated_at": "2026-11-05T16:21:54.574127+00:00",
  "python": "3.12.5",
  "script": "data/vrdu/build_vrdu_main.py",
  "config_id": "2026-10-24-vrdu-invalids-06",
@@ -71,6 +71,7 @@
  },
  "splits": {
   "train": {
+   "n_patched_rows": 32973,
    "n_valid": 513,
    "strata": {
     "cross_type": {
@@ -1160,6 +1161,7 @@
    }
   },
   "test": {
+   "n_patched_rows": 8066,
    "n_valid": 128,
    "strata": {
     "cross_type": {
@@ -1559,8 +1561,10 @@
  },
  "sha256": {
   "main/train.json": "6c0998658a38cf8604710abbcf93373baa8709282f76cb078fd661eff99a42b6",
-  "main/test.json": "e75f7b48aedc4a6107feb0beeb42d10b3b1afc40c0c3896b656557f38ec3805d"
+  "main/train_eval.json": "a5dd45d0b7d43d352c4d47d077bf4581d0c625cf8da492fe9034fd9bdb6fdb30",
+  "main/test.json": "e75f7b48aedc4a6107feb0beeb42d10b3b1afc40c0c3896b656557f38ec3805d",
+  "main/test_eval.json": "6164a6bca3bb270828c3a77c539c09d825f4afe223e9ad2098a820ac1beacf23"
  },
- "git_sha": "4fba69b69171d4bccbecd418ff1777d3e830d87f",
+ "git_sha": "5fb68a6f59f753c710b1cdb988a4a70ad93c1db2",
  "git_dirty": true
 }

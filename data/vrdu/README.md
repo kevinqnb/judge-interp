@@ -45,13 +45,13 @@ Null fields can be filled (`corrupt_from_null`). Every corrupted source records 
 |---|---|---|---|
 | rows (train / test) | 513 / 128 | 4,617 / 1,152 | 3,836 / 944 |
 
-**Evaluation:** `main_samples.main_entity_pairs(rows, seed)` gives one pair per corrupted span:
-- the invalid span;
-- its clean twin, the same (document, field) span in the clean row.
+**Patched rows** (`main/{train,test}_eval.json` (the files the judges run: all rows plus these), written by `build_vrdu_main.py`): for every corrupted
+span with a non-null original value in a row with k >= 2, the row with only that span restored (`patch_target`,
+`parent_k`; k = k_parent - 1). 32,973 / 8,066 rows. A k = 1 patch is the clean row.
 
-A null-fill span has no clean value, so its twin is the same field from another document
-(`null_fill=True`; drop these pairs to evaluate without null-fill). This gives 39,453 / 9,751 pairs,
-of which 5,598 / 1,472 are null-fill. `cross_type` thins out at k ≥ 7 (test: 109 docs at k=7, 69 at k=8).
+**Evaluation:** `main_samples.patched_entity_pairs(rows, patched)` gives one pair per such span: the corrupted
+span (invalid) and the same field in its patched row (valid). Only the target differs. Null-fill spans have no
+counterpart and are dropped. `cross_type` thins out at k >= 7 (test: 109 docs at k=7, 69 at k=8).
 
 ## line
 
