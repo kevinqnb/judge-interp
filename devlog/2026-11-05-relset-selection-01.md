@@ -25,3 +25,19 @@ config: analysis/configs/relation_set_detection/2026-11-05-relset-corrupted-pare
 
 b8c51c2 relation set detection: EVAL LOGIC CHANGE, selection = null | corrupted_parents (paired removed)
 64d15f7 configs: relation set detection on corrupted-parent subsets (smoke and full)
+
+## Session 2026-11-05 (2)
+
+### Prompts
+
+- Randomly subsample the corrupted-parents set so that subset sizes and field combinations are balanced; make it the behavior of the corrupted-parents setting, not a new selection setting.
+- Commit it, add it to the previous devlog, and submit the full balanced run.
+
+### Implemented
+
+`params.selection: corrupted_parents` in `analysis/relation_set_detection.py` now takes every corrupted-parent row and then randomly subsamples, for train and test, to as many valid as invalid rows in every (error type, field set) cell (`balance_cells`, seeded by the config's `seed`; one-class cells are dropped). On the test side the draw is made after the common set, so every method is scored on the same exactly balanced rows and over-length drops are not confused with balancing. The field-set structure baseline is therefore asserted at AUROC exactly 0.5 (`structure_baseline(..., assert_chance)`). This changes eval logic: the unbalanced corrupted-parents behavior is gone and its earlier run is not reproducible; with `selection: null` a smoke run's `metrics.json` is identical before and after. The balanced test size of a smoke run matched a recomputation from the raw subsets files. Configs: `analysis/configs/relation_set_detection/2026-11-05-relset-corrupted-parents-balanced-{smoke-,}01.yaml`; the full run is submitted, not yet read.
+
+### Commits
+
+2ef5629 relation set detection: EVAL LOGIC CHANGE, corrupted_parents is balanced per (error type, field set)
+a5f802c configs: relation set detection on balanced corrupted-parent subsets (smoke and full)
