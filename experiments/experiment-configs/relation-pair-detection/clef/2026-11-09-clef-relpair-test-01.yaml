@@ -1,0 +1,24 @@
+id: 2026-11-09-clef-relpair-test-01
+project: judge-interp
+task: clef_relation_conditional
+description: >-
+  Relation pair detection judge: one conditional sample per entity pair of every CORRUPTED test row of the line dataset (-07), 7422 pairs (4063 valid, label = the pair's size-2 subset `valid`; 1998 valid pairs show a corrupted member). Samples built by `experiments/clef_samples.py --data-root data/vrdu --split test --source line_pairs --seed 0` (seed 0 = the LM runs' seed, so each pair's primary / condition is the LM's first / second field). One noul question per pair.
+  Over-length documents (> max_length) are excluded and recorded. Walltime: 7422 records x 0.7-1.2 s = 1.5-2.5 h, doubled.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/clef.yaml
+  device: cuda
+  overlong_docs: exclude
+  context_control: none
+  determinism_check_n: 5
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-test-pairs.json
+
+  # -- experiments/submit.sh resources (as the 2026-10-27 Clef runs) --
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "06:00:00"

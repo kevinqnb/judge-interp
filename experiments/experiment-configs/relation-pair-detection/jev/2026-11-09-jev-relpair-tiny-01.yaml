@@ -1,0 +1,20 @@
+id: 2026-11-09-jev-relpair-tiny-01
+project: judge-interp
+task: jev_relation_conditional
+description: >-
+  Tiny end-to-end gate for the pair judges: the 40 pairs of the 4 corrupted rows drawn by 2026-11-09-*-relpair-line-tiny-01 (21 valid), filtered by subset_id from conditional-test-pairs.json (the subset_ids of the spans with parent_valid false of judge_interp.relation_pair_detection.build_items(LINE, <that config's params with context_token_limit null>, 0, repo root); the analysis re-checks every judged pair's orientation against the LM run). Samples built by `experiments/clef_samples.py --data-root data/vrdu --split test --source line_pairs --seed 0` (seed 0 = the LM runs' seed, so each pair's primary / condition is the LM's first / second field). Expected: n_predictions = 40 (21 valid), known-answer and rescoring checks pass.
+  No length pre-filter: a request over the API's context limit fails the run.
+seed: 0
+params:
+  data_root: data
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  model_config: experiments/model-configs/jev.yaml
+  context_control: none
+  determinism_check_n: 5
+  determinism_atol: 0.15
+  known_answer_check: true
+  samples_path: experiments/clef-samples/conditional-test-pairs-tiny.json
+
+  # -- experiments/submit.sh --api resources (CPU job: the model runs remotely) --
+  omp: 4
+  walltime: "00:30:00"

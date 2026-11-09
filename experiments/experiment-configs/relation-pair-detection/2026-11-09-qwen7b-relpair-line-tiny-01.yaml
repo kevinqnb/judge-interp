@@ -1,0 +1,36 @@
+id: 2026-11-09-qwen7b-relpair-line-tiny-01
+project: judge-interp
+task: relation_pair_detection
+description: >-
+  Tiny end-to-end gate for relation pair detection: test split, 1 pair id per cell (seeded), i.e. 8 prompts (4 corrupted rows + their clean twins), every row m = 5. Confirms GPU plumbing, the single read token, prefix-cache equivalence (check_n 4) and label bookkeeping only. Predicted (computed from the data before submission): n_prompts = 8, n_spans = 80 pairs, n_spans_corrupted_parent = 40 (21 valid), n_valid_spans_with_corrupted_member = 8, n_spans_ncorr2 = 5, eff_prefix_cache_max_rel_diff <= prefix_cache_rtol.
+seed: 0
+params:
+  data_root: data
+  model: Qwen/Qwen2.5-7B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  split: test
+  # the size-2 rows of this file label the pairs (relative to data_root)
+  subsets_path: vrdu/line/{split}_subsets.json
+  # 28 blocks: 0 = token embedding (identical for every pair -> null control), 28 = post-final-norm.
+  layers: [0, 8, 14, 20, 24, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  prefix_cache: true
+  prefix_cache_check_n: 4
+  prefix_cache_rtol: 0.1
+  error_types: [intra_document, cross_item]
+  # pairs (an invalid row + its clean twin) per cell; null = every pair
+  rows_per_stratum:
+    intra_document:k3: 1
+    intra_document:k2: 1
+    intra_document:k1: 1
+    cross_item:k2: 1
+
+  # -- experiments/submit.sh resources (as the 2026-10-27 relation runs: L40S pinned for comparable runtimes) --
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "00:30:00"
