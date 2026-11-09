@@ -1,7 +1,7 @@
 # Evaluation
 
-How entity detection and relation detection are scored. Code: `entity_detection.py`, `relation_set_detection.py`
-(full details in their docstrings); datasets: `data/vrdu/README.md`.
+How entity detection and relation detection are scored. Code: `entity_detection.py`, `relation_set_detection.py`,
+`relation_pair_detection.py` (full details in their docstrings); datasets: `data/vrdu/README.md`.
 
 **Methods.** All are scored on the same test items, with the same code path.
 - *Probes* (per model): logistic regression on hidden-state activations, trained on train-run activations, scored on test.
@@ -74,3 +74,27 @@ clean parent.
 - Sum vs ablation: document-bootstrap AUROC difference.
 - With `selection: null`, a second control report drops the strict subsets of clean parents (all valid), so "clean
   parent" and "short" are not confounded with the label.
+
+---
+
+## Relation pair detection (`line` pairs)
+
+**Item: an entity pair.** Two fields of a full-length sample (a size-2 row of `line/<split>_subsets.json`), labelled by
+its own `valid` (label rule). The LM prompt lists all C(m, 2) pairs of the row, one per line, in a seeded random order and
+orientation shared by the row and its clean twin, and reads each pair at its line's `' "\n'`. Judges (Clef, Jev
+`conditional`) see one pair per prompt, in the LM's orientation (asserted).
+
+**Selection (train and test).** Pairs of corrupted parents only, randomly balanced to 50/50 in every (error type, field
+pair) cell; the test draw is made from the common set.
+
+**Probe.** Logistic regression on the pair's activation at one layer (per-document mean-centred).
+
+**Strata.** Error type, cell, field pair, corrupted members (0/1/2), pair position, parent size, and whether a corrupted
+pair was shown earlier in the prompt.
+
+**Controls.**
+- Structure baseline: field-pair one-hot, AUROC exactly 0.5 (asserted).
+- Train-label shuffle: AUROC ~ 0.5 (asserted, probes only). Seed determinism (asserted, probes only).
+- Layer 0 constant over all pairs (asserted).
+- Prefix known answer: pairs shown before a corrupted prompt's first corrupted pair equal the clean twin's up to
+  `prefix_match_rtol` (asserted, probes only).
