@@ -18,6 +18,11 @@ relation_detection_mini and entity_detection_mini (same rows):
 judge_interp_mini:
     doc-beta li0 = {7, Evening News, 02/10/20, 02/17/20, null}
     cross_item:k2      the four non-null fields; channel <-> program_desc
+relation_pair_detection_mini (doc-a's items as above; also writes train_subsets.json and the OCR text):
+    intra_document:k1  doc-a li2, all five fields; program_start_date <- li1 (01/11/20), so the pair
+                       (channel 8, program_start_date 01/11/20) is li1's: valid despite a corrupted member
+    cross_item:k2      doc-a li0, all five fields; channel <-> sub_amount
+    intra_document:k1  doc-a li1, its four non-null fields; channel <- li0
 """
 from __future__ import annotations
 
@@ -59,15 +64,31 @@ def swap(it, fields, a, c):
     return b.make_pair({"item": it, "fields": fields, "values": values, "field_errors": errors}, (b.CROSS_ITEM, 2))
 
 
-def write(name, items, pairs):
+def write(name, items, pairs, subsets=False):
     eq = b.make_eq(b.field_kinds(KINDS), PIVOT)
     rows = [r for p in pairs for r in p]
     for cell in sorted({(r["error_type"], r["k"]) for r in rows if not r["valid"]}, key=b.cell_id):   # a cell may hold several pairs
         in_cell = [r for r in rows if r["cell"] == b.cell_id(cell)]
         b.verify_split(in_cell, items, [cell], [2, 5], len(in_cell) // 2, eq, DATES, PIVOT)
     path = FIXTURES / name / "vrdu" / "line" / "train.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
     print(f"{path.relative_to(ROOT)}: {len(rows)} rows")
+    if subsets:
+        sub, _ = b.build_subsets(rows, items, 2, eq)
+        b.verify_subsets(sub, rows, items, 2, eq)
+        sub_path = path.with_name("train_subsets.json")
+        sub_path.write_text(json.dumps(sub, indent=1) + "\n", encoding="utf-8")
+        print(f"{sub_path.relative_to(ROOT)}: {len(sub)} rows")
+
+
+def ocr_text(items):
+    """A minimal OCR text listing each line item (one per document)."""
+    docs = {}
+    for it in items:
+        cells = [f"Ch. {it['channel']}", it["program_desc"], f"{it['program_start_date']} - {it['program_end_date']}", it["sub_amount"]]
+        docs.setdefault(it["document_id"], ["CONTRACT"]).append(" ".join(c for c in cells if c))
+    return {d: "\n".join(lines) + "\n" for d, lines in docs.items()}
 
 
 def main():
@@ -83,6 +104,16 @@ def main():
              swap(b0, list(b.LINE_FIELDS), "program_desc", "channel")]
     for name in ("relation_detection_mini", "entity_detection_mini"):
         write(name, items, pairs)
+
+    doc_a = [a0, a1, a2]
+    write("relation_pair_detection_mini", doc_a,
+          [intra(a2, list(b.LINE_FIELDS), {"program_start_date": 1}, by_id),
+           swap(a0, list(b.LINE_FIELDS), "channel", "sub_amount"),
+           intra(a1, [f for f in b.LINE_FIELDS if a1[f] is not None], {"channel": 0}, by_id)], subsets=True)
+    for doc, text in ocr_text(doc_a).items():
+        ocr = FIXTURES / "relation_pair_detection_mini" / "vrdu" / "ocr" / f"{doc}.txt"
+        ocr.parent.mkdir(parents=True, exist_ok=True)
+        ocr.write_text(text, encoding="utf-8")
 
     beta = item("doc-beta", 0, "7", "Evening News", "02/10/20", "02/17/20", None)
     write("judge_interp_mini", [beta], [swap(beta, [f for f in b.LINE_FIELDS if beta[f] is not None], "channel", "program_desc")])

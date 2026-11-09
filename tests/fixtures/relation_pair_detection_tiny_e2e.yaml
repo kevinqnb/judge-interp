@@ -1,0 +1,28 @@
+id: relation_pair_detection_tiny_e2e
+project: judge-interp
+task: relation_pair_detection
+description: >-
+  Tiny end-to-end fixture for experiments/run_experiment.py's relation_pair_detection task: Qwen2.5-0.5B-Instruct
+  on CPU over tests/fixtures/relation_pair_detection_mini, every row (see tests/test_relation_pair_detection.py).
+  Plumbing and determinism only. Expected: n_prompts = 6, n_spans = 10 + 10 + 10 + 10 + 6 + 6 = 52 pairs,
+  n_spans_corrupted_parent = 26 (13 invalid: 3 + 7 + 3; 13 valid), n_valid_spans_with_corrupted_member = 1
+  (doc-a li2: channel 8 with li1's program_start_date), n_spans_ncorr2 = 1 (the swapped pair).
+seed: 0
+params:
+  data_root: tests/fixtures/relation_pair_detection_mini
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  split: train
+  subsets_path: vrdu/line/{split}_subsets.json
+  layers: [0, 12, "last"]
+  dtype: float32
+  device: cpu
+  context_token_limit: null
+  verify_read_point: true
+  prefix_cache: true
+  prefix_cache_check_n: 2
+  prefix_cache_rtol: 0.001
+  error_types: [intra_document, cross_item]
+  rows_per_stratum:
+    intra_document:k1: null
+    cross_item:k2: null

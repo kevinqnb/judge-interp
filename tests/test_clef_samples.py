@@ -143,3 +143,43 @@ def test_build_subsets_refuses_a_stale_file(data_root, tmp_path):
     (data_root / "line" / "test_subsets.json").write_text(json.dumps(rows[:-1]))
     with pytest.raises(AssertionError, match="stale"):
         cs.build(data_root, "test", "subsets", tmp_path / "out")
+
+
+# ---------------------------------------------------------------- line_pairs (relation pair detection)
+PAIR_FIXTURE = REPO_ROOT / "tests/fixtures/relation_pair_detection_mini/vrdu/line"
+
+
+def test_line_pairs_follow_the_lm_prompts_orientation_and_the_subsets_labels():
+    from judge_interp import relation_pair_detection as rp
+
+    parents = json.loads((PAIR_FIXTURE / "train.json").read_text())
+    subsets = json.loads((PAIR_FIXTURE / "train_subsets.json").read_text())
+    samples = cs.pair_samples(parents, subsets, 0)
+    p = dict(data_root="tests/fixtures/relation_pair_detection_mini", split="train", error_types=list(LINE.error_types),
+             rows_per_stratum={"cross_item:k2": None, "intra_document:k1": None}, context_token_limit=None,
+             subsets_path="vrdu/line/{split}_subsets.json")
+    lm = {sp["subset_id"]: sp for it in rp.build_items(LINE, p, 0, REPO_ROOT) for sp in it["spans"] if not sp["parent_valid"]}
+    assert sorted(s["sample_id"] for s in samples) == sorted(lm)   # every corrupted-parent pair, nothing else
+    for s in samples:
+        sp = lm[s["sample_id"]]
+        assert (s["primary"]["field"], s["conditions"][0]["field"]) == (sp["field_a"], sp["field_b"])
+        assert (s["primary"]["value"], s["conditions"][0]["value"]) == (sp["value_a"], sp["value_b"])
+        assert (not s["primary"]["valid"], not s["conditions"][0]["valid"]) == (sp["corrupted_a"], sp["corrupted_b"])
+        assert s["label_valid"] == sp["label_valid"] and s["error_type"] == sp["row_error_type"] != ""
+    assert cs.pair_samples(parents, subsets, 1) != samples   # the seed moves the orientation
+
+
+def test_build_line_pairs_writes_a_file_that_clef_loads(data_root, tmp_path):
+    prov = cs.build_line_pairs(data_root, "test", 0, tmp_path / "out")
+    assert prov["seed"] == 0 and list(prov["files"]) == ["conditional-test-pairs.json"]
+    samples = clef.load_samples(tmp_path / "out" / "conditional-test-pairs.json", LINE, "clef_relation_conditional")
+    parents = json.loads((data_root / "line" / "test.json").read_text())
+    assert len(samples) == sum(r["m"] * (r["m"] - 1) // 2 for r in parents if not r["valid"])
+    assert clef.conditional_units(samples, LINE, {s["document_id"]: "ctx" for s in samples})
+
+
+def test_line_pairs_needs_a_seed(data_root, tmp_path):
+    with pytest.raises(SystemExit):
+        cs.main(["--data-root", str(data_root), "--split", "test", "--source", "line_pairs", "--out-dir", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        cs.main(["--data-root", str(data_root), "--split", "test", "--source", "pairs", "--seed", "0", "--out-dir", str(tmp_path)])

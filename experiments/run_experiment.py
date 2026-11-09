@@ -25,6 +25,9 @@ Tasks
 ``relation_detection`` (``judge_interp.relation_detection``): the same read-out with
     instructions asking whether a row's values belong to the same item; the dataset must
     have ``supports_relation``.
+``relation_pair_detection`` (``judge_interp.relation_pair_detection``): one prompt per row listing every
+    pair of its entities (seeded order), the hidden state read at the end of each pair line; labels from
+    the size-2 rows of ``params.subsets_path``. A paired dataset with ``supports_relation`` only.
 ``clef_entity_row`` / ``clef_relation_conditional`` / ``clef_record_oneshot`` (``judge_interp.clef``):
     the Cloudflare clef-flash model as a direct judge; no representations are collected. The
     entity task judges dataset rows; the other two judge the samples of a samples file
@@ -70,6 +73,8 @@ config loading, snapshots, the manifest (``status`` is ``success`` or ``failed``
                        stratum smaller than n is a hard error. Drawn with ``seed``.
                        For a paired dataset: {"<cell>": n, ...} over the cells present,
                        n pairs per cell (both rows of a pair are kept).
+    subsets_path       (relation_pair_detection only) subsets file with a ``{split}`` placeholder, relative to
+                       ``data_root`` (e.g. ``vrdu/line/{split}_subsets.json``); its size-2 rows label the pairs
 
 ``params`` of the three Clef tasks: ``data_root`` and ``dataset_config`` as above, plus
     model_config       repo-relative path of a model config
@@ -100,7 +105,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from judge_interp import clef, entity_detection, jev, relation_detection  # noqa: E402
+from judge_interp import clef, entity_detection, jev, relation_detection, relation_pair_detection  # noqa: E402
 from judge_interp.dataset_spec import load_dataset_spec  # noqa: E402
 from judge_interp.model_config import load_clef_model_config, load_jev_model_config  # noqa: E402
 
@@ -110,6 +115,7 @@ from judge_interp.model_config import load_clef_model_config, load_jev_model_con
 _TASK_MODULES = {
     "entity_detection": entity_detection,
     "relation_detection": relation_detection,
+    "relation_pair_detection": relation_pair_detection,
     "clef_entity_row": clef,
     "clef_relation_conditional": clef,
     "clef_record_oneshot": clef,
@@ -180,7 +186,7 @@ def load_config(path: Path) -> dict:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
     spec = load_dataset_spec(REPO_ROOT / params["dataset_config"])
-    if task in ("relation_detection", *clef.SAMPLE_TASKS, *jev.SAMPLE_TASKS):
+    if task in ("relation_detection", "relation_pair_detection", *clef.SAMPLE_TASKS, *jev.SAMPLE_TASKS):
         spec.require_relation()
     return cfg
 
