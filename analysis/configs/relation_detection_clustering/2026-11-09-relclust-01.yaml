@@ -1,0 +1,45 @@
+id: 2026-11-09-relclust-01
+project: judge-interp
+description: >-
+  Do the entities of one line item cluster inside a corrupted full-row prompt (line, -07 test runs, Qwen2.5-7B L24 and Llama-3.1-8B L28)?
+  See analysis/relation_detection_clustering.py.
+seed: 0
+params:
+  models:
+    - {label: qwen7b_l24, run_id: 2026-10-27-qwen7b-relation-line-test-01, layer: 24}
+    - {label: llama8b_l28, run_id: 2026-10-27-llama8b-relation-line-test-01, layer: 28}
+  preprocess: [raw, field_doc_mean]
+  distances: [euclidean, cosine]
+  # metric membership: provenance = known source line item; value = unique value match only (see the module docstring)
+  memberships: [provenance, value]
+  # prompts with a field whose (document, field) group has fewer rows are excluded (a 2-row group centres to +-half a difference)
+  min_rows_per_doc_field: 8
+  # an entity centred to norm <= this (identical in every row of its group) is zero: its prompt is excluded
+  zero_norm_tol: 1.0e-6
+  max_docs: null
+  n_permutations: 200
+  random_tolerance: 0.05
+  random_min_prompts: 100
+  n_boot: 1000
+  ci_level: 0.95
+  # example figures
+  plot_preprocess: field_doc_mean
+  example_cells: [intra_document:k1, intra_document:k2, intra_document:k3, cross_item:k2]
+  example_m: 5
+  n_example_docs: 3
+  plot:
+    native_colour: "#1f77b4"
+    corrupted_colour: "#d62728"
+    link_native_colour: "#000000"
+    link_incidental_colour: "#c8c8c8"
+    link_width: 1.0
+    panel_size: 3.4
+    marker_size: 60
+    field_names: {channel: channel, program_desc: desc, program_start_date: start, program_end_date: end, sub_amount: amount}
+    label_fontsize: 7
+    title_fontsize: 8
+    dpi: 150
+  # -- experiments/submit.sh --analysis resources (CPU only; PLACEHOLDERS: the smoke on 20 docs took ~1 min; 8498 x 3584 float64 copies ~0.25 GB each) --
+  omp: 4
+  thread_cap: 4
+  walltime: "01:00:00"
