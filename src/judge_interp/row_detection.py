@@ -386,7 +386,20 @@ class RowDetectionLM(RepresentationLM):
     first trace, so construction excludes the load and no weights are on the device yet:
     ``verify_seconds`` (the first trace, when ``verify_read_point`` is on) carries the load, and
     ``weights_bytes`` is read at the end of ``collect_rows``.
+
+    A task whose spans are not one entity each (``relation_pair_detection``) overrides
+    ``span_meta_keys``, ``check_invariants`` and ``compute_metrics``.
     """
+
+    span_meta_keys: tuple[str, ...] = SPAN_META_KEYS
+
+    def check_invariants(self, result: dict) -> None:
+        """Label bookkeeping of the aggregated spans (``check_row_invariants``)."""
+        check_row_invariants(result)
+
+    def compute_metrics(self, result: dict, spec: DatasetSpec) -> dict:
+        """The run's flat metrics (``compute_metrics``)."""
+        return compute_metrics(result, spec)
 
     def __init__(self, *args, prefix_cache: bool, prefix_cache_check_n: int, prefix_cache_rtol: float, **kwargs):
         if not isinstance(prefix_cache, bool):
@@ -492,7 +505,7 @@ class RowDetectionLM(RepresentationLM):
         token_index: list[int] = []
         token_id: list[int] = []
         n_chars: list[int] = []
-        for span in spans:
+        for n_span, span in enumerate(spans):
             assert span["char_end"] - span["char_start"] == 1, "a span must be exactly one character"
             pos = shift + span["char_start"]
             idx = self._last_token_covering(offsets, pos)
@@ -500,11 +513,11 @@ class RowDetectionLM(RepresentationLM):
             assert s <= pos < e
             # The context may contain the same strings; the read must be in the query.
             assert shift <= s < shift + len(query), (
-                f"{span['field']!r}: token {idx} starts outside the EXTRACTED RECORD block"
+                f"span {n_span}: token {idx} starts outside the EXTRACTED RECORD block"
             )
             tid = int(input_ids[idx])
             assert self.tokenizer.decode([tid]) == READ_TOKEN, (
-                f"{span['field']!r}: read token {idx} is {self.tokenizer.decode([tid])!r}, expected {READ_TOKEN!r}"
+                f"span {n_span}: read token {idx} is {self.tokenizer.decode([tid])!r}, expected {READ_TOKEN!r}"
             )
             token_index.append(idx)
             token_id.append(tid)
@@ -645,7 +658,7 @@ class RowDetectionLM(RepresentationLM):
             for it in doc_items:
                 assert it["spans"], f"{doc_id!r}: item with no spans"
                 for sp in it["spans"]:
-                    assert set(sp) == {"char_start", "char_end", *SPAN_META_KEYS}, sorted(sp)
+                    assert set(sp) == {"char_start", "char_end", *self.span_meta_keys}, sorted(sp)
 
         self.n_shards_resumed = 0
         if verify_read_point:
@@ -685,7 +698,7 @@ class RowDetectionLM(RepresentationLM):
         """
         per_layer: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
         cols: dict[str, list] = {k: [] for k in _MODEL_KEYS}
-        meta: dict[str, list] = {k: [] for k in SPAN_META_KEYS}
+        meta: dict[str, list] = {k: [] for k in self.span_meta_keys}
         row_eff: list[dict] = []
 
         for it in doc_items:
@@ -698,7 +711,7 @@ class RowDetectionLM(RepresentationLM):
                 cols[k].extend(res[k].tolist())
             cols["prompt_n_tokens"].extend([res["prompt_n_tokens"]] * n)
             for sp in it["spans"]:
-                for k in SPAN_META_KEYS:
+                for k in self.span_meta_keys:
                     meta[k].append(sp[k])
 
         payload = {
@@ -713,7 +726,7 @@ class RowDetectionLM(RepresentationLM):
             payload[k] = to_npz_array(v)
         for L in self.layers:
             payload[f"rep_{L}"] = np.concatenate(per_layer[L], axis=0).astype(np.float32)
-        for k in SPAN_META_KEYS:
+        for k in self.span_meta_keys:
             payload[f"meta_{k}"] = to_npz_array(meta[k])
 
         tmp = shard.with_name(shard.stem + ".tmp.npz")
@@ -734,7 +747,7 @@ class RowDetectionLM(RepresentationLM):
         """
         rep_blocks: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
         cols: dict[str, list[np.ndarray]] = {k: [] for k in _MODEL_KEYS}
-        meta: dict[str, list[np.ndarray]] = {k: [] for k in SPAN_META_KEYS}
+        meta: dict[str, list[np.ndarray]] = {k: [] for k in self.span_meta_keys}
         doc_id_col: list[np.ndarray] = []
         eff_parts: dict[str, list[np.ndarray]] = {k: [] for k in EFFICIENCY_KEYS}
         gpu_names: set[str] = set()
@@ -753,7 +766,7 @@ class RowDetectionLM(RepresentationLM):
                     rep_blocks[L].append(z[f"rep_{L}"])
                 for k in cols:
                     cols[k].append(z[k])
-                for k in SPAN_META_KEYS:
+                for k in self.span_meta_keys:
                     meta[k].append(z[f"meta_{k}"])
                 doc_id_col.append(np.asarray([doc_id] * n, dtype=object).astype("U"))
 
@@ -776,7 +789,7 @@ class RowDetectionLM(RepresentationLM):
         for k, v in out.items():
             if k not in ("representations", "layers"):
                 assert len(v) == n, f"{k}: len {len(v)} != n {n}"
-        check_row_invariants(out)
+        self.check_invariants(out)
         assert len(gpu_names) == 1, f"shards were measured on different devices: {sorted(gpu_names)}"
         rows = {k: np.concatenate(v, axis=0) for k, v in eff_parts.items()}
         n_prompts = len(_prompt_groups(out)[0])
@@ -1058,7 +1071,7 @@ def run_rows(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, build
     t0 = meter.now()
     write_span_representations(result, npz_path)
     final_write_seconds = meter.now() - t0
-    metrics = compute_metrics(result, spec)
+    metrics = rlm.compute_metrics(result, spec)
     metrics.update(write_efficiency(
         run_dir, rlm, result, npz_path, dict(
             model_load_seconds=model_load_seconds, build_items_seconds=build_items_seconds,
