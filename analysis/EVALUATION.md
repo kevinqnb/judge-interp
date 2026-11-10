@@ -84,8 +84,15 @@ its own `valid` (label rule). The LM prompt lists all C(m, 2) pairs of the row, 
 orientation shared by the row and its clean twin, and reads each pair at its line's `' "\n'`. Judges (Clef, Jev
 `conditional`) see one pair per prompt, in the LM's orientation (asserted).
 
-**Selection (train and test).** Pairs of corrupted parents only, randomly balanced to 50/50 in every (error type, field
-pair) cell; the test draw is made from the common set.
+**Prompt variants** (per model spec, `task`). `relation_pair_detection`: `field: "value"` pairs, presence + type +
+relation criteria. `relation_pair_values`: `("value", "value ")` pairs, relatedness only; same rows, pair order and
+orientation. Variants of one model are separate methods on the same pairs; `comparisons` adds a document-bootstrap
+interval of their AUROC difference.
+
+**Selection (train and test).** Pairs of corrupted parents of `error_types` only. With `drop_field_free_mismatch`, the
+pairs are dropped whose label would change if field assignment were ignored (the two values are one item's under
+other fields), so both variants share one label. Randomly balanced to 50/50 in every (error type, field pair) cell; the
+test draw is made from the common set.
 
 **Probe.** Logistic regression on the pair's activation at one layer (per-document mean-centred).
 

@@ -11,8 +11,14 @@ params:
   train_parents: data/vrdu/line/train.json
   test_parents: data/vrdu/line/test.json
   models:
-    - {label: qwen7b_l24, train_run_id: 2026-11-09-qwen7b-relpair-line-train-01, test_run_id: 2026-11-09-qwen7b-relpair-line-test-01, layer: 24}
-    - {label: llama8b_l28, train_run_id: 2026-11-09-llama8b-relpair-line-train-01, test_run_id: 2026-11-09-llama8b-relpair-line-test-01, layer: 28}
+    - {label: qwen7b_l24, train_run_id: 2026-11-09-qwen7b-relpair-line-train-01, test_run_id: 2026-11-09-qwen7b-relpair-line-test-01, layer: 24, task: relation_pair_detection}
+    - {label: llama8b_l28, train_run_id: 2026-11-09-llama8b-relpair-line-train-01, test_run_id: 2026-11-09-llama8b-relpair-line-test-01, layer: 28, task: relation_pair_detection}
+  # the error types whose corrupted parents are selected (train and test); report.error_type_names must name exactly these
+  error_types: [intra_document, cross_item]
+  # drop the pairs whose label would differ if field assignment were ignored (field_free_valid)
+  drop_field_free_mismatch: false
+  # [a, b]: AUROC(a) - AUROC(b) on the evaluated pairs, document-bootstrap interval (report.n_boot resamples)
+  comparisons: []
   # judge: clef | jev (conditional task on experiments/clef-samples/conditional-test-pairs.json)
   judges:
     - {label: clef, judge: clef, run_id: 2026-11-09-clef-relpair-test-01}

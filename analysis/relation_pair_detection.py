@@ -10,8 +10,16 @@ rule against the document's line items; a pair with a corrupted member can be va
 runs (Clef / Jev ``conditional`` on ``experiments/clef_samples.py --source line_pairs``) see one pair per prompt, oriented
 as the LM saw it (asserted).
 
+The prompt variant is per model spec (``task``): ``relation_pair_detection`` (field names, three criteria) or
+``relation_pair_values`` (values only, relatedness only; same rows, pair order and orientation). Two variants of one
+model are two methods of the same analysis, scored on the same pairs; ``params.comparisons`` adds a document-bootstrap
+interval of their AUROC difference.
+
 1. Selection, train and test: pairs of CORRUPTED parents only (every invalid pair comes from a corrupted prompt, so
-   clean-parent pairs would let a "this prompt is corrupted" detector pass as a pair detector), randomly subsampled
+   clean-parent pairs would let a "this prompt is corrupted" detector pass as a pair detector), of the error types
+   ``params.error_types``; with ``params.drop_field_free_mismatch``, minus the pairs whose label would differ if field
+   assignment were ignored (``field_free_valid``: the two values are one item's under two other fields), so the label
+   is the same for a prompt that shows field names and one that does not. Then randomly subsampled
    (the config's ``seed``) to as many valid as invalid pairs in every (error type, unordered field pair) cell
    (``relation_set_detection.balance_cells``; a one-class cell is dropped). The test side is drawn from the pairs every
    method scored, so every method is scored on exactly the same balanced pairs.
@@ -34,6 +42,7 @@ Outputs go to ``$RUNS_ROOT/<id>/`` and ``analysis/figures/<id>/``.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import os
 import shutil
@@ -53,7 +62,7 @@ er, cr, rr = rs.er, rs.cr, rs.rr
 
 REPO_ROOT = rr.REPO_ROOT
 FIGURES_DIR = _here / "figures"
-TASK = "relation_pair_detection"
+TASKS = ("relation_pair_detection", "relation_pair_values")
 JUDGES = ("clef", "jev")
 PAIR_COLS = ("subset_id", "parent_id", "pair_id", "doc", "cell", "error_type", "parent_valid", "fields", "n_corrupted", "y")
 RUN_META = ("row_ordinal", "sample_id", "pair_id", "cell", "row_error_type", "parent_valid", "parent_m", "subset_id",
@@ -113,6 +122,39 @@ def load_pairs(subsets_path: Path, parents_path: Path) -> dict:
     return pair_frame(json.loads(subsets_path.read_text(encoding="utf-8")), json.loads(parents_path.read_text(encoding="utf-8")))
 
 
+def field_free_valid(fr: dict, subsets_path: Path, parents_path: Path) -> np.ndarray:
+    """Per frame pair: would it be valid if field assignment were ignored?
+
+    True iff some line item of the pair's document has its two values under any two distinct fields (by the label
+    rule's ``equivalence_key``, each value keyed as the field it is compared with). Computed for corrupted parents;
+    a clean parent's pairs are valid either way.
+
+    Raises:
+        AssertionError: a stale build, a pair of the file missing from the frame, or a valid pair that is not
+            field-free valid (the field-aware rule must be the stricter one).
+    """
+    build = rr.check_build(parents_path.parent.parent, f"{parents_path.parent.name}/{parents_path.name}")
+    bp = build["config_snapshot"]["params"]
+    eq = rr.make_eq(rr.field_kinds(bp["cross_type"]["kinds"]), bp["dates"]["year_pivot"])
+    items: dict[str, list[dict]] = defaultdict(list)
+    for it in rr.read_base(parents_path.parent / f"{parents_path.stem}_base.json", rr.LINE_FIELDS, ["document_id", "line_index"]):
+        items[it["document_id"]].append(it)
+    keys = {d: rr.item_keys(its, rr.LINE_FIELDS, eq) for d, its in items.items()}
+    out = fr["parent_valid"].copy()
+    done = fr["parent_valid"].copy()
+    for r in json.loads(subsets_path.read_text(encoding="utf-8")):
+        if r["size"] != 2 or r["parent_valid"]:
+            continue
+        i = fr["index"][r["subset_id"]]
+        a, b = (r[f] for f in r["fields"])
+        out[i] = any(rr.matches_keys({g: eq(g, a), h: eq(h, b)}, keys[r["document_id"]])
+                     for g, h in itertools.permutations(rr.LINE_FIELDS, 2))
+        done[i] = True
+    assert done.all(), f"{subsets_path}: {int((~done).sum())} frame pairs not in the file"
+    assert not (fr["y"] & ~out).any(), "a valid pair is not field-free valid"
+    return out
+
+
 def cut(fr: dict, keep: np.ndarray) -> dict:
     """The rows ``keep`` (positions, in the order given) of a frame, with ``index`` rebuilt."""
     keep = np.asarray(keep, dtype=np.int64)
@@ -135,19 +177,20 @@ def after_corruption(run: dict) -> np.ndarray:
     return out
 
 
-def load_pair_run(run_id: str, runs_root: Path, layer: int, max_docs: int | None) -> dict:
-    """One ``relation_pair_detection`` run: ``X`` = the activations at ``layer`` (float32, NOT centred), the
+def load_pair_run(run_id: str, runs_root: Path, layer: int, max_docs: int | None, task: str) -> dict:
+    """One pair run of ``task`` (one of ``TASKS``): ``X`` = the activations at ``layer`` (float32, NOT centred), the
     ``RUN_META`` columns, ``doc_ids``, ``after``, and the run's ``subsets_path`` / parents file.
 
     Raises:
         AssertionError: a failed run, another task, a layer not collected, layer 0 not constant (the read token
             leaks text), or (whole run) counts that differ from ``metrics.json``.
     """
+    assert task in TASKS, f"task {task!r} is not one of {TASKS}"
     run_dir = runs_root / run_id
     manifest = json.loads((run_dir / "run.json").read_text())
     metrics = json.loads((run_dir / "metrics.json").read_text())
     assert manifest["status"] == "success", f"{run_id}: status {manifest['status']!r}"
-    assert manifest["task"] == TASK, f"{run_id}: task {manifest['task']!r}, expected {TASK!r}"
+    assert manifest["task"] == task, f"{run_id}: task {manifest['task']!r}, expected {task!r}"
     params = yaml.safe_load((run_dir / "config.snapshot.yaml").read_text())["params"]
     with np.load(run_dir / "artifacts" / "span_representations.npz", allow_pickle=False) as z:
         layers = z["layers"].tolist()
@@ -182,13 +225,17 @@ def manifest_seed(run_dir: Path) -> int:
     return int(yaml.safe_load((run_dir / "config.snapshot.yaml").read_text())["seed"])
 
 
-def match_run(fr: dict, run: dict, require_all: bool) -> np.ndarray:
+def match_run(fr: dict, run: dict, required: np.ndarray) -> np.ndarray:
     """Each frame row's span index in ``run`` (-1 if the run has no such pair), with the run's labels checked.
+
+    Args:
+        required: bool per frame row: the run must hold it (e.g. every pair of the error types it collected).
 
     Raises:
         AssertionError: a run pair not in the frame, a disagreeing label / document / corrupted count / pair id, or
-            (``require_all``) a frame pair the run lacks.
+            a ``required`` frame pair the run lacks.
     """
+    assert required.dtype == bool and required.shape == fr["y"].shape
     pos = np.full(len(fr["y"]), -1, dtype=np.int64)
     for j, sid in enumerate(run["subset_id"].tolist()):
         assert sid in fr["index"], f"{run['run_id']}: pair {sid!r} is not in the subsets file"
@@ -198,7 +245,7 @@ def match_run(fr: dict, run: dict, require_all: bool) -> np.ndarray:
                        ("corrupted count", fr["n_corrupted"], run["n_corrupted"]), ("pair id", fr["pair_id"], run["pair_id"]),
                        ("parent validity", fr["parent_valid"], run["parent_valid"])):
         assert (a[hit] == b[pos[hit]]).all(), f"{run['run_id']}: {name} differs from the subsets file"
-    assert not (require_all and not hit.all()), f"{run['run_id']}: {int((~hit).sum())} pairs of the file are not in the run"
+    assert hit[required].all(), f"{run['run_id']}: {int((required & ~hit).sum())} required pairs of the file are not in the run"
     return pos
 
 
@@ -380,9 +427,23 @@ def run(cfg: dict, runs_root: Path) -> dict:
     assert len(set(paths.values())) == 4, "train and test files overlap"
     fr_tr, fr_te = load_pairs(paths["train_subsets"], paths["train_parents"]), load_pairs(paths["test_subsets"], paths["test_parents"])
     assert not (set(fr_tr["doc"].tolist()) & set(fr_te["doc"].tolist())), "train/test documents overlap"
+    error_types = list(p["error_types"])
+    assert error_types and len(set(error_types)) == len(error_types), error_types
+    assert set(error_types) <= set(fr_tr["error_type"].tolist()), f"error types {error_types} not all in the data"
+    assert set(error_types) == set(p["report"]["error_type_names"]), "report error_type_names must be exactly params.error_types"
+    assert isinstance(p["drop_field_free_mismatch"], bool)
+
+    def candidates(fr: dict, sub: str, par: str) -> tuple[np.ndarray, int]:
+        """Corrupted-parent pairs of ``error_types`` (minus the field-free mismatches if dropped), and the mismatch count."""
+        cand = ~fr["parent_valid"] & np.isin(fr["error_type"], error_types)
+        mismatch = cand & (fr["y"] != field_free_valid(fr, paths[sub], paths[par]))
+        return (cand & ~mismatch if p["drop_field_free_mismatch"] else cand), int(mismatch.sum())
+
+    cand_tr, n_mis_tr = candidates(fr_tr, "train_subsets", "train_parents")
+    cand_te, n_mis_te = candidates(fr_te, "test_subsets", "test_parents")
 
     # Train side: corrupted parents, balanced per cell; the LM train runs must hold every selected pair.
-    pos_tr, bal_tr = rs.balance_cells(fr_tr, np.flatnonzero(~fr_tr["parent_valid"]), seed)
+    pos_tr, bal_tr = rs.balance_cells(fr_tr, np.flatnonzero(cand_tr), seed)
     tr = cut(fr_tr, pos_tr)
     check_balanced(tr)
 
@@ -392,11 +453,12 @@ def run(cfg: dict, runs_root: Path) -> dict:
         assert isinstance(layer, int) and layer > 0, "layer must be a positive int (layer 0 is the constant null control)"
         runs = {}
         for side, fr, key in (("tr", fr_tr, "train"), ("te", fr_te, "test")):
-            r = load_pair_run(spec[f"{key}_run_id"], runs_root, layer, p["max_docs"])
+            r = load_pair_run(spec[f"{key}_run_id"], runs_root, layer, p["max_docs"], spec["task"])
             assert (r["parents_path"], r["subsets_path"]) == (paths[f"{key}_parents"], paths[f"{key}_subsets"]), (
                 f"{r['run_id']}: judged other files than this config's {key} files")
             seeds.add(r["seed"])
-            r["pos"] = match_run(fr, r, require_all=p["max_docs"] is None)
+            required = np.isin(fr["error_type"], error_types) & (p["max_docs"] is None)
+            r["pos"] = match_run(fr, r, required)
             runs[side] = r
         prefix = prefix_known_answer(runs["te"])   # on raw activations, before centring
         for r in runs.values():
@@ -418,7 +480,7 @@ def run(cfg: dict, runs_root: Path) -> dict:
         check_judge_orientation(label, layout, j)
 
     # Common set: corrupted-parent test pairs every method scored; then balanced.
-    selected = set(np.flatnonzero(~fr_te["parent_valid"]).tolist())
+    selected = set(np.flatnonzero(cand_te).tolist())
     scored = {**{k: set(np.flatnonzero(v["runs"]["te"]["pos"] >= 0).tolist()) & selected for k, v in lms.items()},
               **{k: set(v["idx"].tolist()) & selected for k, v in judges.items()}}
     common = sorted(set.intersection(*scored.values()))
@@ -429,7 +491,8 @@ def run(cfg: dict, runs_root: Path) -> dict:
         ev[c] = layout[c][evaluated]
     check_balanced(ev)
 
-    metrics: dict = {"n_test_pairs_file": len(fr_te["y"]), "n_selected_test_pairs": len(selected), "n_common_test_pairs": len(common)}
+    metrics: dict = {"n_test_pairs_file": len(fr_te["y"]), "n_selected_test_pairs": len(selected), "n_common_test_pairs": len(common),
+                     "n_field_free_mismatch_train": n_mis_tr, "n_field_free_mismatch_test": n_mis_te}
     metrics.update({f"train_{k}": v for k, v in bal_tr.items()})
     metrics.update({f"test_{k}": v for k, v in bal_te.items()})
     for label, s in scored.items():
@@ -457,8 +520,17 @@ def run(cfg: dict, runs_root: Path) -> dict:
         probs_by_method[label] = probs.astype(np.float64)
         metrics.update({f"{label}_{k}": v for k, v in {**score_method(label, ev, probs, p), "n_excluded_overlong": j["n_excluded"], **j["extra"]}.items()})
 
+    # Paired comparisons (e.g. two prompt variants of one model): AUROC(a) - AUROC(b) on the same pairs, with a
+    # document-bootstrap interval (report n_boot resamples).
+    for a, b in p["comparisons"]:
+        assert a in probs_by_method and b in probs_by_method and a != b, (a, b)
+        key = f"{a}_minus_{b}_test_auroc"
+        metrics[key] = metrics[f"{a}_test_auroc"] - metrics[f"{b}_test_auroc"]
+        metrics[f"{key}_ci_lo"], metrics[f"{key}_ci_hi"] = rs.doc_bootstrap_auroc_diff(
+            ev["y"], probs_by_method[a], probs_by_method[b], ev["doc"], p["report"]["n_boot"], p["ci_level"], seed)
+
     rep = p["report"]
-    evset = {"y": ev["y"], "docs": ev["doc"], "error_type": ev["error_type"], "probs": probs_by_method}
+    evset ={"y": ev["y"], "docs": ev["doc"], "error_type": ev["error_type"], "probs": probs_by_method}
     cr.check_evset(evset, list(rep["methods"]))
     cr.assert_matches_existing(evset, metrics)
     cr.save_evset(art_dir / "calibration_predictions.npz", evset, subset_id=ev["subset_id"], fields=ev["fields"])
