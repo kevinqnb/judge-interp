@@ -1,0 +1,60 @@
+id: 2026-11-10-relleace-smoke-01
+project: judge-interp
+description: >-
+  SMOKE (plumbing only; both models, fit on the first 200 train documents, tiny bootstrap/probe sizes): does erasing field type and position (LEACE, fitted on the TRAIN run, concept = one-hot field + one-hot position) from the per-(document, field)-centred entity representations make entities of one line item cluster better (relation detection, line test runs, Qwen2.5-7B L24 and Llama-3.1-8B L28)? Same prompts and metrics as 2026-11-09-relclust-01 (the unerased variant must reproduce its field_doc_mean Euclidean per-prompt numbers), plus the connected-minus-unconnected distance gap and PCA grids of the relclust-01 example prompts per variant. Controls: cross-covariance with the concept vanishes on the train data; the held-out ridge R2 of position falls to ~0; erasing a shuffled concept leaves win_frac unchanged. See analysis/relation_detection_leace.py.
+seed: 0
+params:
+  models:
+    - {label: qwen7b_l24, layer: 24, train_run_id: 2026-10-27-qwen7b-relation-line-train-01, test_run_id: 2026-10-27-qwen7b-relation-line-test-01}
+    - {label: llama8b_l28, layer: 28, train_run_id: 2026-10-27-llama8b-relation-line-train-01, test_run_id: 2026-10-27-llama8b-relation-line-test-01}
+  # the earlier clustering run: its example prompts (examples.json) and per-prompt metrics (field_doc_mean, first distance)
+  examples_from: 2026-11-09-relclust-01
+  baseline_prompt_metrics:
+    qwen7b_l24: 2026-11-09-relclust-01/artifacts/qwen7b_l24_provenance_prompt_metrics.npz
+    llama8b_l28: 2026-11-09-relclust-01/artifacts/llama8b_l28_provenance_prompt_metrics.npz
+  # the first variant is the unerased reference. fit_on: the train vectors the eraser is fitted on (centred = per-(document, field) centred, raw = uncentred)
+  variants:
+    - {name: centred, fit_on: null, shuffle_concept: false}
+    - {name: leace_centred_fit, fit_on: centred, shuffle_concept: false}
+    - {name: leace_raw_fit, fit_on: raw, shuffle_concept: false}
+    - {name: leace_shuffled_concept, fit_on: centred, shuffle_concept: true}
+  distances: [euclidean]
+  min_rows_per_doc_field: 8
+  zero_norm_tol: 1.0e-6
+  max_docs: null
+  # null = the whole train run; an int keeps the first documents (smoke only)
+  train_max_docs: 200
+  # LEACE numerics: eigenvalues of cov(x) below eig_rel_tol x the largest are dropped; singular values below rank_tol x the largest do not count
+  eig_rel_tol: 1.0e-6
+  rank_tol: 1.0e-6
+  # asserted known answers
+  cross_cov_tolerance: 1.0e-3
+  shuffle_tolerance: 0.02
+  # ridge R^2 of the position one-hot from the vectors (train fit, test score): unerased must be >= r2_min_unerased, the erased variant <= r2_tolerance
+  r2_min_unerased: 0.01
+  r2_tolerance: 0.005
+  ridge_alpha: 100.0
+  n_permutations: 5
+  n_boot: 20
+  ci_level: 0.95
+  # linear probes of position and field from the transformed vectors: fitted on a train subsample, scored on every test entity
+  probe_variants: [centred, leace_centred_fit, leace_raw_fit]
+  probe_n_train: 1500
+  probe_c: 1.0
+  probe_max_iter: 100
+  plot:
+    native_colour: "#1f77b4"
+    corrupted_colour: "#d62728"
+    link_native_colour: "#000000"
+    link_incidental_colour: "#c8c8c8"
+    link_width: 1.0
+    panel_size: 3.4
+    marker_size: 60
+    field_names: {channel: channel, program_desc: desc, program_start_date: start, program_end_date: end, sub_amount: amount}
+    label_fontsize: 7
+    title_fontsize: 8
+    dpi: 150
+  # -- experiments/submit.sh --analysis resources (CPU only; PLACEHOLDERS: ~6 GB peak per model for the 42k-entity train run) --
+  omp: 8
+  thread_cap: 8
+  walltime: "01:30:00"
