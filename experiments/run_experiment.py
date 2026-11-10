@@ -107,7 +107,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from judge_interp import clef, entity_detection, jev, relation_detection, relation_pair_detection  # noqa: E402
+from judge_interp import clef, entity_detection, jev, relation_detection, relation_grouping, relation_pair_detection  # noqa: E402
 from judge_interp.dataset_spec import load_dataset_spec  # noqa: E402
 from judge_interp.model_config import load_clef_model_config, load_jev_model_config  # noqa: E402
 
@@ -117,6 +117,7 @@ from judge_interp.model_config import load_clef_model_config, load_jev_model_con
 _TASK_MODULES = {
     "entity_detection": entity_detection,
     "relation_detection": relation_detection,
+    "relation_grouping": relation_grouping,
     "relation_pair_detection": relation_pair_detection,
     "relation_pair_values": relation_pair_detection,
     "clef_entity_row": clef,
@@ -189,7 +190,7 @@ def load_config(path: Path) -> dict:
         raise KeyError(f"params: key(s) not valid for task {task!r}: {sorted(extra)}")
 
     spec = load_dataset_spec(REPO_ROOT / params["dataset_config"])
-    if task in ("relation_detection", "relation_pair_detection", "relation_pair_values", *clef.SAMPLE_TASKS, *jev.SAMPLE_TASKS):
+    if task in ("relation_detection", "relation_grouping", "relation_pair_detection", "relation_pair_values", *clef.SAMPLE_TASKS, *jev.SAMPLE_TASKS):
         spec.require_relation()
     return cfg
 
