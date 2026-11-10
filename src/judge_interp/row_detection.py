@@ -388,10 +388,12 @@ class RowDetectionLM(RepresentationLM):
     ``weights_bytes`` is read at the end of ``collect_rows``.
 
     A task whose spans are not one entity each (``relation_pair_detection``) overrides
-    ``span_meta_keys``, ``check_invariants`` and ``compute_metrics``.
+    ``span_meta_keys``, ``check_invariants`` and ``compute_metrics``; one that renders its spans differently
+    (``relation_pair_values``) overrides ``read_token``, the token every span must resolve to.
     """
 
     span_meta_keys: tuple[str, ...] = SPAN_META_KEYS
+    read_token: str = READ_TOKEN
 
     def check_invariants(self, result: dict) -> None:
         """Label bookkeeping of the aggregated spans (``check_row_invariants``)."""
@@ -484,7 +486,7 @@ class RowDetectionLM(RepresentationLM):
             Dict with ``representations`` (``{layer: float32 [n_spans, hidden]}``),
             ``token_index``, ``token_id`` and ``token_n_chars`` (each ``[n_spans]``),
             ``prompt_n_tokens`` and ``efficiency`` (see ``EFFICIENCY_KEYS``). Every ``token_id`` is
-            that of ``READ_TOKEN``.
+            that of ``self.read_token``.
 
         Raises:
             ValueError: ``spans`` is empty or the prompt exceeds
@@ -516,8 +518,8 @@ class RowDetectionLM(RepresentationLM):
                 f"span {n_span}: token {idx} starts outside the EXTRACTED RECORD block"
             )
             tid = int(input_ids[idx])
-            assert self.tokenizer.decode([tid]) == READ_TOKEN, (
-                f"span {n_span}: read token {idx} is {self.tokenizer.decode([tid])!r}, expected {READ_TOKEN!r}"
+            assert self.tokenizer.decode([tid]) == self.read_token, (
+                f"span {n_span}: read token {idx} is {self.tokenizer.decode([tid])!r}, expected {self.read_token!r}"
             )
             token_index.append(idx)
             token_id.append(tid)
