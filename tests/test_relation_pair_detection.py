@@ -186,6 +186,65 @@ def test_every_pair_is_read_at_the_same_token(model):
         assert lm.tokenizer.decode([ids[reads[-1] + 1]]) == END_OF_TURN[model]
 
 
+@pytest.mark.parametrize("model", list(END_OF_TURN))
+def test_values_variant_every_pair_is_read_at_the_values_token(model):
+    from transformers import AutoTokenizer
+
+    lm = rp.RelationPairValuesLM.__new__(rp.RelationPairValuesLM)
+    lm.tokenizer, lm.model_name = AutoTokenizer.from_pretrained(model), model
+    assert lm.read_token == rp.VALUES_READ_TOKEN == ' ")\n'
+    for it in rp.build_values_items(LINE, _params(), 0, REPO_ROOT):
+        ids, offsets, shift = lm._build_prompt_with_offsets(it["instructions"], it["context"], it["query"])
+        reads = [lm._last_token_covering(offsets, shift + sp["char_start"]) for sp in it["spans"]]
+        assert all(lm.tokenizer.decode([ids[i]]) == lm.read_token for i in reads)
+        assert len(set(reads)) == len(reads)
+        assert lm.tokenizer.decode([ids[reads[-1] + 1]]) == END_OF_TURN[model]
+
+
+# ---------------------------------------------------------------- relation_pair_values (values only)
+def test_render_value_pairs_hand_worked():
+    row = _row("cross_item:k2", False, 0)
+    out = rp.render_value_pairs(row, [("sub_amount", "channel"), ("program_desc", "program_start_date")])
+    assert out["text"] == ('("7", "$100.00 ")\n'
+                           '("Movie", "01/05/20 ")\n')
+    # line 1: '(' 0, '"7"' 1-3, ', ' 4-5, '"$100.00 "' 6-15, ')' 16
+    assert out["spans"][0] == (15, 16)
+    assert out["spans"][1][1] == len(out["text"]) - 2
+    for a, b in out["spans"]:
+        assert out["text"][a - 1:b + 2] == rp.VALUES_READ_TOKEN
+
+
+def test_values_instructions_name_no_field_and_no_type_criterion():
+    text = rp.build_values_instructions(LINE)
+    assert not any(f in text for f in LINE.fields)
+    assert "RELATED" in text and "Type correspondence" not in text and "Explicit support" not in text
+    assert "Type correspondence" in rp.build_instructions(LINE)   # the full prompt still has it
+    with pytest.raises(ValueError, match="relation"):
+        rp.build_values_instructions(MAIN)
+
+
+def test_values_items_equal_the_full_items_but_for_the_prompt():
+    full, vals = _items(), rp.build_values_items(LINE, _params(), 0, REPO_ROOT)
+    assert len(full) == len(vals)
+    for a, b in zip(full, vals):
+        assert (a["document_id"], a["row_ordinal"], a["context"]) == (b["document_id"], b["row_ordinal"], b["context"])
+        assert a["instructions"] != b["instructions"] and a["query"] != b["query"]
+        strip = lambda s: {k: v for k, v in s.items() if k not in ("char_start", "char_end")}
+        assert [strip(s) for s in a["spans"]] == [strip(s) for s in b["spans"]]
+        lines = b["query"].splitlines()
+        assert all(ln == f'({json.dumps(s["value_a"])}, {json.dumps(s["value_b"])[:-1]} ")' for ln, s in zip(lines, b["spans"]))
+
+
+def test_run_dispatches_on_the_task(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rp, "run_rows", lambda cfg, spec, run_dir, repo_root, build_fn, lm_class: seen.update(b=build_fn, c=lm_class))
+    rp.run({"task": "relation_pair_values"}, LINE, None, None, None)
+    assert (seen["b"], seen["c"]) == (rp.build_values_items, rp.RelationPairValuesLM)
+    rp.run({"task": "relation_pair_detection"}, LINE, None, None, None)
+    assert (seen["b"], seen["c"]) == (rp.build_items, rp.RelationPairDetectionLM)
+    assert rp.RelationPairDetectionLM.read_token == READ_TOKEN
+
+
 def test_fixture_config_loads_and_requires_subsets_path(tmp_path):
     import sys
 

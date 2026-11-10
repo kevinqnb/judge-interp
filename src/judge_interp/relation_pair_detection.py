@@ -20,6 +20,13 @@ dataset's label rule), read from the size-2 rows of the subsets file (``params.s
 another item).
 
 The model side is ``RowDetectionLM`` with this task's span columns (``PAIR_META_KEYS``), invariants and metrics.
+
+Variant ``relation_pair_values`` (a targeted diff of the prompt, everything else equal: rows, pair order and
+orientation, labels, span columns): the instructions ask only whether the two entities describe the same item
+(``_VALUES_HEADER``: no presence / type criteria, no field list), and each line shows the two values without field
+names, ``("$100.00", "7 ")``; the hidden state is read at the merged ``' ")\n'`` token (``VALUES_READ_TOKEN``).
+``field_a`` / ``field_b`` are still recorded (not shown). The labels are the field-aware ones; the analysis drops the
+pairs whose label would differ if field assignment were ignored.
 """
 from __future__ import annotations
 
@@ -66,6 +73,21 @@ Judge only against the context. Do not use outside knowledge about the entities 
 For each pair, answer with exactly one line in the form `<field>, <field>: true` or `<field>, <field>: false`, in the order shown."""
 
 
+_VALUES_HEADER = """You are validating the relationships between entities extracted from a document by an information-extraction pipeline. The entities are the values of one record: {record_description}.
+
+You are given:
+1) In ## CONTEXT: the full {context_description}.
+2) In ## EXTRACTED RECORD: every pair of the record's extracted entities, one pair per line, in the form `(value, value)`, each line ending with a newline. A value is a JSON string in double quotes. The second value of each line is followed by one space before its closing quote; that padding space is not part of the value. The closing parenthesis and the newline after it end the pair.
+
+The document may describe many items of the kind this record describes. For each pair, decide whether its two entities are RELATED. Two entities are related if they are both used in the document to describe the same single item. A pair whose entities describe different items is not related, even though each of them may appear in the document.
+
+Judge only against the context. Do not use outside knowledge about the entities involved, and do not guess when the evidence is unclear: unclear evidence means not related. Judge every pair on its own: one pair's answer has no bearing on another's.
+
+For each pair, answer with exactly one line, `true` (related) or `false` (not related), in the order shown."""
+
+VALUES_READ_TOKEN = _PAD + '")\n'   # pad, closing quote, closing parenthesis and newline merged
+
+
 def build_instructions(spec: DatasetSpec) -> str:
     """The instruction block, fixed for a run.
 
@@ -76,6 +98,16 @@ def build_instructions(spec: DatasetSpec) -> str:
     types = "\n".join(f"- {f}: {spec.field_descriptions[f]}" for f in spec.fields)
     return _HEADER.format(record_description=spec.record_description, context_description=spec.context_description,
                           types=types, criteria=build_criteria(spec, QWEN_DESCRIBED))
+
+
+def build_values_instructions(spec: DatasetSpec) -> str:
+    """The ``relation_pair_values`` instruction block: relatedness only, no field names.
+
+    Raises:
+        ValueError: the dataset does not support the relation tasks.
+    """
+    spec.require_relation()
+    return _VALUES_HEADER.format(record_description=spec.record_description, context_description=spec.context_description)
 
 
 def pair_order(fields: list[str], pair_id: str, seed: int) -> list[tuple[str, str]]:
@@ -125,6 +157,29 @@ def render_pairs(row: dict, order: list[tuple[str, str]]) -> dict:
     return {"text": text, "spans": spans}
 
 
+def render_value_pairs(row: dict, order: list[tuple[str, str]]) -> dict:
+    """``render_pairs`` without field names: one ``("va", "vb ")`` line per pair.
+
+    Returns:
+        As ``render_pairs``; each span covers exactly the closing ``"`` of the second value, which is followed by
+        ``)`` and the newline (together with the pad: ``VALUES_READ_TOKEN``).
+    """
+    lines, spans, offset = [], [], 0
+    for fa, fb in order:
+        va, vb = row[fa], row[fb]
+        assert isinstance(va, str) and isinstance(vb, str), (fa, va, fb, vb)
+        line = f"({json.dumps(va)}, {json.dumps(vb)[:-1]}{_PAD}\")"
+        close = offset + len(line) - 2
+        spans.append((close, close + 1))
+        lines.append(line)
+        offset += len(line) + 1
+    assert lines, "row with no pair"
+    text = "\n".join(lines) + "\n"
+    for a, b in spans:
+        assert text[a - 1:b + 2] == VALUES_READ_TOKEN, (a, text)
+    return {"text": text, "spans": spans}
+
+
 def subset_id(row: dict, a: str, b: str, spec: DatasetSpec) -> str:
     """The id of the size-2 subset row of ``row`` showing fields ``a`` and ``b`` (fields in ``spec.fields`` order)."""
     return f"{row['sample_id']}|{'+'.join(f for f in spec.fields if f in (a, b))}"
@@ -153,6 +208,16 @@ def load_pair_labels(path: Path, spec: DatasetSpec) -> dict[str, dict]:
 
 
 def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
+    """``relation_pair_detection`` items: ``_build_items`` with ``build_instructions`` and ``render_pairs``."""
+    return _build_items(spec, params, seed, repo_root, tokenizer, build_instructions, render_pairs)
+
+
+def build_values_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer=None) -> list[dict]:
+    """``relation_pair_values`` items: ``_build_items`` with ``build_values_instructions`` and ``render_value_pairs``."""
+    return _build_items(spec, params, seed, repo_root, tokenizer, build_values_instructions, render_value_pairs)
+
+
+def _build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tokenizer, instructions_fn, render_fn) -> list[dict]:
     """Build one ``RelationPairDetectionLM.collect_rows`` item per selected row.
 
     Rows are drawn as in ``row_detection.build_items`` (pair by pair, per cell). Each pair's label is its size-2
@@ -165,6 +230,8 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
         seed: run seed: the stratified draw and the pair order.
         repo_root: directory that ``params["data_root"]`` is relative to.
         tokenizer: must be given iff ``params["context_token_limit"]`` is not ``None``.
+        instructions_fn: ``spec -> instructions``.
+        render_fn: ``(row, pair_order) -> {text, spans}`` (``render_pairs`` / ``render_value_pairs``).
 
     Returns:
         Items in ``select_rows`` order: ``document_id``, ``row_ordinal``, ``instructions``, ``context``, ``query`` and
@@ -180,7 +247,7 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
     split, limit = params["split"], params["context_token_limit"]
     if (limit is None) != (tokenizer is None):
         raise ValueError("tokenizer must be given iff context_token_limit is not null")
-    instructions = build_instructions(spec)
+    instructions = instructions_fn(spec)
 
     rows = load_split(data_root, spec, split, params["error_types"])
     for r in rows:
@@ -210,7 +277,7 @@ def build_items(spec: DatasetSpec, params: dict, seed: int, repo_root: Path, tok
         assert n_per_parent.get(sid) == math.comb(len(shown), 2), (
             f"{sid}: {n_per_parent.get(sid)} size-2 subsets, expected C({len(shown)}, 2)")
         order = pair_order(shown, r[spec.pair_key], seed)
-        rendered = render_pairs(r, order)
+        rendered = render_fn(r, order)
         spans = []
         for pos, ((fa, fb), (c0, c1)) in enumerate(zip(order, rendered["spans"]), start=1):
             s = labels[subset_id(r, fa, fb, spec)]
@@ -312,11 +379,21 @@ class RelationPairDetectionLM(RowDetectionLM):
         return compute_metrics(result, spec)
 
 
+class RelationPairValuesLM(RelationPairDetectionLM):
+    """``RelationPairDetectionLM`` read at ``VALUES_READ_TOKEN`` (``relation_pair_values``)."""
+
+    read_token = VALUES_READ_TOKEN
+
+
 assert READ_TOKEN == _PAD + '"\n'   # render_pairs relies on it
-TASK_PARAMS = {"relation_pair_detection": (*ROW_PARAMS, "subsets_path")}
+TASK_PARAMS = {"relation_pair_detection": (*ROW_PARAMS, "subsets_path"),
+               "relation_pair_values": (*ROW_PARAMS, "subsets_path")}
+_TASKS = {"relation_pair_detection": (build_items, RelationPairDetectionLM),
+          "relation_pair_values": (build_values_items, RelationPairValuesLM)}
 
 
 def run(cfg: dict, spec: DatasetSpec, run_dir: Path, repo_root: Path, model_cfg: None) -> dict:
-    """Run the task: see ``row_detection.run_rows``. ``model_cfg`` must be ``None`` (no model config)."""
+    """Run ``cfg["task"]`` (one of ``TASK_PARAMS``): see ``row_detection.run_rows``. ``model_cfg`` must be ``None``."""
     assert model_cfg is None
-    return run_rows(cfg, spec, run_dir, repo_root, build_items, RelationPairDetectionLM)
+    build_fn, lm_class = _TASKS[cfg["task"]]
+    return run_rows(cfg, spec, run_dir, repo_root, build_fn, lm_class)
