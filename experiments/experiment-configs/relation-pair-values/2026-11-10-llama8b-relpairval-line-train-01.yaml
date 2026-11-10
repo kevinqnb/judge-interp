@@ -1,0 +1,35 @@
+id: 2026-11-10-llama8b-relpairval-line-train-01
+project: judge-interp
+task: relation_pair_values
+description: >-
+  Targeted prompt diff of 2026-11-09-llama8b-relpair-line-train-01 (task relation_pair_detection): same rows of the intra-document cells, same pair order and orientation (seed 0, per pair_id), same layers and labels; only the prompt changes. Instructions ask only whether the two entities are RELATED (both describe the same single item of the document): no presence / type criteria, no field list; each pair line shows the two values without field names, ("va", "vb "); the hidden state is read at each line's merged ' ")\n' token. Intra-document cells only (cross_item dropped). Train split, every intra-document row (7500 prompts). Predicted: n_prompts = 7500, n_spans = 55936 pairs, n_spans_corrupted_parent = 27968 (17882 valid), n_valid_spans_with_corrupted_member = 10050, n_spans_ncorr2 = 5000, n_spans_cross_item = 0; one read token id.
+seed: 0
+params:
+  data_root: data
+  model: meta-llama/Llama-3.1-8B-Instruct
+  dataset_config: experiments/dataset-configs/vrdu_line.py
+  split: train
+  # the size-2 rows of this file label the pairs (relative to data_root)
+  subsets_path: vrdu/line/{split}_subsets.json
+  # 32 blocks: 0 = token embedding (identical for every pair -> null control), 32 = post-final-norm.
+  layers: [0, 8, 16, 24, 28, "last"]
+  dtype: bfloat16
+  device: cuda
+  context_token_limit: 28000
+  verify_read_point: true
+  prefix_cache: true
+  prefix_cache_check_n: 4
+  prefix_cache_rtol: 0.1
+  error_types: [intra_document]
+  # pairs (an invalid row + its clean twin) per cell; null = every pair
+  rows_per_stratum:
+    intra_document:k3: null
+    intra_document:k2: null
+    intra_document:k1: null
+
+  # -- experiments/submit.sh resources (as the 2026-10-27 relation runs: L40S pinned for comparable runtimes) --
+  gpu_type: L40S
+  gpu_memory: 48G
+  gpu_c: 8.9
+  omp: 8
+  walltime: "04:00:00"
